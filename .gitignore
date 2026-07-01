@@ -1,0 +1,98 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+backend/.venv/
+backend/env/
+
+# Python Cache & Compiled Files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.pth
+
+# Node.js Dependencies
+node_modules/
+frontend/node_modules/
+**/node_modules/
+
+# Build Outputs
+dist/
+build/
+frontend/dist/
+frontend/build/
+*.bundle.js
+*.bundle.js.map
+
+# Uploads & User Data
+uploads/
+backend/uploads/
+**/uploads/
+
+# ML Models
+backend/overlap_model/
+overlap_model/
+backend/overlap_model.pth
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+.coverage
+.pytest_cache/
+.nyc_output/
+htmlcov/
+
+# OS Files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Package Manager Lock Files (optional - uncomment if you want to ignore)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+bun.lockb
+
+# Database Files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary Files
+*.tmp
+*.temp
+.cache/
+
+Application
+/Application
+

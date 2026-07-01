@@ -1,0 +1,41 @@
+{
+  "name": "ai-meeting-transcriber",
+  "version": "1.0.0",
+  "description": "AI Meeting Transcriber — Electron desktop wrapper",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64",
+    "dist:dir": "electron-builder --win --x64 --dir"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "ai.voicesum.transcriber",
+    "productName": "AI Meeting Transcriber",
+    "copyright": "VoiceSum Technologies",
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "../assets/icon.ico"
+    },
+    "directories": {
+      "output": "../Application/frontend",
+      "buildResources": "../assets"
+    },
+    "files": [
+      "main.js",
+      "dist/**/*"
+    ],
+    "extraFiles": [],
+    "asar": true,
+    "compression": "maximum"
+  }
+}

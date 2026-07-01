@@ -1,0 +1,254 @@
+"""FastAPI application entry point."""
+import logging
+import os
+import warnings
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import torch
+import torchaudio
+
+# Suppress warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='pyannote')
+warnings.filterwarnings('ignore', category=UserWarning, module='torchcodec')
+warnings.filterwarnings('ignore', category=FutureWarning, module='librosa')
+
+from config import settings
+from database import connect_db, close_db
+from services.diarization import init_diarization
+from routers.auth import router as auth_router
+from routers.voice import router as voice_router
+from routers.audio import router as audio_router
+from routers.history import router as history_router
+from routers.settings_router import router as settings_router
+from routers.pdf_router import router as pdf_router
+from routers.mom_router import router as mom_router
+from routers.prompt_router import router as prompt_router
+from routers.dictionary_router import router as dictionary_router
+from services.record import OverlapModel
+from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ── Overlap model — loaded once at startup, may be None ──────
+_overlap_model: OverlapModel | None = None
+_overlap_device: str = "cpu"
+
+
+def _load_overlap_model() -> OverlapModel | None:
+    """Load the Wav2Vec2-based overlap classifier. Returns None if unavailable."""
+    model_path = settings.OVERLAP_MODEL_PATH
+    if not os.path.exists(model_path):
+        logger.warning(
+            f"[OverlapModel] Model file not found at '{model_path}'. "
+            "Cross-talk detection endpoint will return 503. "
+            "Set OVERLAP_MODEL_PATH in .env to enable it."
+        )
+        return None
+    try:
+        m = OverlapModel()
+        m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=False))
+        m.eval()
+        logger.info(f"[OverlapModel] Loaded from '{model_path}' ✓")
+        return m
+    except Exception as e:
+        logger.error(f"[OverlapModel] Failed to load: {e}")
+        return None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _overlap_model, _overlap_device
+
+    # Startup
+    logger.info("Starting VoiceSum API (fully offline mode)...")
+    _log_device()           # logs "Using CUDA -- GPU: ..." or "using CPU"
+    await connect_db()
+    init_diarization()      # try load pyannote if HF_TOKEN set
+
+    # Overlap model — loaded on the same device as everything else
+    _overlap_model = _load_overlap_model()
+    _overlap_device = _ML_DEVICE
+    if _overlap_model is not None:
+        _overlap_model.to(_overlap_device)
+
+    # Ensure upload dir exists
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+    # Warm up the Qwen3 model — loads once, stays resident in memory
+    try:
+        from services.ai_provider import warm_up_model
+        import asyncio
+        await asyncio.get_event_loop().run_in_executor(None, warm_up_model)
+    except Exception as e:
+        logger.warning(f"[Startup] Qwen3 model warm-up failed (non-fatal): {e}")
+
+    yield
+
+    # Shutdown
+    await close_db()
+    logger.info("VoiceSum API shut down.")
+
+
+app = FastAPI(
+    title="VoiceSum API",
+    description="Voice Conversation Summarization with Speaker Identification",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# ── CORS ──────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
+)
+
+# ── Routers ───────────────────────────────────────────────────
+app.include_router(auth_router)
+app.include_router(voice_router)
+app.include_router(audio_router)
+app.include_router(history_router)
+app.include_router(settings_router)
+app.include_router(pdf_router)
+app.include_router(mom_router)
+app.include_router(prompt_router)
+app.include_router(dictionary_router)
+
+# ── Serve uploaded audio files ────────────────────────────────
+if os.path.exists(settings.UPLOAD_DIR):
+    app.mount("/files", StaticFiles(directory=settings.UPLOAD_DIR), name="files")
+
+
+@app.get("/", tags=["health"])
+async def root():
+    return {"status": "ok", "service": "VoiceSum API", "version": "1.0.0"}
+
+
+@app.get("/health", tags=["health"])
+async def health():
+    from services.diarization import is_pyannote_available
+    from services.ai_provider import QwenProvider
+    return {
+        "status": "ok",
+        "pyannote_available": is_pyannote_available(),
+        "llm_ready": QwenProvider._pipeline is not None,
+        "llm_model": settings.QWEN_MODEL_ID,
+        "offline_mode": True,
+        "overlap_model_loaded": _overlap_model is not None,
+        "overlap_device": _overlap_device,
+    }
+
+
+# ── Cross-talk / overlap detection ───────────────────────────
+# Registered under /api/detect-overlap (prefix matches frontend call)
+@app.post("/api/detect-overlap", tags=["realtime"])
+async def detect_overlap(file: UploadFile = File(...)):
+    """
+    Accept a ~1-second audio chunk (webm/opus/wav) and return
+    {"overlap": 1} if cross-talk is detected, {"overlap": 0} otherwise.
+    """
+    import subprocess, tempfile, uuid
+
+    if _overlap_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Overlap detection model not loaded. "
+                "Set OVERLAP_MODEL_PATH in backend/.env to the path of overlap_model.pth."
+            ),
+        )
+
+    audio_bytes = await file.read()
+    uid = uuid.uuid4().hex[:8]
+
+    # Browser MediaRecorder sends WebM/Opus — save with correct extension
+    # so ffmpeg can auto-detect the container.
+    src_path = os.path.join(settings.UPLOAD_DIR, f"_overlap_src_{uid}.webm")
+    dst_path = os.path.join(settings.UPLOAD_DIR, f"_overlap_wav_{uid}.wav")
+
+    with open(src_path, "wb") as f:
+        f.write(audio_bytes)
+
+    try:
+        # Transcode WebM → 16-kHz mono PCM WAV via ffmpeg
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", src_path,
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "wav",
+                dst_path,
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                f"[OverlapDetect] ffmpeg failed (rc={result.returncode}): "
+                f"{result.stderr.decode(errors='replace')[-300:]}"
+            )
+            return {"overlap": 0}
+
+        waveform, sr = torchaudio.load(dst_path)
+    except FileNotFoundError:
+        logger.warning("[OverlapDetect] ffmpeg not found — cannot decode WebM chunks.")
+        return {"overlap": 0}
+    except Exception as e:
+        logger.warning(f"[OverlapDetect] Failed to load audio: {e}")
+        return {"overlap": 0}
+    finally:
+        for p in (src_path, dst_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    # torchaudio.load already honours the -ar 16000 conversion above,
+    # but resample defensively if something changed.
+    if sr != 16000:
+        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+
+    waveform = waveform.squeeze(0)
+
+    # Normalise
+    peak = waveform.abs().max()
+    if peak > 0:
+        waveform = waveform / peak
+
+    # Pad or trim to exactly 1 second (16 000 samples)
+    target_len = 16000
+    if waveform.shape[0] < target_len:
+        waveform = torch.cat([waveform, torch.zeros(target_len - waveform.shape[0])])
+    else:
+        waveform = waveform[:target_len]
+
+    waveform = waveform.unsqueeze(0).to(_overlap_device)
+
+    with torch.no_grad():
+        prob: float = _overlap_model(waveform).item()
+    logger.debug(f"[OverlapDetect] overlap_prob={prob:.4f}")
+    return {"overlap": 1 if prob > 0.6 else 0, "probability": round(prob, 4)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Pass the app object directly so Uvicorn does not attempt to import "main" at runtime (fails in PyInstaller)
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+
+
