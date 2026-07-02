@@ -1,6 +1,6 @@
-﻿import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Play, Pause, Sparkles, RefreshCw , MoreVertical } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical } from 'lucide-react'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
 import PDFButton from '../components/PDFButton'
@@ -14,11 +14,7 @@ function fmtDuration(s: number) {
   return `${m}m ${sec}s`
 }
 
-function fmtTime(s: number) {
-  const m = Math.floor(s / 60)
-  const sec = Math.floor(s % 60).toString().padStart(2, '0')
-  return `${m}:${sec}`
-}
+
 
 // Deterministic speaker color (same as History page)
 const SPEAKER_COLORS = [
@@ -35,67 +31,6 @@ function getSpeakerColor(name: string) {
   return SPEAKER_COLORS[hash % SPEAKER_COLORS.length]
 }
 
-// â”€â”€ Custom audio player â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function CustomAudioPlayer({ src }: { src: string }) {
-  const audioRef = useRef<HTMLAudioElement>(null)
-  const [playing, setPlaying] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
-  const scrubRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-    const onTimeUpdate = () => { setCurrentTime(audio.currentTime); setProgress(audio.duration ? (audio.currentTime / audio.duration) * 100 : 0) }
-    const onDurationChange = () => setDuration(audio.duration)
-    const onEnded = () => setPlaying(false)
-    audio.addEventListener('timeupdate', onTimeUpdate)
-    audio.addEventListener('durationchange', onDurationChange)
-    audio.addEventListener('ended', onEnded)
-    return () => {
-      audio.removeEventListener('timeupdate', onTimeUpdate)
-      audio.removeEventListener('durationchange', onDurationChange)
-      audio.removeEventListener('ended', onEnded)
-    }
-  }, [])
-
-  const togglePlay = () => {
-    const audio = audioRef.current
-    if (!audio) return
-    if (playing) { audio.pause(); setPlaying(false) }
-    else { audio.play(); setPlaying(true) }
-  }
-
-  const handleScrubClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const audio = audioRef.current
-    const bar = scrubRef.current
-    if (!audio || !bar || !audio.duration) return
-    const rect = bar.getBoundingClientRect()
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    audio.currentTime = pct * audio.duration
-  }, [])
-
-  return (
-    <div className="custom-audio-player">
-      <audio ref={audioRef} src={src} preload="metadata" />
-      <button className="audio-play-btn" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
-        {playing ? <Pause size={13} /> : <Play size={13} style={{ marginLeft: '1px' }} />}
-      </button>
-      <div
-        ref={scrubRef}
-        className="audio-scrub"
-        onClick={handleScrubClick}
-        title="Click to seek"
-      >
-        <div className="audio-scrub-fill" style={{ width: `${progress}%` }} />
-      </div>
-      <span className="audio-time">
-        {fmtTime(currentTime)} / {fmtTime(duration)}
-      </span>
-    </div>
-  )
-}
 
 
 export default function HistoryDetail() {
@@ -278,8 +213,7 @@ export default function HistoryDetail() {
             </div>
           </div>
 
-          {/* Custom Audio player */}
-          {audioUrl && <CustomAudioPlayer src={audioUrl} />}
+
 
           {/* More Options */}
             <div
@@ -430,7 +364,17 @@ export default function HistoryDetail() {
               </div>
             </div>
           )}
-          <TranscriptViewer segments={rec.transcript || []} showConfidence={showConfidence} />
+          <TranscriptViewer
+            segments={rec.transcript || []}
+            showConfidence={showConfidence}
+            audioUrl={audioUrl || undefined}
+            recordingId={id}
+            onSegmentsChange={(updated) => {
+              if (rec) {
+                setRec({ ...rec, transcript: updated });
+              }
+            }}
+          />
         </div>
       </div>
 

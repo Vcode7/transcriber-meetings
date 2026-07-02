@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Upload, FileAudio, X, Loader, CheckCircle, CloudUpload, RotateCcw } from 'lucide-react'
 import { useJobPoller } from '../hooks/useJobPoller'
 import TranscriptViewer from '../components/TranscriptViewer'
@@ -17,8 +17,22 @@ export default function UploadPage() {
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [recordingId, setRecordingId] = useState<string | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [result, setResult] = useState<ProcessingResult | null>(null)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!file) {
+      setAudioUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(file)
+    setAudioUrl(url)
+    return () => {
+      URL.revokeObjectURL(url)
+    }
+  }, [file])
+
   const [chatOpen, setChatOpen] = useState(true)
   const [isGeneratingAI, setIsGeneratingAI] = useState(false)
   const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
@@ -347,7 +361,17 @@ export default function UploadPage() {
               </div>
             </div>
           )}
-          <TranscriptViewer segments={result?.transcript || []} showConfidence={showConfidence} />
+          <TranscriptViewer
+            segments={result?.transcript || []}
+            showConfidence={showConfidence}
+            audioUrl={audioUrl || undefined}
+            recordingId={recordingId || undefined}
+            onSegmentsChange={(updated) => {
+              if (result) {
+                setResult({ ...result, transcript: updated });
+              }
+            }}
+          />
         </div>
       </div>
 

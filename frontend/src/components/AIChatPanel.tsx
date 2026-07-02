@@ -266,7 +266,7 @@ export default function AIChatPanel({ recordingId, summary, shortSummary, detail
             fontFamily: 'Inter, sans-serif',
             marginTop: '2px',
           }}>
-            Powered by Llama 3.2 · Fully offline
+            Powered by Qwen Ai · Fully offline
           </div>
         </div>
         <button className="icon-btn" onClick={onToggle} title="Collapse panel" style={{ width: '30px', height: '30px', flexShrink: 0 }}>

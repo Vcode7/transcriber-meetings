@@ -36,14 +36,13 @@ class MoMData(BaseModel):
     title: str
     date: str
     duration: float
+    planned_start_time: str = ""
+    actual_start_time: str = ""
     participants: List[str]
-    agenda_items: List[str]
-    discussion_summary: str
-    decisions: List[str]
+    introduction: str
+    points_discussed: List[str]
     action_items: List[ActionItem]
-    risks_concerns: List[str]
-    next_steps: List[str]
-    next_meeting_date: Optional[str]
+    conclusion: str
 
 
 def _normalize_action_items(items: list) -> list:
@@ -71,14 +70,13 @@ def _mom_row_to_dict(mom) -> dict:
         "title": mom.get("title") or "",
         "date": mom.get("date") or "",
         "duration": mom.get("duration") or 0,
+        "planned_start_time": mom.get("planned_start_time") or "",
+        "actual_start_time": mom.get("actual_start_time") or "",
         "participants": from_json(mom["participants"], []) or [],
-        "agenda_items": from_json(mom["agenda_items"], []) or [],
-        "discussion_summary": mom.get("discussion_summary") or "",
-        "decisions": from_json(mom["decisions"], []) or [],
+        "introduction": mom.get("introduction") or "",
+        "points_discussed": from_json(mom["points_discussed"], []) or [],
         "action_items": _normalize_action_items(raw_action_items),
-        "risks_concerns": from_json(mom["risks_concerns"], []) or [],
-        "next_steps": from_json(mom["next_steps"], []) or [],
-        "next_meeting_date": mom.get("next_meeting_date") or None,
+        "conclusion": mom.get("conclusion") or "",
         "is_draft": bool(mom.get("is_draft", False)),
         "created_at": mom.get("created_at"),
         "updated_at": mom.get("updated_at"),
@@ -149,10 +147,13 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                 text("""
                     UPDATE minutes_of_meeting SET
                         title = :title, date = :date, duration = :duration,
-                        participants = :participants, agenda_items = :agenda_items,
-                        discussion_summary = :discussion_summary, decisions = :decisions,
-                        action_items = :action_items, risks_concerns = :risks_concerns,
-                        next_steps = :next_steps, next_meeting_date = :next_meeting_date,
+                        planned_start_time = :planned_start_time,
+                        actual_start_time = :actual_start_time,
+                        participants = :participants,
+                        introduction = :introduction,
+                        points_discussed = :points_discussed,
+                        action_items = :action_items,
+                        conclusion = :conclusion,
                         versions = :versions, is_draft = 0, updated_at = :updated_at
                     WHERE recording_id = :rid AND user_id = :uid
                 """),
@@ -160,14 +161,13 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                     "title": mom_data.get("title", ""),
                     "date": mom_data.get("date", ""),
                     "duration": mom_data.get("duration", 0),
+                    "planned_start_time": mom_data.get("planned_start_time", ""),
+                    "actual_start_time": mom_data.get("actual_start_time", ""),
                     "participants": to_json(mom_data.get("participants", [])),
-                    "agenda_items": to_json(mom_data.get("agenda_items", [])),
-                    "discussion_summary": mom_data.get("discussion_summary", ""),
-                    "decisions": to_json(mom_data.get("decisions", [])),
+                    "introduction": mom_data.get("introduction", ""),
+                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
                     "action_items": to_json(mom_data.get("action_items", [])),
-                    "risks_concerns": to_json(mom_data.get("risks_concerns", [])),
-                    "next_steps": to_json(mom_data.get("next_steps", [])),
-                    "next_meeting_date": mom_data.get("next_meeting_date", ""),
+                    "conclusion": mom_data.get("conclusion", ""),
                     "versions": to_json(initial_version),
                     "updated_at": dt_to_str(now),
                     "rid": recording_id,
@@ -177,14 +177,20 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
         else:
             await db.execute(
                 text("""
-                    INSERT INTO minutes_of_meeting (id, recording_id, user_id, title, date, duration,
-                        participants, agenda_items, discussion_summary, decisions, action_items,
-                        risks_concerns, next_steps, next_meeting_date, versions, is_draft,
-                        created_at, updated_at)
-                    VALUES (:id, :rid, :uid, :title, :date, :duration,
-                        :participants, :agenda_items, :discussion_summary, :decisions, :action_items,
-                        :risks_concerns, :next_steps, :next_meeting_date, :versions, 0,
-                        :created_at, :updated_at)
+                    INSERT INTO minutes_of_meeting (
+                        id, recording_id, user_id, title, date, duration,
+                        planned_start_time, actual_start_time,
+                        participants, introduction, points_discussed,
+                        action_items, conclusion,
+                        versions, is_draft, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :rid, :uid, :title, :date, :duration,
+                        :planned_start_time, :actual_start_time,
+                        :participants, :introduction, :points_discussed,
+                        :action_items, :conclusion,
+                        :versions, 0, :created_at, :updated_at
+                    )
                 """),
                 {
                     "id": mom_id,
@@ -193,14 +199,13 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                     "title": mom_data.get("title", ""),
                     "date": mom_data.get("date", ""),
                     "duration": mom_data.get("duration", 0),
+                    "planned_start_time": mom_data.get("planned_start_time", ""),
+                    "actual_start_time": mom_data.get("actual_start_time", ""),
                     "participants": to_json(mom_data.get("participants", [])),
-                    "agenda_items": to_json(mom_data.get("agenda_items", [])),
-                    "discussion_summary": mom_data.get("discussion_summary", ""),
-                    "decisions": to_json(mom_data.get("decisions", [])),
+                    "introduction": mom_data.get("introduction", ""),
+                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
                     "action_items": to_json(mom_data.get("action_items", [])),
-                    "risks_concerns": to_json(mom_data.get("risks_concerns", [])),
-                    "next_steps": to_json(mom_data.get("next_steps", [])),
-                    "next_meeting_date": mom_data.get("next_meeting_date", ""),
+                    "conclusion": mom_data.get("conclusion", ""),
                     "versions": to_json(initial_version),
                     "created_at": dt_to_str(now),
                     "updated_at": dt_to_str(now),
@@ -262,10 +267,13 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
             text("""
                 UPDATE minutes_of_meeting SET
                     title = :title, date = :date, duration = :duration,
-                    participants = :participants, agenda_items = :agenda_items,
-                    discussion_summary = :discussion_summary, decisions = :decisions,
-                    action_items = :action_items, risks_concerns = :risks_concerns,
-                    next_steps = :next_steps, next_meeting_date = :next_meeting_date,
+                    planned_start_time = :planned_start_time,
+                    actual_start_time = :actual_start_time,
+                    participants = :participants,
+                    introduction = :introduction,
+                    points_discussed = :points_discussed,
+                    action_items = :action_items,
+                    conclusion = :conclusion,
                     versions = :versions, is_draft = 1, updated_at = :updated_at
                 WHERE recording_id = :rid AND user_id = :uid
             """),
@@ -273,14 +281,13 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
                 "title": update_data.get("title", ""),
                 "date": update_data.get("date", ""),
                 "duration": update_data.get("duration", 0),
+                "planned_start_time": update_data.get("planned_start_time", ""),
+                "actual_start_time": update_data.get("actual_start_time", ""),
                 "participants": to_json(update_data.get("participants", [])),
-                "agenda_items": to_json(update_data.get("agenda_items", [])),
-                "discussion_summary": update_data.get("discussion_summary", ""),
-                "decisions": to_json(update_data.get("decisions", [])),
+                "introduction": update_data.get("introduction", ""),
+                "points_discussed": to_json(update_data.get("points_discussed", [])),
                 "action_items": to_json(update_data.get("action_items", [])),
-                "risks_concerns": to_json(update_data.get("risks_concerns", [])),
-                "next_steps": to_json(update_data.get("next_steps", [])),
-                "next_meeting_date": update_data.get("next_meeting_date", ""),
+                "conclusion": update_data.get("conclusion", ""),
                 "versions": to_json(versions),
                 "updated_at": dt_to_str(now),
                 "rid": recording_id,
@@ -337,19 +344,22 @@ async def export_mom_pdf(recording_id: str, current_user: dict = Depends(get_cur
     title_style = ParagraphStyle(
         'TitleStyle', parent=styles['Heading1'],
         fontSize=22, textColor=colors.HexColor("#0f172a"),
-        spaceAfter=12, fontName="Helvetica-Bold"
+        spaceAfter=8, fontName="Helvetica-Bold"
+    )
+    subtitle_style = ParagraphStyle(
+        'SubtitleStyle', parent=styles['Normal'],
+        fontSize=11, textColor=colors.HexColor("#334155"),
+        spaceAfter=4, fontName="Helvetica"
     )
     header_style = ParagraphStyle(
         'HeaderStyle', parent=styles['Heading2'],
-        fontSize=14, textColor=colors.HexColor("#1e293b"),
-        spaceBefore=16, spaceAfter=8, fontName="Helvetica-Bold",
-        borderPadding=(0, 0, 4, 0), borderColor=colors.HexColor("#e2e8f0"),
-        borderWidth=1, borderRadius=0
+        fontSize=13, textColor=colors.HexColor("#1e293b"),
+        spaceBefore=18, spaceAfter=8, fontName="Helvetica-Bold",
     )
     normal_style = ParagraphStyle(
         'NormalStyle', parent=styles['Normal'],
         fontSize=10, textColor=colors.HexColor("#334155"),
-        spaceAfter=6, fontName="Helvetica", leading=14
+        spaceAfter=6, fontName="Helvetica", leading=15
     )
     meta_style = ParagraphStyle(
         'MetaStyle', parent=styles['Normal'],
@@ -357,46 +367,93 @@ async def export_mom_pdf(recording_id: str, current_user: dict = Depends(get_cur
         spaceAfter=4, fontName="Helvetica-Oblique"
     )
 
+    def _hr():
+        from reportlab.platypus import HRFlowable
+        return HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0"), spaceAfter=6, spaceBefore=2)
+
     story = []
-    story.append(Paragraph(mom.get("title", "Minutes of Meeting"), title_style))
-    story.append(Paragraph(f"Date: {mom.get('date', 'Unknown')}", meta_style))
-    story.append(Paragraph(f"Duration: {mom.get('duration', 0)} seconds", meta_style))
-    story.append(Spacer(1, 20))
 
-    def _add_section(title, content_items, is_list=False):
-        if not content_items:
-            return
-        story.append(Paragraph(escape(title.upper()), header_style))
-        if is_list:
-            items = [ListItem(Paragraph(escape(str(item)), normal_style)) for item in content_items]
-            story.append(ListFlowable(items, bulletType='bullet', start='bulletchar',
-                                      bulletColor=colors.HexColor("#3b82f6")))
-        else:
-            story.append(Paragraph(escape(str(content_items)), normal_style))
-        story.append(Spacer(1, 10))
+    # ── Title Block ──────────────────────────────────────────────────
+    story.append(Paragraph(escape(mom.get("title", "Minutes of Meeting")), title_style))
+    story.append(_hr())
 
-    _add_section("Participants", mom.get("participants"), True)
-    _add_section("Agenda Items", mom.get("agenda_items"), True)
-    _add_section("Discussion Summary", mom.get("discussion_summary"), False)
-    _add_section("Decisions Taken", mom.get("decisions"), True)
+    # ── Meeting Meta ──────────────────────────────────────────────────
+    story.append(Paragraph(f"<b>Date:</b> {escape(mom.get('date', 'Unknown'))}", subtitle_style))
+    members = ", ".join(mom.get("participants", []))
+    story.append(Paragraph(f"<b>Members:</b> {escape(members) if members else 'N/A'}", subtitle_style))
+    if mom.get("planned_start_time"):
+        story.append(Paragraph(f"<b>Planned Starting Time:</b> {escape(mom['planned_start_time'])}", subtitle_style))
+    if mom.get("actual_start_time"):
+        story.append(Paragraph(f"<b>Actual Starting Time:</b> {escape(mom['actual_start_time'])}", subtitle_style))
+    story.append(Spacer(1, 14))
 
+    # ── Introduction ──────────────────────────────────────────────────
+    if mom.get("introduction"):
+        story.append(Paragraph("INTRODUCTION", header_style))
+        story.append(_hr())
+        story.append(Paragraph(escape(mom["introduction"]), normal_style))
+        story.append(Spacer(1, 8))
+
+    # ── Points Discussed ──────────────────────────────────────────────
+    if mom.get("points_discussed"):
+        story.append(Paragraph("POINTS DISCUSSED", header_style))
+        story.append(_hr())
+        items = [
+            ListItem(Paragraph(escape(str(pt)), normal_style), leftIndent=12)
+            for pt in mom["points_discussed"]
+        ]
+        story.append(ListFlowable(items, bulletType='bullet', start='bulletchar',
+                                  bulletColor=colors.HexColor("#3b82f6"), leftIndent=6))
+        story.append(Spacer(1, 8))
+
+    # ── Action Points ─────────────────────────────────────────────────
     if mom.get("action_items"):
-        story.append(Paragraph("ACTION ITEMS", header_style))
-        items = []
+        story.append(Paragraph("ACTION POINTS", header_style))
+        story.append(_hr())
+
+        # Group by owner for speaker-based display
+        from collections import defaultdict
+        by_owner: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for ai in mom["action_items"]:
-            t = ai.get('task', '') if isinstance(ai, dict) else str(ai)
-            o = ai.get('owner', 'Unassigned') if isinstance(ai, dict) else ''
-            d = ai.get('deadline', 'No deadline') if isinstance(ai, dict) else ''
-            text_str = f"<b>{escape(t)}</b> (Owner: {escape(o)}, Due: {escape(d)})"
-            items.append(ListItem(Paragraph(text_str, normal_style)))
-        story.append(ListFlowable(items, bulletType='bullet', bulletColor=colors.HexColor("#ef4444")))
-        story.append(Spacer(1, 10))
+            owner = ai.get("owner", "Unassigned") if isinstance(ai, dict) else "Unassigned"
+            by_owner[owner].append(ai)
 
-    _add_section("Risks / Concerns", mom.get("risks_concerns"), True)
-    _add_section("Next Steps", mom.get("next_steps"), True)
+        general = by_owner.pop("Unassigned", [])
 
-    if mom.get("next_meeting_date"):
-        _add_section("Next Meeting", mom.get("next_meeting_date"), False)
+        # Speaker-based action items first
+        for owner, owner_items in sorted(by_owner.items()):
+            story.append(Paragraph(f"<b>{escape(owner)}</b>", normal_style))
+            items = []
+            for ai in owner_items:
+                t = ai.get('task', '') if isinstance(ai, dict) else str(ai)
+                d = ai.get('deadline', 'ASAP') if isinstance(ai, dict) else 'ASAP'
+                items.append(ListItem(
+                    Paragraph(f"{escape(t)} <i>(Due: {escape(d)})</i>", normal_style),
+                    leftIndent=12
+                ))
+            story.append(ListFlowable(items, bulletType='bullet',
+                                      bulletColor=colors.HexColor("#7c3aed"), leftIndent=16))
+
+        # General action items
+        if general:
+            story.append(Paragraph("<b>General</b>", normal_style))
+            items = []
+            for ai in general:
+                t = ai.get('task', '') if isinstance(ai, dict) else str(ai)
+                d = ai.get('deadline', 'ASAP') if isinstance(ai, dict) else 'ASAP'
+                items.append(ListItem(
+                    Paragraph(f"{escape(t)} <i>(Due: {escape(d)})</i>", normal_style),
+                    leftIndent=12
+                ))
+            story.append(ListFlowable(items, bulletType='bullet',
+                                      bulletColor=colors.HexColor("#ef4444"), leftIndent=16))
+        story.append(Spacer(1, 8))
+
+    # ── Conclusion ────────────────────────────────────────────────────
+    if mom.get("conclusion"):
+        story.append(Paragraph("CONCLUSION", header_style))
+        story.append(_hr())
+        story.append(Paragraph(escape(mom["conclusion"]), normal_style))
 
     try:
         doc.build(story)

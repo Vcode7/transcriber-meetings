@@ -122,10 +122,6 @@ def _patch_torchaudio():
 def _try_load_pyannote():
     global _diarization_pipeline, _pyannote_available
 
-    if not settings.HF_TOKEN:
-        logger.info("[Diarization] HF_TOKEN not set — using fallback energy-based diarization.")
-        return
-
     # ── Apply all compatibility patches BEFORE importing pyannote ──
     _suppress_torchcodec_warning()   # silence FFmpeg DLL warnings
     _patch_speechbrain()             # must be first — mocks k2/flair before any import
@@ -136,12 +132,32 @@ def _try_load_pyannote():
         from pyannote.audio import Pipeline
         logger.info(f"[Diarization] Loading pyannote speaker-diarization-3.1 on {_DEVICE} ...")
 
-        load_kwargs: Dict[str, Any] = {"token": settings.HF_TOKEN}
+        pipeline = None
 
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            **load_kwargs,
-        )
+        # ── Attempt 1: Load from decrypted local .dat file (offline/packaged mode) ──
+        try:
+            from services.model_loader import ModelLoader
+            # audio_context.dat = models--pyannote--speaker-diarization-3.1 (full pipeline)
+            local_model_path = ModelLoader.get_model_path("audio_context")
+            if local_model_path and local_model_path.exists():
+                logger.info(f"[Diarization] Loading pyannote from local model: {local_model_path}")
+                pipeline = Pipeline.from_pretrained(str(local_model_path))
+                logger.info("[Diarization] Loaded from local .dat file ✓")
+        except Exception as local_err:
+            logger.warning(f"[Diarization] Local model load failed ({local_err}), trying HF route.")
+            pipeline = None
+
+        # ── Attempt 2: Load from HF hub / HF cache (requires token or cached model) ──
+        if pipeline is None:
+            load_kwargs: Dict[str, Any] = {}
+            if settings.HF_TOKEN:
+                load_kwargs["token"] = settings.HF_TOKEN
+
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                **load_kwargs,
+            )
+
 
         # Move to GPU if available
         pipeline = pipeline.to(get_torch_device())

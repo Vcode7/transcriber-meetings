@@ -4,8 +4,14 @@ Transcription service using WhisperX.
 Drops in as a replacement for the previous faster-whisper service.
 Returns the same output schema (segments with word-level timestamps)
 plus an aligned result that pipeline.py uses for word→speaker assignment.
+
+Offline note: whisperx.load_model() and load_align_model() are forced
+offline via TRANSFORMERS_OFFLINE / HF_HUB_OFFLINE env vars set in main.py.
+The align model (facebook/wav2vec2-base) must be present in the HF cache.
 """
 import logging
+import os
+from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
 
@@ -128,13 +134,63 @@ def transcribe(file_path: str, initial_prompt: str = "") -> Dict[str, Any]:
     language: str = raw_result.get("language", "en")
     logger.info(f"[Transcription] Detected language: {language}, raw segments: {len(raw_result.get('segments', []))}")
 
-    # ── Step 2: Forced alignment (word-level timestamps) ──────
+    # ── Step 2: Forced alignment (word-level timestamps) ──────────────────
     logger.info("[Transcription] Running forced alignment ...")
     model_a = None
+    aligned_result = raw_result  # default fallback
     try:
+        # Resolve model directory: prefer local decrypted .dat, fall back to HF cache.
+        hf_home = os.environ.get(
+            "HF_HOME",
+            str(Path.home() / ".cache" / "huggingface" / "hub"),
+        )
+        align_model_dir = hf_home  # default
+        try:
+            from services.model_loader import ModelLoader
+            local_align_path = ModelLoader.get_model_path("align_engine")
+            if local_align_path and local_align_path.exists():
+                # local_align_path is the snapshot hash dir extracted from align_engine.dat.
+                # whisperx.load_align_model() expects cache_dir to be the root of an HF hub
+                # cache tree: cache_dir/models--facebook--wav2vec2-base/snapshots/<hash>/
+                # Build that layout in the temp dir by symlinking/copying if not already done.
+                import shutil
+                snap_hash = local_align_path.name  # the hash folder name
+                hf_model_id = "models--facebook--wav2vec2-base"
+                constructed_cache = local_align_path.parent.parent / "hf_cache"
+                target_snap = constructed_cache / hf_model_id / "snapshots" / snap_hash
+                if not target_snap.exists() or not any(target_snap.iterdir()):
+                    target_snap.mkdir(parents=True, exist_ok=True)
+                    # Copy snapshot files into HF-structured cache
+                    for item in local_align_path.iterdir():
+                        dest = target_snap / item.name
+                        if not dest.exists():
+                            if item.is_dir():
+                                shutil.copytree(str(item), str(dest))
+                            else:
+                                shutil.copy2(str(item), str(dest))
+                    # Write the refs/main pointer
+                    refs_dir = constructed_cache / hf_model_id / "refs"
+                    refs_dir.mkdir(parents=True, exist_ok=True)
+                    (refs_dir / "main").write_text(snap_hash, encoding="utf-8")
+                align_model_dir = str(constructed_cache)
+                logger.info(f"[Transcription] Using local align model (HF layout): {align_model_dir}")
+        except Exception as am_err:
+            logger.warning(f"[Transcription] Could not resolve local align model ({am_err}), using HF cache.")
+
+
+        model_name = "facebook/wav2vec2-base"
+        model_cache_only = False
+        if align_model_dir != hf_home:
+            model_cache_only = True
+        elif settings.OFFLINE_MODE:
+            model_cache_only = True
+
         model_a, metadata = whisperx.load_align_model(
             language_code=language,
             device=device,
+            model_name=model_name,
+            model_dir=align_model_dir,
+            model_cache_only=model_cache_only,
         )
         aligned_result = whisperx.align(
             raw_result["segments"],
@@ -148,7 +204,8 @@ def transcribe(file_path: str, initial_prompt: str = "") -> Dict[str, Any]:
     except Exception as e:
         logger.warning(
             f"[Transcription] Alignment failed ({e}). "
-            "Falling back to unaligned segments."
+            "Falling back to unaligned segments. "
+            "Ensure facebook/wav2vec2-base is present as align_engine.dat in MODELS_DIR."
         )
         aligned_result = raw_result
     finally:

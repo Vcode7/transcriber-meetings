@@ -13,7 +13,7 @@
 ;   The installer creates these empty directories automatically.
 
 #define MyAppName "AI Meeting Transcriber"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "VoiceSum Technologies"
 #define MyAppExeName "launcher.exe"
 #define MyAppId "{B4C1D2A3-E5F6-4789-AB01-CD23EF456789}"

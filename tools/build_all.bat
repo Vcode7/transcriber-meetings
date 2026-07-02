@@ -67,17 +67,17 @@ if %ERRORLEVEL% neq 0 (
 )
 echo      Python build deps: OK
 
-REM ── Check encrypted models (dry-run only) ───────────────────
-echo [4/7] Checking AI model availability...
-python "%TOOLS_DIR%\download_all_models.py" --dry-run
-echo.
-echo      To package models into Application\runtime\models\:
-echo        python tools\download_all_models.py --hf-token YOUR_TOKEN
-echo        python tools\encrypt_models.py --output Application\runtime\models
-echo.
-echo      For the Qwen3 nlp-engine model (plain, no encryption):
-echo        Copy the Qwen3-4B folder to: Application\runtime\nlp-engine\
-echo.
+@REM REM ── Check encrypted models (dry-run only) ───────────────────
+@REM echo [4/7] Checking AI model availability...
+@REM python "%TOOLS_DIR%\download_all_models.py" --dry-run
+@REM echo.
+@REM echo      To package models into Application\runtime\models\:
+@REM echo        python tools\download_all_models.py --hf-token YOUR_TOKEN
+@REM echo        python tools\encrypt_models.py --output Application\runtime\models
+@REM echo.
+@REM echo      For the Qwen3 nlp-engine model (plain, no encryption):
+@REM echo        Copy the Qwen3-4B folder to: Application\runtime\nlp-engine\
+@REM echo.
 
 REM ── Build React frontend ─────────────────────────────────────
 echo [5/7] Building React frontend...
@@ -155,6 +155,15 @@ if %ERRORLEVEL% neq 0 (
 )
 echo      Launcher built: Application\launcher.exe
 
+REM ── Build updater (offline patch applier) ────────────────────
+echo      Building updater executable...
+%PYINSTALLER_CMD% "%TOOLS_DIR%\updater.spec" --distpath "%APP_DIR%" --workpath "build\updater_work" --noconfirm
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: Updater build failed (non-fatal). Check output above.
+) else (
+    echo      Updater built: Application\updater.exe
+)
+
 REM ── Copy default .env config ─────────────────────────────────
 copy /Y "%PROJECT_ROOT%\backend\.env.example" "%APP_DIR%\backend\.env" >nul 2>&1
 echo      Copied .env.example → Application\backend\.env
@@ -196,8 +205,8 @@ echo.
 
 REM ── Run Inno Setup installer ─────────────────────────────────
 set ISCC_PATH=C:\Program Files (x86)\Inno Setup 6\ISCC.exe
-if not exist "!ISCC_PATH!" (
-    echo WARNING: Inno Setup not found at !ISCC_PATH!
+if not exist "%ISCC_PATH%" (
+    echo WARNING: Inno Setup not found at %ISCC_PATH%
     echo          Download from https://jrsoftware.org/isdl.php
     echo          Skipping installer creation.
     echo.
@@ -205,7 +214,7 @@ if not exist "!ISCC_PATH!" (
     echo            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
 ) else (
     echo Building installer (Inno Setup)...
-    "!ISCC_PATH!" "%PROJECT_ROOT%\installer\setup.iss"
+    "%ISCC_PATH%" "%PROJECT_ROOT%\installer\setup.iss"
     if %ERRORLEVEL% neq 0 (
         echo ERROR: Inno Setup failed
         exit /b 1

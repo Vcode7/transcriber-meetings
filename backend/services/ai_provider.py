@@ -120,38 +120,42 @@ Comprehensive meeting report:"""
 
 
 MOM_PROMPT = """\
-You are an expert executive assistant generating professional enterprise Minutes of Meeting (MoM).
+You are an expert executive assistant generating professional Minutes of Meeting (MoM).
 
 Analyze the transcript and return ONLY a valid JSON object. Do not include markdown, ```json, or any other text outside the JSON.
 
-JSON schema:
+JSON schema (STRICTLY follow this — do not add or rename keys):
 {{
   "title": "Concise professional meeting title",
-  "meeting_objective": "One or two sentence stating the meeting objective",
-  "executive_summary": "2-4 paragraph professional summary of main topics and outcomes should cover all topics",
-  "discussion_topics": [
-    {{"topic": "Topic name", "discussion": "Detailed explanation of what was discussed", "outcome": "Result or conclusion"}}
+  "introduction": "One paragraph (3-5 sentences) that clearly defines the meeting agenda, purpose, and topics discussed. This should read as a formal introduction to the meeting.",
+  "points_discussed": [
+    "Point 1 — a complete sentence describing what was discussed (minimum 3, maximum 10)",
+    "Point 2 — another key discussion point"
   ],
-  "decisions": ["Decision 1", "Decision 2"],
   "action_items": [
-    {{"task": "Task description", "owner": "Name or Unassigned", "deadline": "Date or ASAP"}}
+    {{"task": "Task description", "owner": "Speaker name or Unassigned", "deadline": "Date or ASAP"}}
   ],
-  "risks": ["Risk or concern 1"],
-  "pending_items": ["Unresolved item 1"],
-  "next_meeting_agenda": ["Agenda item for next meeting"],
-  "conclusion": "One paragraph concluding summary",
+  "general_action_items": ["Action item not assigned to any specific speaker"],
+  "conclusion": "One to two paragraphs summarizing outcomes, agreements reached, and the overall conclusion of the meeting.",
+  "actual_start_time": "HH:MM if mentioned in transcript or null",
   "next_meeting_date": "Date/time if mentioned or null"
 }}
 
 Rules:
-- Preserve all technical terms, acronyms, project names exactly.
-- If a field has no relevant content, use [] or null.
+- introduction: Write exactly ONE paragraph. Define the meeting's agenda and all topics covered.
+- points_discussed: List 3 to 10 points. Each point is a single complete sentence. Cover every major topic.
+- action_items: Include speaker name as owner wherever possible. If general, use 'Unassigned'.
+- general_action_items: Only items with no clear owner.
+- conclusion: Summarize what was concluded, agreed upon, and any next steps.
 - Do NOT hallucinate. Only report what is in the transcript.
+- Preserve all technical terms, acronyms, project names exactly.
+- If a field has no relevant content, use [] for arrays or null for strings.
 
 TRANSCRIPT:
 {transcript}
 
 JSON MoM:"""
+
 
 
 KEY_POINTS_PROMPT = """\
@@ -332,15 +336,13 @@ def _empty_mom(recording_meta: dict) -> dict:
         "title": recording_meta.get("filename", "Meeting Notes"),
         "date": recording_meta.get("created_at", ""),
         "duration": recording_meta.get("duration", 0),
+        "planned_start_time": "",
+        "actual_start_time": "",
         "participants": recording_meta.get("speakers_detected", []),
-        "agenda_items": [],
-        "meeting_objective": "",
-        "discussion_summary": "Failed to generate summary.",
-        "decisions": [],
+        "introduction": "Failed to generate meeting introduction.",
+        "points_discussed": [],
         "action_items": [],
-        "risks_concerns": [],
-        "next_steps": [],
-        "next_meeting_date": None,
+        "conclusion": "",
     }
 
 
@@ -890,46 +892,39 @@ class QwenProvider(AIProvider):
                 logger.error("[QwenAI] No JSON found in Qwen3 MoM output")
                 return _empty_mom(recording_meta)
 
-        # Build discussion_summary from discussion_topics if present
-        discussion_topics = data.get("discussion_topics", [])
-        if discussion_topics and isinstance(discussion_topics, list):
-            topic_texts = []
-            for t in discussion_topics:
-                if isinstance(t, dict):
-                    topic_texts.append(
-                        f"**{t.get('topic', '')}**: {t.get('discussion', '')} {t.get('outcome', '')}"
-                    )
-            discussion_summary = "\n\n".join(topic_texts) if topic_texts else data.get("executive_summary", "")
+        # Merge action_items + general_action_items
+        ai_list = data.get("action_items", []) or []
+        for g in (data.get("general_action_items", []) or []):
+            if isinstance(g, str) and g.strip():
+                ai_list.append({"task": g, "owner": "Unassigned", "deadline": "ASAP"})
+
+        action_items = [
+            {
+                "task": (a.get("task", a) if isinstance(a, dict) else str(a)),
+                "owner": (a.get("owner", "Unassigned") if isinstance(a, dict) else "Unassigned"),
+                "deadline": (a.get("deadline", "ASAP") if isinstance(a, dict) else "ASAP"),
+            }
+            for a in ai_list
+        ]
+
+        # points_discussed: enforce 3-10 items
+        points = data.get("points_discussed", []) or []
+        if isinstance(points, list):
+            points = [str(p) for p in points if p][:10]
         else:
-            discussion_summary = data.get("executive_summary", data.get("discussion_summary", ""))
-
-        # Combine risks + pending as risks_concerns
-        risks = data.get("risks", []) or []
-        pending = data.get("pending_items", []) or []
-        risks_concerns = risks + pending
-
-        # Next steps from next_meeting_agenda or next_steps
-        next_steps = data.get("next_meeting_agenda", []) or data.get("next_steps", []) or []
+            points = []
 
         return {
             "title": data.get("title") or recording_meta.get("filename", "Meeting Notes"),
             "date": recording_meta.get("created_at", ""),
             "duration": recording_meta.get("duration", 0),
+            "planned_start_time": "",
+            "actual_start_time": data.get("actual_start_time") or "",
             "participants": recording_meta.get("speakers_detected", []),
-            "agenda_items": [t.get("topic", "") for t in discussion_topics if isinstance(t, dict)] or [],
-            "discussion_summary": discussion_summary or data.get("conclusion", ""),
-            "decisions": data.get("decisions", []) or [],
-            "action_items": [
-                {
-                    "task": (a.get("task", a) if isinstance(a, dict) else str(a)),
-                    "owner": (a.get("owner", "Unassigned") if isinstance(a, dict) else "Unassigned"),
-                    "deadline": (a.get("deadline", "ASAP") if isinstance(a, dict) else "ASAP"),
-                }
-                for a in (data.get("action_items", []) or [])
-            ],
-            "risks_concerns": risks_concerns,
-            "next_steps": next_steps,
-            "next_meeting_date": data.get("next_meeting_date"),
+            "introduction": data.get("introduction") or "",
+            "points_discussed": points,
+            "action_items": action_items,
+            "conclusion": data.get("conclusion") or "",
         }
 
 

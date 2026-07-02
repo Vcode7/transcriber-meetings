@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   MonitorSpeaker, Square, RotateCcw, Loader, AlertTriangle,
   Users, Mic, MicOff, Monitor, Radio, CheckCircle,
@@ -26,6 +26,7 @@ export default function TabAudioPage() {
   const [stage, setStage] = useState<Stage>('idle')
   const [recordingId, setRecordingId] = useState<string | null>(null)
   const [result, setResult] = useState<ProcessingResult | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [chatOpen, setChatOpen] = useState(true)
   const [overlapAlert, setOverlapAlert] = useState(false)
@@ -101,6 +102,25 @@ export default function TabAudioPage() {
   useEffect(() => {
     return () => clearProcessing()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch audio for the embedded player once processing is done
+  useEffect(() => {
+    if (!recordingId || !result) return
+    let active = true
+    const urlRef = { current: null as string | null }
+    api.get(`/history/${recordingId}/audio`, { responseType: 'blob' })
+      .then((res) => {
+        if (!active) return
+        const url = URL.createObjectURL(res.data)
+        urlRef.current = url
+        setAudioUrl(url)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+    }
+  }, [recordingId, !!result]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cross-talk detection
   useEffect(() => {
@@ -362,7 +382,7 @@ export default function TabAudioPage() {
                 boxShadow: '0 0 16px hsl(var(--destructive) / .12)',
               }}>
                 <AlertTriangle size={16} style={{ flexShrink: 0 }} />
-                <span>âš ï¸ Cross-talk detected â€” multiple speakers overlapping</span>
+                <span>¸ Cross-talk detected  multiple speakers overlapping</span>
               </div>
             )}
 
@@ -599,7 +619,17 @@ export default function TabAudioPage() {
               </div>
             </div>
           )}
-          <TranscriptViewer segments={result?.transcript || []} showConfidence={showConfidence} />
+          <TranscriptViewer
+            segments={result?.transcript || []}
+            showConfidence={showConfidence}
+            audioUrl={audioUrl || undefined}
+            recordingId={recordingId || undefined}
+            onSegmentsChange={(updated) => {
+              if (result) {
+                setResult({ ...result, transcript: updated });
+              }
+            }}
+          />
         </div>
       </div>
 

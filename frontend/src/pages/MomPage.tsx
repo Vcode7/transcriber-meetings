@@ -1,9 +1,9 @@
-﻿import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { isAxiosError } from 'axios'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Sparkles, Loader, FileDown, Copy, CheckCircle,
-  AlertTriangle, Clock, RotateCcw, Plus, X, History
+  AlertTriangle, Clock, RotateCcw, Plus, X, History, User, Users
 } from 'lucide-react'
 import api from '../api/client'
 import MomSection from '../components/MomSection'
@@ -16,14 +16,13 @@ interface MomData {
   title: string
   date: string
   duration: number
+  planned_start_time: string
+  actual_start_time: string
   participants: string[]
-  agenda_items: string[]
-  discussion_summary: string
-  decisions: string[]
+  introduction: string
+  points_discussed: string[]
   action_items: ActionItem[]
-  risks_concerns: string[]
-  next_steps: string[]
-  next_meeting_date: string | null
+  conclusion: string
 }
 
 interface VersionEntry {
@@ -47,10 +46,11 @@ function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null 
     title: typeof raw.title === 'string' ? raw.title : '',
     date: typeof raw.date === 'string' ? raw.date : '',
     duration: typeof raw.duration === 'number' ? raw.duration : 0,
+    planned_start_time: typeof raw.planned_start_time === 'string' ? raw.planned_start_time : '',
+    actual_start_time: typeof raw.actual_start_time === 'string' ? raw.actual_start_time : '',
     participants: Array.isArray(raw.participants) ? raw.participants.map(String) : [],
-    agenda_items: Array.isArray(raw.agenda_items) ? raw.agenda_items.map(String) : [],
-    discussion_summary: typeof raw.discussion_summary === 'string' ? raw.discussion_summary : '',
-    decisions: Array.isArray(raw.decisions) ? raw.decisions.map(String) : [],
+    introduction: typeof raw.introduction === 'string' ? raw.introduction : '',
+    points_discussed: Array.isArray(raw.points_discussed) ? raw.points_discussed.map(String) : [],
     action_items: Array.isArray(raw.action_items)
       ? raw.action_items.map((a: unknown) => {
           if (a && typeof a === 'object' && !Array.isArray(a)) {
@@ -64,9 +64,7 @@ function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null 
           return { task: String(a ?? ''), owner: 'Unassigned', deadline: 'ASAP' }
         })
       : [],
-    risks_concerns: Array.isArray(raw.risks_concerns) ? raw.risks_concerns.map(String) : [],
-    next_steps: Array.isArray(raw.next_steps) ? raw.next_steps.map(String) : [],
-    next_meeting_date: raw.next_meeting_date ?? null,
+    conclusion: typeof raw.conclusion === 'string' ? raw.conclusion : '',
   }
 }
 
@@ -85,23 +83,34 @@ function EditableList({
   onChange,
   placeholder = 'Add item...',
   ordered = false,
+  minItems = 0,
+  maxItems,
 }: {
   items: string[]
   onChange: (items: string[]) => void
   placeholder?: string
   ordered?: boolean
+  minItems?: number
+  maxItems?: number
 }) {
   const handleChange = (index: number, value: string) => {
     const newItems = [...items]
     newItems[index] = value
     onChange(newItems)
   }
-  const handleAdd = () => onChange([...items, ''])
-  const handleRemove = (index: number) => onChange(items.filter((_, i) => i !== index))
+  const handleAdd = () => {
+    if (maxItems && items.length >= maxItems) return
+    onChange([...items, ''])
+  }
+  const handleRemove = (index: number) => {
+    if (minItems && items.length <= minItems) return
+    onChange(items.filter((_, i) => i !== index))
+  }
   const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      onChange([...items.slice(0, index + 1), '', ...items.slice(index + 1)])
+      if (!maxItems || items.length < maxItems)
+        onChange([...items.slice(0, index + 1), '', ...items.slice(index + 1)])
     } else if (e.key === 'Backspace' && !items[index] && items.length > 1) {
       e.preventDefault()
       handleRemove(index)
@@ -126,18 +135,87 @@ function EditableList({
             placeholder={placeholder}
             style={{ flex: 1, padding: '0.45rem 0.75rem', fontSize: '0.9rem' }}
           />
-          <button onClick={() => handleRemove(idx)} className="icon-btn"
-            style={{ color: 'hsl(var(--pencil))', width: '28px', height: '28px' }}
-            title="Remove">
+          <button
+            onClick={() => handleRemove(idx)}
+            className="icon-btn"
+            disabled={!!(minItems && items.length <= minItems)}
+            style={{ color: 'hsl(var(--pencil))', width: '28px', height: '28px', opacity: (minItems && items.length <= minItems) ? 0.35 : 1 }}
+            title="Remove"
+          >
             <X size={13} />
           </button>
         </div>
       ))}
-      <button onClick={handleAdd} className="btn btn-ghost"
-        style={{ fontSize: '0.8rem', padding: '0.3rem 0.7rem', gap: '5px', alignSelf: 'flex-start', marginTop: '4px' }}>
-        <Plus size={13} /> Add
-      </button>
+      {(!maxItems || items.length < maxItems) && (
+        <button onClick={handleAdd} className="btn btn-ghost"
+          style={{ fontSize: '0.8rem', padding: '0.3rem 0.7rem', gap: '5px', alignSelf: 'flex-start', marginTop: '4px' }}>
+          <Plus size={13} /> Add
+        </button>
+      )}
+      {maxItems && (
+        <p style={{ fontSize: '0.74rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginTop: '2px' }}>
+          {items.length}/{maxItems} points
+        </p>
+      )}
     </div>
+  )
+}
+
+// ── Action Items grouped by speaker ───────────────────────────
+function ActionPointsSection({
+  items,
+  onChange,
+}: {
+  items: ActionItem[]
+  onChange: (items: ActionItem[]) => void
+}) {
+  // Group
+  const speakerItems = items.filter(a => a.owner && a.owner !== 'Unassigned')
+  const generalItems = items.filter(a => !a.owner || a.owner === 'Unassigned')
+
+  const speakers = [...new Set(speakerItems.map(a => a.owner))].sort()
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      {/* Speaker-based */}
+      {speakers.length > 0 && (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+            <User size={13} style={{ color: 'hsl(var(--accent))' }} />
+            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '0.04em', fontFamily: 'Inter, sans-serif' }}>
+              By Speaker
+            </span>
+          </div>
+          <ActionItemsTable items={items} onChange={onChange} />
+        </div>
+      )}
+
+      {/* If no speakers yet, just show the table */}
+      {speakers.length === 0 && (
+        <ActionItemsTable items={items} onChange={onChange} />
+      )}
+
+      {/* General hint */}
+      {generalItems.length > 0 && (
+        <div style={{ padding: '0.6rem 0.9rem', borderRadius: '8px', background: 'hsl(var(--muted) / .4)', border: '1px dashed hsl(var(--border) / .4)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Users size={13} style={{ color: 'hsl(var(--pencil))' }} />
+          <span style={{ fontSize: '0.8rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+            {generalItems.length} general action item{generalItems.length !== 1 ? 's' : ''} (no specific owner)
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Label helper ──────────────────────────────────────────────
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <label style={{
+      fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))',
+      fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px',
+      textTransform: 'uppercase', letterSpacing: '0.04em'
+    }}>{children}</label>
   )
 }
 
@@ -163,14 +241,13 @@ export default function MomPage() {
 
   const GENERATING_STEPS = [
     'Reading transcript...',
-    'Extracting agenda items...',
-    'Identifying decisions...',
-    'Building action items...',
-    'Generating summary...',
+    'Extracting meeting topics...',
+    'Identifying action points...',
+    'Drafting introduction...',
+    'Writing conclusion...',
     'Finalizing MoM...',
   ]
 
-  // ── Generating step animation ──
   useEffect(() => {
     if (pageState !== 'generating') return
     const t = setInterval(() => setGenStep(s => (s + 1) % GENERATING_STEPS.length), 1600)
@@ -289,38 +366,50 @@ export default function MomPage() {
   // ── Copy to Clipboard ──
   const handleCopy = async () => {
     if (!mom) return
+
+    // Action items grouped
+    const speakerAI = mom.action_items.filter(a => a.owner && a.owner !== 'Unassigned')
+    const generalAI = mom.action_items.filter(a => !a.owner || a.owner === 'Unassigned')
+    const speakers = [...new Set(speakerAI.map(a => a.owner))].sort()
+
+    const aiLines: string[] = []
+    for (const sp of speakers) {
+      aiLines.push(`  ${sp}:`)
+      for (const a of speakerAI.filter(x => x.owner === sp)) {
+        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}`)
+      }
+    }
+    if (generalAI.length > 0) {
+      aiLines.push('  General:')
+      for (const a of generalAI) {
+        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}`)
+      }
+    }
+
     const text = [
       'MINUTES OF MEETING',
       '==================',
-      `Title: ${mom.title}`,
-      `Date: ${mom.date}`,
-      `Duration: ${fmtDuration(mom.duration)}`,
-      `Participants: ${mom.participants.join(', ')}`,
+      `Meeting Title    : ${mom.title}`,
+      `Date             : ${mom.date}`,
+      `Members          : ${mom.participants.join(', ')}`,
+      ...(mom.planned_start_time ? [`Planned Start    : ${mom.planned_start_time}`] : []),
+      ...(mom.actual_start_time  ? [`Actual Start     : ${mom.actual_start_time}`]  : []),
       '',
-      'AGENDA',
-      '------',
-      ...mom.agenda_items.map((a, i) => `${i + 1}. ${a}`),
-      '',
-      'DISCUSSION SUMMARY',
-      '------------------',
-      mom.discussion_summary,
-      '',
-      'DECISIONS TAKEN',
-      '---------------',
-      ...mom.decisions.map(d => `\u2022 ${d}`),
-      '',
-      'ACTION ITEMS',
+      'INTRODUCTION',
       '------------',
-      ...mom.action_items.map(a => `\u2022 [${a.owner}] ${a.task} \u2014 Due: ${a.deadline}`),
+      mom.introduction,
       '',
-      'RISKS / CONCERNS',
+      'POINTS DISCUSSED',
       '----------------',
-      ...mom.risks_concerns.map(r => `\u2022 ${r}`),
+      ...mom.points_discussed.map((p, i) => `${i + 1}. ${p}`),
       '',
-      'NEXT STEPS',
+      'ACTION POINTS',
+      '-------------',
+      ...aiLines,
+      '',
+      'CONCLUSION',
       '----------',
-      ...mom.next_steps.map((s, i) => `${i + 1}. ${s}`),
-      ...(mom.next_meeting_date ? ['', 'NEXT MEETING', '------------', mom.next_meeting_date] : []),
+      mom.conclusion,
     ].join('\n')
 
     await navigator.clipboard.writeText(text)
@@ -354,7 +443,7 @@ export default function MomPage() {
           </h1>
           {recording && (
             <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
-              {recording.filename} \u00b7 {fmtDuration(recording.duration)}
+              {recording.filename} · {fmtDuration(recording.duration)}
             </p>
           )}
         </div>
@@ -402,8 +491,8 @@ export default function MomPage() {
             </div>
             <div>
               <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '.5rem' }}>Generate Minutes of Meeting</h2>
-              <p style={{ fontSize: '0.9rem', color: 'hsl(var(--pencil))', maxWidth: '400px', lineHeight: 1.6, fontFamily: 'Inter, sans-serif' }}>
-                Let AI extract the full structured MoM from your transcript - agenda, decisions, action items, owners, risks and next steps.
+              <p style={{ fontSize: '0.9rem', color: 'hsl(var(--pencil))', maxWidth: '420px', lineHeight: 1.6, fontFamily: 'Inter, sans-serif' }}>
+                AI will extract a structured MoM — introduction, discussion points, action items by speaker, and conclusion.
               </p>
             </div>
             {error && (
@@ -431,7 +520,7 @@ export default function MomPage() {
               </p>
             </div>
             <div style={{ width: '100%', maxWidth: '680px', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '1rem' }}>
-              {[120, 80, 200, 100, 150, 80].map((h, i) => (
+              {[80, 200, 120, 160, 100, 140].map((h, i) => (
                 <div key={i} style={{ height: h, borderRadius: '12px', background: 'linear-gradient(90deg, hsl(var(--muted)) 0%, hsl(var(--card)) 50%, hsl(var(--muted)) 100%)', backgroundSize: '200% 100%', animation: 'shimmer 1.5s ease-in-out infinite', animationDelay: `${i * 0.15}s`, border: '1px solid hsl(var(--border) / .3)' }} />
               ))}
             </div>
@@ -443,54 +532,114 @@ export default function MomPage() {
           <div className="mom-editor-layout" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
             <div className="mom-editor-main" style={{ flex: 1, overflowY: 'auto', padding: '1.5rem', minWidth: 0 }}>
-              <MomSection title="Meeting Information" className="mom-section">
-                <div className="mom-info-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+
+              {/* ── 1. Meeting Title ─────────────────────────────── */}
+              <MomSection title="1. Meeting Title" className="mom-section">
+                <input
+                  className="input"
+                  value={mom.title}
+                  onChange={e => update('title', e.target.value)}
+                  placeholder="Enter meeting title..."
+                  style={{ width: '100%', padding: '0.55rem 0.85rem', fontSize: '1rem', fontWeight: 600 }}
+                />
+              </MomSection>
+
+              {/* ── 2. Date ──────────────────────────────────────── */}
+              <MomSection title="2. Date">
+                <input
+                  className="input"
+                  value={mom.date}
+                  onChange={e => update('date', e.target.value)}
+                  placeholder="e.g. 02 July 2026"
+                  style={{ width: '100%', maxWidth: '340px', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
+                />
+              </MomSection>
+
+              {/* ── 3. Members ───────────────────────────────────── */}
+              <MomSection title="3. Members">
+                <TagInput
+                  tags={mom.participants}
+                  onChange={tags => update('participants', tags)}
+                  placeholder="Type name and press Enter..."
+                />
+              </MomSection>
+
+              {/* ── 4 & 5. Start Times ───────────────────────────── */}
+              <MomSection title="4 & 5. Meeting Times">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
                   <div>
-                    <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Meeting Title</label>
-                    <input className="input" value={mom.title} onChange={e => update('title', e.target.value)} placeholder="Meeting title" style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.95rem', fontWeight: 600 }} />
+                    <FieldLabel>4. Planned Starting Time <span style={{ fontWeight: 400, color: 'hsl(var(--accent))', fontSize: '0.7rem', marginLeft: '4px' }}>(manual entry)</span></FieldLabel>
+                    <input
+                      className="input"
+                      value={mom.planned_start_time}
+                      onChange={e => update('planned_start_time', e.target.value)}
+                      placeholder="e.g. 10:00 AM"
+                      style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
+                    />
                   </div>
                   <div>
-                    <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Date</label>
-                    <input className="input" value={mom.date} onChange={e => update('date', e.target.value)} placeholder="Meeting date" style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Duration</label>
-                    <p style={{ fontSize: '0.9rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', padding: '0.5rem 0' }}>{fmtDuration(mom.duration)}</p>
-                  </div>
-                  <div>
-                    <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Next Meeting</label>
-                    <input className="input" value={mom.next_meeting_date || ''} onChange={e => update('next_meeting_date', e.target.value)} placeholder="Next meeting date (if known)" style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }} />
+                    <FieldLabel>5. Actual Starting Time</FieldLabel>
+                    <input
+                      className="input"
+                      value={mom.actual_start_time}
+                      onChange={e => update('actual_start_time', e.target.value)}
+                      placeholder="e.g. 10:12 AM"
+                      style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
+                    />
                   </div>
                 </div>
-                <div style={{ marginTop: '1rem' }}>
-                  <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Participants</label>
-                  <TagInput tags={mom.participants} onChange={tags => update('participants', tags)} placeholder="Type name and press Enter..." />
-                </div>
               </MomSection>
 
-              <MomSection title="Agenda Items">
-                <EditableList items={mom.agenda_items} onChange={items => update('agenda_items', items)} placeholder="Agenda item..." ordered />
+              {/* ── 6. Introduction ──────────────────────────────── */}
+              <MomSection title="6. Introduction">
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '8px', lineHeight: 1.5 }}>
+                  A paragraph that clearly defines the meeting agenda and topics discussed.
+                </p>
+                <textarea
+                  className="input"
+                  value={mom.introduction}
+                  onChange={e => update('introduction', e.target.value)}
+                  placeholder="Write the meeting introduction — agenda, purpose, and topics discussed..."
+                  rows={5}
+                  style={{ width: '100%', resize: 'vertical', padding: '0.75rem', fontSize: '0.9rem', lineHeight: 1.7, fontFamily: 'Inter, sans-serif' }}
+                />
               </MomSection>
 
-              <MomSection title="Discussion Summary">
-                <textarea className="input" value={mom.discussion_summary} onChange={e => update('discussion_summary', e.target.value)} placeholder="Write a summary of the discussion..." rows={7} style={{ width: '100%', resize: 'vertical', padding: '0.75rem', fontSize: '0.9rem', lineHeight: 1.7, fontFamily: 'Inter, sans-serif' }} />
+              {/* ── 7. Points Discussed ──────────────────────────── */}
+              <MomSection title="7. Points Discussed">
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '8px', lineHeight: 1.5 }}>
+                  Minimum 3 points, maximum 10 points. Each point should be a complete sentence.
+                </p>
+                <EditableList
+                  items={mom.points_discussed.length > 0 ? mom.points_discussed : ['', '', '']}
+                  onChange={items => update('points_discussed', items)}
+                  placeholder="Describe a discussion point..."
+                  ordered
+                  minItems={3}
+                  maxItems={10}
+                />
               </MomSection>
 
-              <MomSection title="Decisions Taken">
-                <EditableList items={mom.decisions} onChange={items => update('decisions', items)} placeholder="Decision made..." />
+              {/* ── 8. Action Points ─────────────────────────────── */}
+              <MomSection title="8. Action Points">
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '10px', lineHeight: 1.5 }}>
+                  General and speaker-based action items. Set <strong>Owner</strong> to a speaker name for speaker-based items.
+                </p>
+                <ActionPointsSection items={mom.action_items} onChange={items => update('action_items', items)} />
               </MomSection>
 
-              <MomSection title="Action Items">
-                <ActionItemsTable items={mom.action_items} onChange={items => update('action_items', items)} />
+              {/* ── 9. Conclusion ────────────────────────────────── */}
+              <MomSection title="9. Conclusion">
+                <textarea
+                  className="input"
+                  value={mom.conclusion}
+                  onChange={e => update('conclusion', e.target.value)}
+                  placeholder="Summarize the outcomes, agreements reached, and overall conclusion of the meeting..."
+                  rows={5}
+                  style={{ width: '100%', resize: 'vertical', padding: '0.75rem', fontSize: '0.9rem', lineHeight: 1.7, fontFamily: 'Inter, sans-serif' }}
+                />
               </MomSection>
 
-              <MomSection title="Risks & Concerns">
-                <EditableList items={mom.risks_concerns} onChange={items => update('risks_concerns', items)} placeholder="Risk or concern..." />
-              </MomSection>
-
-              <MomSection title="Next Steps">
-                <EditableList items={mom.next_steps} onChange={items => update('next_steps', items)} placeholder="Next step..." ordered />
-              </MomSection>
             </div>
 
             {/* Version History sidebar */}

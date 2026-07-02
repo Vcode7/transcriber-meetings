@@ -1,6 +1,14 @@
 """FastAPI application entry point."""
-import logging
+# ── Force HuggingFace offline mode BEFORE any HF library is imported ──────────
+# This must be the very first code that runs. HF hub performs connectivity checks
+# at import time (not just at model-load time), so setting these env vars after
+# any `import transformers / whisperx / pyannote` is already too late.
 import os
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# ─────────────────────────────────────────────────────────────────────────────
+import logging
 import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -43,13 +51,19 @@ _overlap_device: str = "cpu"
 def _load_overlap_model() -> OverlapModel | None:
     """Load the Wav2Vec2-based overlap classifier. Returns None if unavailable."""
     model_path = settings.OVERLAP_MODEL_PATH
-    if not os.path.exists(model_path):
-        logger.warning(
-            f"[OverlapModel] Model file not found at '{model_path}'. "
-            "Cross-talk detection endpoint will return 503. "
-            "Set OVERLAP_MODEL_PATH in .env to enable it."
+    if not model_path:
+        logger.info(
+            "[OverlapModel] OVERLAP_MODEL_PATH not configured — "
+            "cross-talk detection disabled (set it in .env to enable)."
         )
         return None
+    if not os.path.exists(model_path):
+        logger.info(
+            f"[OverlapModel] Model file not found at '{model_path}' — "
+            "cross-talk detection disabled. Set OVERLAP_MODEL_PATH in .env to enable."
+        )
+        return None
+
     try:
         m = OverlapModel()
         m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=False))
@@ -67,6 +81,9 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting VoiceSum API (fully offline mode)...")
+    # Apply HF offline environment settings (belt-and-suspenders after top-of-file injection)
+    from services.model_loader import setup_offline_hf_environment
+    setup_offline_hf_environment()
     _log_device()           # logs "Using CUDA -- GPU: ..." or "using CPU"
     await connect_db()
     init_diarization()      # try load pyannote if HF_TOKEN set
@@ -165,13 +182,7 @@ async def detect_overlap(file: UploadFile = File(...)):
     import subprocess, tempfile, uuid
 
     if _overlap_model is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Overlap detection model not loaded. "
-                "Set OVERLAP_MODEL_PATH in backend/.env to the path of overlap_model.pth."
-            ),
-        )
+        return {"overlap": 0, "status": "disabled"}
 
     audio_bytes = await file.read()
     uid = uuid.uuid4().hex[:8]

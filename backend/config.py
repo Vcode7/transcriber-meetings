@@ -21,6 +21,18 @@ def _resolve_base_dir() -> Path:
 BASE_DIR = _resolve_base_dir()
 RUNTIME_DIR = BASE_DIR / "runtime"
 
+def _resolve_models_dir() -> Path:
+    # In development mode, check if sibling Application directory has models
+    dev_models = BASE_DIR.parent / "Application" / "runtime" / "models"
+    if dev_models.is_dir() and not getattr(sys, "frozen", False):
+        return dev_models
+    dev_models_backend = BASE_DIR.parent / "Application" / "backend" / "runtime" / "models"
+    if dev_models_backend.is_dir() and not getattr(sys, "frozen", False):
+        return dev_models_backend
+    return RUNTIME_DIR / "models"
+
+DEFAULT_MODELS_DIR = _resolve_models_dir()
+
 
 class Settings(BaseSettings):
     # SQLite database — relative to runtime/
@@ -54,10 +66,11 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = str(RUNTIME_DIR / "uploads")
 
     # Models directory (encrypted .dat files in production)
-    MODELS_DIR: str = str(RUNTIME_DIR / "models")
+    MODELS_DIR: str = str(DEFAULT_MODELS_DIR)
 
     # Offline mode — when True, never attempt internet downloads
     OFFLINE_MODE: bool = False
+
 
     # Speaker identification
     SPEAKER_SIMILARITY_THRESHOLD: float = 0.65
@@ -76,7 +89,7 @@ class Settings(BaseSettings):
     # Default is relative to base dir; override in .env with absolute path if needed
     OVERLAP_MODEL_PATH: str = str(BASE_DIR / "checkpoints" / "overlap_model.pth")
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
 
 
 settings = Settings()
@@ -84,3 +97,7 @@ settings = Settings()
 # Ensure critical runtime directories exist at import time
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")).parent, exist_ok=True)
+
+# Print resolved paths to standard output
+print(f"[Config] Resolved MODELS_DIR to: {settings.MODELS_DIR}")
+

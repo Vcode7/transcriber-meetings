@@ -129,11 +129,17 @@ async def connect_db():
                 title TEXT,
                 date TEXT,
                 duration REAL DEFAULT 0,
+                planned_start_time TEXT,
+                actual_start_time TEXT,
                 participants TEXT NOT NULL DEFAULT '[]',
+                introduction TEXT,
+                points_discussed TEXT NOT NULL DEFAULT '[]',
+                action_items TEXT NOT NULL DEFAULT '[]',
+                conclusion TEXT,
+                -- legacy columns kept for existing data / rollback compatibility
                 agenda_items TEXT NOT NULL DEFAULT '[]',
                 discussion_summary TEXT,
                 decisions TEXT NOT NULL DEFAULT '[]',
-                action_items TEXT NOT NULL DEFAULT '[]',
                 risks_concerns TEXT NOT NULL DEFAULT '[]',
                 next_steps TEXT NOT NULL DEFAULT '[]',
                 next_meeting_date TEXT,
@@ -143,6 +149,22 @@ async def connect_db():
                 updated_at TEXT NOT NULL
             )
         """))
+
+        # ── Add new MOM columns to existing DBs (idempotent) ────────────
+        for _col, _def in [
+            ("planned_start_time", "TEXT"),
+            ("actual_start_time",  "TEXT"),
+            ("introduction",       "TEXT"),
+            ("points_discussed",   "TEXT NOT NULL DEFAULT '[]'"),
+            ("conclusion",         "TEXT"),
+        ]:
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE minutes_of_meeting ADD COLUMN {_col} {_def}"
+                ))
+            except Exception:
+                pass  # column already exists
+
 
         # ── Global prompt per user (auto-saved) ─────────────────────────
         await conn.execute(text("""

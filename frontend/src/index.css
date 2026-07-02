@@ -3233,6 +3233,201 @@
     max-width: 100%;
     flex-wrap: wrap;
   }
+}
+
+/* Responsive application shell and scroll ownership */
+@media (max-width: 1100px) {
+  .workspace-split {
+    grid-template-columns: minmax(0, 1fr) 48px !important;
+  }
+
+  .insights-pane.is-open {
+    position: fixed !important;
+    z-index: 70;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, calc(100vw - 64px));
+    min-width: min(420px, calc(100vw - 64px));
+    box-shadow: -12px 0 32px hsl(var(--ink) / .2);
+  }
+
+  .insights-pane.is-open>div:first-child {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .dashboard-layout {
+    display: block !important;
+    height: 100dvh;
+    padding-bottom: 64px;
+  }
+
+  .dashboard-content {
+    height: calc(100dvh - 64px);
+  }
+
+  .sidebar {
+    position: fixed !important;
+    z-index: 80;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100% !important;
+    height: 64px;
+    min-height: 64px;
+    padding: 6px 8px;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-top: 2px solid hsl(var(--sidebar-border) / .35);
+    box-shadow: 0 -6px 18px hsl(var(--ink) / .08);
+  }
+
+  .sidebar-logo,
+  .sidebar .nav-section,
+  .sidebar .nav-divider,
+  .sidebar .processing-sidebar-banner,
+  .sidebar-spacer,
+  .sidebar-bottom {
+    display: none !important;
+  }
+
+  .sidebar>.nav-item {
+    flex: 0 0 48px;
+    width: 48px;
+    height: 48px;
+    margin: 0;
+    padding: 0;
+    justify-content: center;
+    border-radius: 12px;
+    transform: none !important;
+  }
+
+  .sidebar>.nav-item .nav-label,
+  .sidebar>.nav-item svg:not(.nav-icon) {
+    display: none;
+  }
+
+  .sidebar>.nav-item.active {
+    transform: none;
+    box-shadow: 2px 2px 0 hsl(var(--accent) / .2);
+  }
+
+  .insights-pane.is-open {
+    bottom: 64px;
+    width: min(100vw, 420px);
+    min-width: min(100vw, 420px);
+  }
+
+  .panel-header {
+    min-height: 58px;
+    padding: .75rem 1rem;
+    gap: 9px;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .panel-header h1 {
+    font-size: 1.28rem;
+  }
+
+  .panel-header p {
+    line-height: 1.35;
+  }
+
+  .page-wrapper {
+    padding: 1.25rem 1rem 2rem;
+    max-width: none;
+  }
+
+  .transcript-subheader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: .6rem;
+  }
+
+  .confidence-legend {
+    width: 100%;
+    gap: 8px !important;
+  }
+
+  .mom-editor-layout {
+    flex-direction: column;
+    overflow-y: auto !important;
+  }
+
+  .mom-editor-main {
+    flex: none !important;
+    overflow: visible !important;
+    padding: 1rem !important;
+  }
+
+  .mom-info-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .mom-version-panel {
+    width: 100% !important;
+    overflow: visible !important;
+    border-left: 0 !important;
+    border-top: 1px solid hsl(var(--border) / .25);
+  }
+
+  .auth-bg {
+    align-items: flex-start;
+    padding: 2.25rem 1rem;
+  }
+
+  .auth-card {
+    padding: 2rem 1.25rem 1.5rem;
+    transform: none;
+    box-shadow: 4px 4px 0 hsl(var(--ink));
+  }
+
+  .custom-audio-player {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .capture-setup,
+  .transcript-scroll {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+
+  .dictionary-add-row {
+    grid-template-columns: 1fr auto !important;
+  }
+
+  .dictionary-add-row input {
+    min-width: 0;
+  }
+
+  .dictionary-table {
+    overflow-x: auto !important;
+    overscroll-behavior-x: contain;
+  }
+
+  .dictionary-table-row {
+    min-width: 520px;
+  }
+}
+
+@media (max-width: 420px) {
+  .sidebar {
+    justify-content: flex-start;
+  }
+
+  .panel-header>div[style*="flex-shrink: 0"]:last-child {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
 
   .btn {
     padding: .58rem .85rem;
@@ -3245,4 +3440,25 @@
   .proc-step-label {
     font-size: .58rem;
   }
+}
+
+/* ── Transcript segment edit button (hover-reveal) ───────────────────────── */
+.transcript-segment:hover .seg-edit-btn {
+  opacity: 1 !important;
+}
+
+.seg-edit-btn:hover {
+  background: hsl(var(--muted)) !important;
+  color: hsl(var(--ink)) !important;
+}
+
+/* Embedded audio player inside TranscriptViewer */
+.custom-audio-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: .5rem .9rem;
+  background: hsl(var(--card));
+  border: 1.5px solid hsl(var(--ink) / .12);
+  border-radius: 12px;
 }

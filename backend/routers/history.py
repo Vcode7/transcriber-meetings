@@ -239,3 +239,59 @@ async def regenerate_insights(
         "key_points": key_points,
         "action_items": action_items,
     }
+
+
+@router.patch("/{recording_id}/transcript")
+async def update_transcript(
+    recording_id: str,
+    segment_index: int = Body(...),
+    text_val: str = Body(..., alias="text"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update a single segment in the transcript and reconstruct the words array with 1.0 probability."""
+    user_id = current_user["id"]
+    async with get_db() as db:
+        r = await db.execute(
+            text("SELECT transcript FROM recordings WHERE id = :id AND user_id = :uid"),
+            {"id": recording_id, "uid": user_id},
+        )
+        row = r.mappings().fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Recording not found.")
+
+        transcript = from_json(row["transcript"], [])
+        if not transcript or segment_index < 0 or segment_index >= len(transcript):
+            raise HTTPException(status_code=400, detail="Invalid segment index.")
+
+        seg = transcript[segment_index]
+        seg["text"] = text_val
+
+        # Reconstruct words array for the new edited text so they remain highlighted
+        words = text_val.split()
+        seg_start = seg.get("start", 0.0)
+        seg_end = seg.get("end", 0.0)
+        duration = max(0.0, seg_end - seg_start)
+        
+        num_words = len(words)
+        word_duration = duration / num_words if num_words > 0 else 0.0
+        
+        seg_words = []
+        for wi, word in enumerate(words):
+            w_start = seg_start + wi * word_duration
+            w_end = w_start + word_duration
+            seg_words.append({
+                "word": word,
+                "start": round(w_start, 3),
+                "end": round(w_end, 3),
+                "probability": 1.0,  # edited words get high confidence highlight (green)
+            })
+        seg["words"] = seg_words
+
+        await db.execute(
+            text("UPDATE recordings SET transcript = :transcript WHERE id = :id"),
+            {"transcript": to_json(transcript), "id": recording_id},
+        )
+        await db.commit()
+
+    return {"status": "success", "segment_index": segment_index, "segment": seg}
+

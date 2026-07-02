@@ -103,6 +103,58 @@ def _get_temp_base() -> Path:
     return base
 
 
+def _ensure_wav2vec2_tokenizer_files(target_dir: Path):
+    """Write standard wav2vec2-base tokenizer config files to the directory if missing."""
+    import json
+    files = {
+        "vocab.json": {
+            "|": 0, "E": 1, "T": 2, "A": 3, "O": 4, "N": 5, "I": 6, "H": 7,
+            "S": 8, "R": 9, "D": 10, "L": 11, "U": 12, "M": 13, "W": 14, "C": 15,
+            "F": 16, "G": 17, "Y": 18, "P": 19, "B": 20, "V": 21, "K": 22, "'": 23,
+            "X": 24, "J": 25, "Q": 26, "Z": 27, "[UNK]": 28, "[PAD]": 29,
+        },
+        "tokenizer_config.json": {
+            "bos_token": "<s>",
+            "cls_token": "<s>",
+            "eos_token": "</s>",
+            "mask_token": "<mask>",
+            "model_max_length": 1000000000000000019884624838656,
+            "pad_token": "[PAD]",
+            "sep_token": "</s>",
+            "tokenizer_class": "Wav2Vec2CTCTokenizer",
+            "unk_token": "[UNK]",
+            "word_delimiter_token": "|"
+        },
+        "special_tokens_map.json": {
+            "bos_token": "<s>",
+            "cls_token": "<s>",
+            "eos_token": "</s>",
+            "mask_token": "<mask>",
+            "pad_token": "[PAD]",
+            "sep_token": "</s>",
+            "unk_token": "[UNK]"
+        },
+        "preprocessor_config.json": {
+            "do_normalize": True,
+            "feature_extractor_type": "Wav2Vec2FeatureExtractor",
+            "feature_size": 1,
+            "padding_side": "right",
+            "padding_value": 0.0,
+            "processor_class": "Wav2Vec2Processor",
+            "return_attention_mask": False,
+            "sampling_rate": 16000
+        }
+    }
+    for filename, content in files.items():
+        dest = target_dir / filename
+        if not dest.exists():
+            try:
+                dest.write_text(json.dumps(content, indent=2), encoding="utf-8")
+                logger.info(f"[ModelLoader] Wrote missing tokenizer file: {filename}")
+            except Exception as e:
+                logger.error(f"[ModelLoader] Failed to write tokenizer file {filename}: {e}")
+
+
 class ModelLoader:
     """
     Transparently loads encrypted model .dat files.
@@ -141,7 +193,9 @@ class ModelLoader:
         from config import settings
 
         dat_file = Path(settings.MODELS_DIR) / f"{generic_name}.dat"
+        print(f"[ModelLoader] Looking for {generic_name}.dat at: {dat_file.resolve()}")
         if not dat_file.exists():
+            print(f"[ModelLoader] NOT FOUND: {dat_file.resolve()}")
             return None
 
         fernet = _get_fernet()
@@ -181,6 +235,9 @@ class ModelLoader:
                 result = extracted[0]
             else:
                 result = temp_dir
+
+            if generic_name == "align_engine":
+                _ensure_wav2vec2_tokenizer_files(result)
 
             logger.info(f"[ModelLoader] {generic_name} ready at {result}")
             return result
@@ -222,6 +279,7 @@ class ModelLoader:
         ]
 
         for candidate in candidates:
+            print(f"[ModelLoader] Checking candidate plain path: {candidate.resolve()}")
             if candidate.is_dir():
                 logger.info(f"[ModelLoader] Using plain model at {candidate}")
                 return candidate
@@ -254,7 +312,7 @@ class ModelLoader:
                     return {}
                 encrypted = f.read()
             manifest = json.loads(fernet.decrypt(encrypted))
-            return {name: (Path(settings.MODELS_DIR) / info["file"]).exists()
+            return {name: (Path(settings.MODELS_DIR) / info.get("file", info.get("dir", ""))).exists()
                     for name, info in manifest.items()}
         except Exception as e:
             logger.error(f"[ModelLoader] Manifest verification failed: {e}")
@@ -262,23 +320,112 @@ class ModelLoader:
 
 
 # ── Install hook: redirect HuggingFace downloads to local cache ──
+def restore_hf_cache():
+    """
+    Decrypt all models in the manifest and copy/link them to the standard HF cache.
+    Allows all third-party libraries (transformers, speechbrain, pyannote, whisperx)
+    to load models fully offline without modifying their from_pretrained calls.
+    """
+    from config import settings
+    import json
+    from pathlib import Path
+    import shutil
+
+    manifest_path = Path(settings.MODELS_DIR) / "model_manifest.dat"
+    if not manifest_path.exists():
+        logger.info("[ModelLoader] No model manifest found; skipping cache restoration.")
+        return
+
+    fernet = _get_fernet()
+    if fernet is None:
+        logger.warning("[ModelLoader] No encryption key found; skipping cache restoration.")
+        return
+
+    try:
+        # Resolve standard HF home cache directory
+        hf_home = Path(os.environ.get(
+            "HF_HOME",
+            str(Path.home() / ".cache" / "huggingface" / "hub")
+        )).resolve()
+
+        with open(manifest_path, "rb") as f:
+            header = f.read(6)
+            if header != _MAGIC:
+                logger.error("[ModelLoader] Invalid magic header in manifest")
+                return
+            encrypted = f.read()
+
+        manifest = json.loads(fernet.decrypt(encrypted))
+        logger.info(f"[ModelLoader] Restoring HF cache for {len(manifest)} models...")
+
+        for generic_name, info in manifest.items():
+            # Skip nlp_engine if handled separately
+            if generic_name == "nlp_engine":
+                continue
+
+            dat_file = Path(settings.MODELS_DIR) / info["file"]
+            if not dat_file.exists():
+                logger.warning(f"[ModelLoader] Model file {info['file']} not found.")
+                continue
+
+            # Decrypt the model using existing try_load_encrypted
+            decrypted_path = ModelLoader.get_model_path(generic_name)
+            if not decrypted_path or not decrypted_path.exists():
+                continue
+
+            # The decrypted path points to the snapshots/<hash>/ directory
+            snapshot_hash = decrypted_path.name
+            original_name = info["original_name"] # e.g. "models--pyannote--speaker-diarization-3.1"
+
+            # Reconstruct the expected HF hub cache directory path
+            target_snapshots_dir = hf_home / original_name / "snapshots"
+            target_hash_dir = target_snapshots_dir / snapshot_hash
+
+            # If it already exists, verify it contains files (no need to copy again)
+            if target_hash_dir.exists() and any(target_hash_dir.iterdir()):
+                logger.debug(f"[ModelLoader] Cache already exists for {original_name} at {target_hash_dir}")
+                continue
+
+            # Copy or link files from decrypted_path to target_hash_dir
+            logger.info(f"[ModelLoader] Syncing {generic_name} to HF cache: {target_hash_dir}")
+            target_hash_dir.mkdir(parents=True, exist_ok=True)
+            for item in decrypted_path.iterdir():
+                dest_item = target_hash_dir / item.name
+                if item.is_dir():
+                    if dest_item.exists():
+                        shutil.rmtree(dest_item)
+                    shutil.copytree(str(item), str(dest_item))
+                else:
+                    shutil.copy2(str(item), str(dest_item))
+
+            # Also create standard ref file if missing
+            ref_dir = hf_home / original_name / "refs"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            ref_file = ref_dir / "main"
+            if not ref_file.exists():
+                ref_file.write_text(snapshot_hash, encoding="utf-8")
+
+    except Exception as e:
+        logger.error(f"[ModelLoader] HF cache restoration failed: {e}", exc_info=True)
+
+
+# ── Install hook: redirect HuggingFace downloads to local cache ──
 def setup_offline_hf_environment():
     """
     Configure HuggingFace transformers/datasets to:
     1. Never download files from the internet
-    2. Use MODELS_DIR as the cache root (after decryption)
+    2. Use the standard HF hub cache (models are already cached there)
 
-    Call this before importing any HuggingFace library.
+    Always enforced — this application is deployed offline and never requires
+    internet access. Using setdefault so a developer can override by pre-setting
+    the env vars before launching.
     """
-    from config import settings
+    # Enforce offline mode unconditionally
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-    if not settings.OFFLINE_MODE:
-        return  # Only enforce in offline mode
+    logger.info("[ModelLoader] HuggingFace offline mode enforced (no internet calls).")
 
-    # Set HF offline flags
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["HF_DATASETS_OFFLINE"] = "1"
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ.setdefault("HF_HOME", str(Path(settings.MODELS_DIR) / "_hf_home"))
-
-    logger.info("[ModelLoader] Offline mode: HuggingFace downloads disabled.")
+    # Restore/verify cache directories from local decrypted models
+    restore_hf_cache()
