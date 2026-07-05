@@ -3,11 +3,11 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
-  Sun, Moon, MonitorSpeaker, Sparkles, Lock, Loader, BookOpen,
+  Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
-import { useProcessingStore } from '../store/processing'
+import { useJobsStore } from '../store/jobs'
 import api from '../api/client'
 
 const NAV = [
@@ -26,12 +26,17 @@ export default function Sidebar() {
   const logout = useAuthStore((s) => s.logout)
   const user = useAuthStore((s) => s.user)
   const { theme, sidebarCollapsed: collapsed, toggleTheme, toggleSidebar } = useUIStore()
-  const { isProcessing, stage } = useProcessingStore()
+  const jobs = useJobsStore((s) => s.jobs)
   const navigate = useNavigate()
   const [loggingOut, setLoggingOut] = useState(false)
 
+  // Active jobs = any job not yet done/error
+  const activeJobs = jobs.filter((j) => j.status !== 'done' && j.status !== 'error')
+  const hasActiveJob = activeJobs.length > 0
+  const primaryJob = activeJobs[0] ?? null
+
   const handleLogout = async () => {
-    if (isProcessing || loggingOut) return
+    if (loggingOut) return
     setLoggingOut(true)
     try {
       // Revoke session server-side (clears HttpOnly cookie)
@@ -59,10 +64,15 @@ export default function Sidebar() {
     generating_insights: 'AI insights…',
   }
 
-  const handleLockedClick = () => {
-    // Visual feedback — the overlay on the page is the primary UX,
-    // but if the sidebar is collapsed we still need some hint.
-    // Nothing needed; the nav-locked class already blocks pointer events.
+  // Navigate to the source page for the primary active job
+  const handleBannerClick = () => {
+    if (!primaryJob) return
+    const sourceRoutes: Record<string, string> = {
+      'record': '/dashboard',
+      'upload': '/dashboard/upload',
+      'tab-audio': '/dashboard/tab-audio',
+    }
+    navigate(sourceRoutes[primaryJob.source] ?? '/dashboard')
   }
 
   return (
@@ -83,7 +93,7 @@ export default function Sidebar() {
             top: -2, right: -2,
             width: 7, height: 7,
             borderRadius: '50%',
-            background: isProcessing ? 'hsl(var(--accent))' : 'hsl(var(--accent))',
+            background: hasActiveJob ? 'hsl(var(--accent))' : 'hsl(var(--accent))',
             boxShadow: '0 0 6px hsl(var(--accent))',
             border: '1.5px solid hsl(var(--card))',
           }} className="animate-pulse-rec" />
@@ -95,16 +105,31 @@ export default function Sidebar() {
         )}
       </div>
 
-      {/* ── Processing banner (shown when a job is running) ── */}
-      {isProcessing && (
-        <div className="processing-sidebar-banner">
+      {/* ── Active jobs banner (shown when any job is running) ── */}
+      {hasActiveJob && (
+        <div
+          className="processing-sidebar-banner"
+          onClick={handleBannerClick}
+          style={{ cursor: 'pointer' }}
+          title="Click to view job progress"
+        >
           <Loader size={11} className="spin" style={{ flexShrink: 0 }} />
           {!collapsed && (
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {STAGE_LABELS[stage ?? ''] || 'Processing…'}
+              {STAGE_LABELS[primaryJob?.stage ?? ''] || 'Processing…'}
             </span>
           )}
-          {!collapsed && <Lock size={10} style={{ flexShrink: 0, marginLeft: 'auto', opacity: 0.7 }} />}
+          {!collapsed && activeJobs.length > 1 && (
+            <span style={{
+              marginLeft: 'auto', flexShrink: 0,
+              fontSize: '.68rem', fontWeight: 700,
+              background: 'hsl(var(--accent) / .2)',
+              color: 'hsl(var(--accent))',
+              padding: '1px 5px', borderRadius: '999px',
+            }}>
+              {activeJobs.length}
+            </span>
+          )}
         </div>
       )}
 
@@ -115,19 +140,11 @@ export default function Sidebar() {
       {NAV.map(({ to, icon: Icon, label, end }) => (
         <NavLink
           key={to} to={to} end={end}
-          className={({ isActive }) =>
-            `nav-item ${isActive ? 'active' : ''} ${isProcessing ? 'nav-locked' : ''}`
-          }
-          title={isProcessing ? 'Processing in progress — please wait' : tip(label)}
-          onClick={isProcessing ? (e) => e.preventDefault() : undefined}
-          aria-disabled={isProcessing}
-          tabIndex={isProcessing ? -1 : undefined}
+          className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+          title={tip(label)}
         >
           <Icon size={16} className="nav-icon" />
           {!collapsed && <span className="nav-label">{label}</span>}
-          {!collapsed && isProcessing && (
-            <Lock size={10} style={{ marginLeft: 'auto', opacity: 0.5, flexShrink: 0 }} />
-          )}
         </NavLink>
       ))}
 
@@ -137,19 +154,11 @@ export default function Sidebar() {
       {VOICE_NAV.map(({ to, icon: Icon, label }) => (
         <NavLink
           key={to} to={to}
-          className={({ isActive }) =>
-            `nav-item ${isActive ? 'active' : ''} ${isProcessing ? 'nav-locked' : ''}`
-          }
-          title={isProcessing ? 'Processing in progress — please wait' : tip(label)}
-          onClick={isProcessing ? (e) => e.preventDefault() : undefined}
-          aria-disabled={isProcessing}
-          tabIndex={isProcessing ? -1 : undefined}
+          className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+          title={tip(label)}
         >
           <Icon size={16} className="nav-icon" />
           {!collapsed && <span className="nav-label">{label}</span>}
-          {!collapsed && isProcessing && (
-            <Lock size={10} style={{ marginLeft: 'auto', opacity: 0.5, flexShrink: 0 }} />
-          )}
         </NavLink>
       ))}
 
@@ -262,11 +271,11 @@ export default function Sidebar() {
         )}
 
         <button
-          className={`nav-item ${isProcessing ? 'nav-locked' : ''}`}
+          className={`nav-item `}
           style={{ color: 'hsl(var(--destructive))', margin: '2px 0' }}
           onClick={handleLogout}
-          title={isProcessing ? 'Cannot log out while processing' : tip('Logout')}
-          disabled={isProcessing || loggingOut}
+          title={tip('Logout')}
+          disabled={loggingOut}
         >
           {loggingOut
             ? <Loader size={16} className="spin nav-icon" />

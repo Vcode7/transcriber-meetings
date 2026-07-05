@@ -118,45 +118,130 @@ TRANSCRIPT:
 
 Comprehensive meeting report:"""
 
-
 MOM_PROMPT = """\
-You are an expert executive assistant generating professional Minutes of Meeting (MoM).
+You are an experienced Executive Assistant responsible for producing professional, comprehensive, and factual Minutes of Meeting (MoM).
 
-Analyze the transcript and return ONLY a valid JSON object. Do not include markdown, ```json, or any other text outside the JSON.
+Your task is to analyze the complete meeting transcript and generate a structured Minutes of Meeting that captures ALL meaningful discussion while remaining concise and free of repetition.
 
-JSON schema (STRICTLY follow this — do not add or rename keys):
+Return ONLY a valid JSON object.
+Do NOT wrap the response in markdown.
+Do NOT include ```json.
+Do NOT include explanations or any text outside the JSON.
+
+The output MUST strictly follow this schema:
+
 {{
-  "title": "Concise professional meeting title",
-  "introduction": "One paragraph (3-5 sentences) that clearly defines the meeting agenda, purpose, and topics discussed. This should read as a formal introduction to the meeting.",
+  "title": "Professional meeting title",
+  "introduction": "A professional overview describing the meeting purpose, agenda, participants' objectives, and overall context.",
   "points_discussed": [
-    "Point 1 — a complete sentence describing what was discussed (minimum 3, maximum 10)",
-    "Point 2 — another key discussion point"
+    "Each item describes one meaningful discussion topic."
   ],
   "action_items": [
-    {{"task": "Task description", "owner": "Speaker name or Unassigned", "deadline": "Date or ASAP"}}
+    {{
+      "task": "Task description",
+      "owner": "Speaker name or Unassigned",
+      "deadline": "Deadline if mentioned, otherwise ASAP or null"
+    }}
   ],
-  "general_action_items": ["Action item not assigned to any specific speaker"],
-  "conclusion": "One to two paragraphs summarizing outcomes, agreements reached, and the overall conclusion of the meeting.",
-  "actual_start_time": "HH:MM if mentioned in transcript or null",
-  "next_meeting_date": "Date/time if mentioned or null"
+  "general_action_items": [
+    "Action item without a specific owner"
+  ],
+  "conclusion": "Professional conclusion summarizing decisions, agreements, pending items, risks, and next steps.",
+  "actual_start_time": "HH:MM if explicitly mentioned, otherwise null",
+  "next_meeting_date": "Date/time if explicitly mentioned, otherwise null"
 }}
 
-Rules:
-- introduction: Write exactly ONE paragraph. Define the meeting's agenda and all topics covered.
-- points_discussed: List 3 to 10 points. Each point is a single complete sentence. Cover every major topic.
-- action_items: Include speaker name as owner wherever possible. If general, use 'Unassigned'.
-- general_action_items: Only items with no clear owner.
-- conclusion: Summarize what was concluded, agreed upon, and any next steps.
-- Do NOT hallucinate. Only report what is in the transcript.
-- Preserve all technical terms, acronyms, project names exactly.
-- If a field has no relevant content, use [] for arrays or null for strings.
+Generation Guidelines
+
+TITLE
+- Generate a concise, professional meeting title.
+- Reflect the primary objective of the meeting.
+
+INTRODUCTION
+- Write a well-structured executive introduction.
+- Clearly explain:
+  - meeting purpose
+  - overall agenda
+  - major subjects discussed
+  - project/context
+- Do not simply repeat the transcript.
+
+POINTS DISCUSSED
+- Capture EVERY important discussion topic.
+- There is NO maximum or minimum number of points.
+- Create one point for every meaningful topic discussed.
+- Merge duplicate or repetitive discussions into a single comprehensive point.
+- Ignore greetings, filler conversations, acknowledgements, interruptions, and casual chit-chat.
+- Preserve important technical details, architecture discussions, implementation decisions, requirements, risks, blockers, design changes, timelines, dependencies, and stakeholder decisions.
+- Each point should be:
+  - self-contained
+  - factually accurate
+  - written as a complete sentence
+  - professional
+- Maintain the chronological flow whenever practical.
+
+ACTION ITEMS
+- Extract EVERY actionable task discussed.
+- Include:
+  - implementation tasks
+  - follow-up work
+  - reviews
+  - testing
+  - documentation
+  - approvals
+  - bug fixes
+  - investigations
+  - deployments
+- Infer the owner only when clearly supported by the transcript.
+- Otherwise use "Unassigned".
+- Preserve deadlines exactly if mentioned.
+- Never invent deadlines.
+
+GENERAL ACTION ITEMS
+- Include only actionable tasks that have no identifiable owner.
+- Do not duplicate items already listed in action_items.
+
+CONCLUSION
+- Write a professional executive summary.
+- Include:
+  - key outcomes
+  - decisions made
+  - agreements reached
+  - unresolved issues
+  - risks
+  - future work
+  - next steps
+- Do not introduce information not present in the transcript.
+
+EXTRACTION RULES
+- Never hallucinate facts.
+- Never invent attendees, owners, dates, deadlines, or decisions.
+- Preserve all technical terminology exactly:
+  - API names
+  - model names
+  - class names
+  - filenames
+  - project names
+  - architecture
+  - frameworks
+  - libraries
+  - database names
+  - commands
+  - code identifiers
+  - acronyms
+- If conflicting information exists, report only what was actually discussed.
+- Ignore repeated statements and produce a clean consolidated MoM.
+- If a field has no relevant information:
+  - arrays → []
+  - string/date fields → null
+
+The final output must be valid JSON and nothing else.
 
 TRANSCRIPT:
 {transcript}
 
-JSON MoM:"""
-
-
+JSON:
+"""
 
 KEY_POINTS_PROMPT = """\
 You are an expert meeting analyst. Extract the key discussion points from the following meeting transcript.
@@ -181,19 +266,26 @@ Key discussion points:"""
 ACTION_ITEMS_PROMPT = """\
 You are an expert meeting analyst. Extract all action items from the following meeting transcript.
 
-Return a numbered list. For each action item include:
-1. [Task description] — Owner: [name or Unassigned] — Deadline: [date or ASAP]
+Group them into sections:
 
-If there are no action items, return: None identified.
+General Action Items
+- [items not clearly assigned to any specific speaker]
+
+[Speaker Name or Role if items were assigned to them]
+- [their specific action items]
 
 Rules:
+- Only include a speaker section if that speaker has action items.
+- Do NOT include empty sections.
+- Do NOT include Owner or Deadline fields.
+- Do NOT number items. Use - prefix for each item.
+- If there are no action items, return: None identified.
 - Preserve all technical terms and project names exactly.
-- Only include explicitly stated tasks, commitments, or follow-ups.
 
 TRANSCRIPT:
 {transcript}
 
-Action items:"""
+Action items (grouped by speaker):"""
 
 
 KEY_DECISIONS_PROMPT = """\
@@ -354,28 +446,31 @@ class AIProvider(ABC):
     """Abstract interface for all AI providers."""
 
     @abstractmethod
-    def generate_summary(self, transcript: List[Dict]) -> str: ...
+    def build_context_summary(self, transcript: List[Dict]) -> str: ...
 
     @abstractmethod
-    def generate_key_points(self, transcript: List[Dict]) -> List[str]: ...
+    def generate_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str: ...
 
     @abstractmethod
-    def generate_action_items(self, transcript: List[Dict]) -> List[str]: ...
+    def generate_key_points(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]: ...
 
     @abstractmethod
-    def generate_key_decisions(self, transcript: List[Dict]) -> List[str]: ...
+    def generate_action_items(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]: ...
 
     @abstractmethod
-    def generate_mom(self, transcript: List[Dict], recording_meta: dict) -> dict: ...
+    def generate_key_decisions(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]: ...
 
     @abstractmethod
-    def generate_executive_summary(self, transcript: List[Dict]) -> dict: ...
+    def generate_mom(self, transcript: List[Dict], recording_meta: dict, context: Optional[str] = None) -> dict: ...
 
     @abstractmethod
-    def generate_short_summary(self, transcript: List[Dict]) -> str: ...
+    def generate_executive_summary(self, transcript: List[Dict], context: Optional[str] = None) -> dict: ...
 
     @abstractmethod
-    def generate_detailed_summary(self, transcript: List[Dict]) -> str: ...
+    def generate_short_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str: ...
+
+    @abstractmethod
+    def generate_detailed_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str: ...
 
     @abstractmethod
     def generate_speaker_summaries(self, transcript: List[Dict]) -> Dict[str, Dict]: ...
@@ -431,21 +526,18 @@ class QwenProvider(AIProvider):
             load_in_4bit = getattr(settings, "QWEN_LOAD_IN_4BIT", True)
 
             # ── Resolve model path ────────────────────────────────
-            # In production the Qwen model is shipped unencrypted in
-            # runtime/nlp-engine/ (plain directory, not a .dat).
-            # ModelLoader._try_load_plain() will find it there.
-            # In development mode it falls back to the HuggingFace Hub ID.
+            # The Qwen model must be present in runtime/nlp_engine/ (or runtime/models/nlp_engine/).
+            # No internet fallback — if missing, fail with a clear error.
             local_path = ModelLoader.get_model_path("nlp_engine")
             if local_path is not None:
                 load_from = str(local_path)
                 local_files_only = True
                 logger.info(f"[QwenAI] Loading from local path: {load_from}")
             else:
-                load_from = model_id
-                local_files_only = False
-                logger.warning(
-                    "[QwenAI] Local nlp-engine model not found in runtime/. "
-                    "Falling back to HuggingFace Hub — requires internet access."
+                raise FileNotFoundError(
+                    f"[QwenAI] nlp_engine model not found in MODELS_DIR ({settings.MODELS_DIR}) "
+                    "or runtime/nlp_engine/. "
+                    "Copy the Qwen3-4B model folder to 'Application/runtime/nlp_engine/' and restart."
                 )
 
             # Determine device
@@ -511,6 +603,25 @@ class QwenProvider(AIProvider):
             cls._pipeline = None
 
         return cls._pipeline
+
+    @classmethod
+    def unload_model(cls):
+        """Unload Qwen model from VRAM and CPU memory."""
+        if cls._pipeline is not None or cls._model is not None:
+            logger.info("[QwenAI] Unloading Qwen3 model...")
+            cls._pipeline = None
+            cls._model = None
+            cls._tokenizer = None
+            cls._load_attempted = False
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            logger.info("[QwenAI] Qwen3 model unloaded.")
 
     def _infer(self, prompt: str, max_new_tokens: int = 512) -> str:
         """Run inference with the loaded Qwen3 model."""
@@ -590,7 +701,7 @@ class QwenProvider(AIProvider):
             logger.info(f"[QwenAI] Summarizing chunk {i+1}/{len(chunks)}")
             summary = self._infer(
                 CHUNK_SUMMARY_PROMPT.format(chunk=chunk),
-                max_new_tokens=200,
+                max_new_tokens=256,
             )
             if summary:
                 chunk_summaries.append(summary)
@@ -599,51 +710,72 @@ class QwenProvider(AIProvider):
         logger.info(f"[QwenAI] Merged {len(chunk_summaries)} chunk summaries ({len(merged.split())} words)")
         return merged
 
+    def build_context_summary(self, transcript: List[Dict]) -> str:
+        """
+        Build the compressed context summary for a transcript.
+
+        This is the SINGLE entry point for hierarchical summarization.
+        Call this once, store the result in the DB, and pass it as the
+        `context` parameter to all downstream AI methods to avoid
+        redundant LLM inference.
+
+        For transcripts <= 1500 words, returns the raw formatted dialogue
+        (no inference needed). For longer transcripts, runs chunked
+        summarization (N inference calls, one per ~700-word chunk).
+        """
+        dialogue = _format_transcript(transcript)
+        if not dialogue.strip():
+            return ""
+        return self._hierarchical_summarize(dialogue)
+
     # ── AIProvider interface ──────────────────────────────────
 
-    def generate_summary(self, transcript: List[Dict]) -> str:
+    def generate_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str:
         """Generate a short meeting summary (backward compat alias for short_summary)."""
-        return self.generate_short_summary(transcript)
+        return self.generate_short_summary(transcript, context=context)
 
-    def generate_short_summary(self, transcript: List[Dict]) -> str:
-        """Generate a concise ~60-word professional summary."""
-        plain = _format_for_summary(transcript)
-        if not plain.strip():
+    def generate_short_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str:
+        """Generate a concise ~120-word professional summary. Uses pre-computed context if supplied."""
+        if context is None:
+            plain = _format_for_summary(transcript)
+            if not plain.strip():
+                return "No transcript available to summarize."
+            context = self._hierarchical_summarize(plain)
+        elif not context.strip():
             return "No transcript available to summarize."
-
-        # For very long transcripts, first compress
-        compressed = self._hierarchical_summarize(plain)
         result = self._infer(
-            SHORT_SUMMARY_PROMPT.format(transcript=compressed[:3000]),
+            SHORT_SUMMARY_PROMPT.format(transcript=context[:3000]),
             max_new_tokens=120,
         )
         return result or "Unable to generate summary."
 
-    def generate_detailed_summary(self, transcript: List[Dict]) -> str:
-        """Generate a comprehensive sectioned meeting report."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
+    def generate_detailed_summary(self, transcript: List[Dict], context: Optional[str] = None) -> str:
+        """Generate a comprehensive sectioned meeting report. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return "No transcript available to summarize."
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
             return "No transcript available to summarize."
-
-        # For long transcripts use hierarchical approach
-        compressed = self._hierarchical_summarize(dialogue)
-
         result = self._infer(
-            DETAILED_SUMMARY_PROMPT.format(transcript=compressed[:4000]),
-            max_new_tokens=1200,
+            DETAILED_SUMMARY_PROMPT.format(transcript=context[:4000]),
+            max_new_tokens=3000,
         )
         return result or "Unable to generate detailed summary."
 
-    def generate_key_points(self, transcript: List[Dict]) -> List[str]:
-        """Extract key discussion points with Topic: Explanation format."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
+    def generate_key_points(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]:
+        """Extract key discussion points. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return []
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
             return []
-
-        compressed = self._hierarchical_summarize(dialogue)
         raw = self._infer(
-            KEY_POINTS_PROMPT.format(transcript=compressed[:3500]),
-            max_new_tokens=600,
+            KEY_POINTS_PROMPT.format(transcript=context[:3500]),
+            max_new_tokens=1028,
         )
         if not raw:
             return []
@@ -656,10 +788,8 @@ class QwenProvider(AIProvider):
             if not line:
                 continue
             if line.startswith("•"):
-                # New topic
                 current_topic = line.lstrip("• ").rstrip(":")
             elif current_topic and not line.startswith("•"):
-                # Explanation line — combine with topic
                 points.append(f"{current_topic}: {line}")
                 current_topic = None
             elif not current_topic and len(line) > 10:
@@ -667,50 +797,65 @@ class QwenProvider(AIProvider):
 
         return points[:10] if points else _clean_list(raw)[:8]
 
-    def generate_action_items(self, transcript: List[Dict]) -> List[str]:
-        """Extract action items with owner and deadline."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
+    def generate_action_items(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]:
+        """Extract action items grouped by General / Speaker sections. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return []
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
+            return []
+        raw = self._infer(
+            ACTION_ITEMS_PROMPT.format(transcript=context[:3500]),
+            max_new_tokens=1028,
+        )
+        if not raw or "none identified" in raw.lower():
             return []
 
-        compressed = self._hierarchical_summarize(dialogue)
+        lines = []
+        for line in raw.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            stripped = re.sub(r'^\d+\.\s*', '', stripped)
+            lines.append(stripped)
+        return lines if lines else []
+
+    def generate_key_decisions(self, transcript: List[Dict], context: Optional[str] = None) -> List[str]:
+        """Extract concrete decisions made during the meeting. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return []
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
+            return []
         raw = self._infer(
-            ACTION_ITEMS_PROMPT.format(transcript=compressed[:3500]),
-            max_new_tokens=400,
+            KEY_DECISIONS_PROMPT.format(transcript=context[:3500]),
+            max_new_tokens=1028,
         )
         if not raw or "none identified" in raw.lower():
             return []
         return _clean_list(raw)
 
-    def generate_key_decisions(self, transcript: List[Dict]) -> List[str]:
-        """Extract concrete decisions made during the meeting."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
-            return []
-
-        compressed = self._hierarchical_summarize(dialogue)
-        raw = self._infer(
-            KEY_DECISIONS_PROMPT.format(transcript=compressed[:3500]),
-            max_new_tokens=300,
-        )
-        if not raw or "none identified" in raw.lower():
-            return []
-        return _clean_list(raw)
-
-    def generate_executive_summary(self, transcript: List[Dict]) -> dict:
-        """Generate structured executive summary for PDF reports."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
+    def generate_executive_summary(self, transcript: List[Dict], context: Optional[str] = None) -> dict:
+        """Generate structured executive summary for PDF reports. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return {
+                    "purpose": "No transcript available.",
+                    "discussion_points": [], "outcomes": [], "next_steps": [],
+                }
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
             return {
                 "purpose": "No transcript available.",
-                "discussion_points": [],
-                "outcomes": [],
-                "next_steps": [],
+                "discussion_points": [], "outcomes": [], "next_steps": [],
             }
-
-        compressed = self._hierarchical_summarize(dialogue)
         raw = self._infer(
-            EXECUTIVE_SUMMARY_PROMPT.format(transcript=compressed[:4000]),
+            EXECUTIVE_SUMMARY_PROMPT.format(transcript=context[:4000]),
             max_new_tokens=700,
         )
 
@@ -851,17 +996,19 @@ class QwenProvider(AIProvider):
 
         return results
 
-    def generate_mom(self, transcript: List[Dict], recording_meta: dict) -> dict:
-        """Generate full enterprise-grade Minutes of Meeting."""
-        dialogue = _format_transcript(transcript)
-        if not dialogue.strip():
+    def generate_mom(self, transcript: List[Dict], recording_meta: dict, context: Optional[str] = None) -> dict:
+        """Generate full enterprise-grade Minutes of Meeting. Uses pre-computed context if supplied."""
+        if context is None:
+            dialogue = _format_transcript(transcript)
+            if not dialogue.strip():
+                return _empty_mom(recording_meta)
+            context = self._hierarchical_summarize(dialogue)
+        elif not context.strip():
             return _empty_mom(recording_meta)
 
-        compressed = self._hierarchical_summarize(dialogue)
-
         raw = self._infer(
-            MOM_PROMPT.format(transcript=compressed[:4500]),
-            max_new_tokens=1500,
+            MOM_PROMPT.format(transcript=context[:4500]),
+            max_new_tokens=3072,
         )
 
         if not raw:
@@ -945,16 +1092,10 @@ def get_provider() -> QwenProvider:
 
 def warm_up_model():
     """
-    Pre-load the Qwen3 4B model during application startup.
-    Call this once from the FastAPI lifespan to avoid cold-start delays.
+    Pre-loading is disabled to optimize memory lifecycle.
+    Models are loaded lazily on demand and unloaded immediately after use.
     """
-    logger.info("[QwenAI] Warming up Qwen3 4B Instruct model...")
-    provider = get_provider()
-    pipe = provider._get_pipeline()
-    if pipe is not None:
-        logger.info("[QwenAI] Model warm-up complete ✓")
-    else:
-        logger.warning("[QwenAI] Model warm-up failed — inference will be unavailable")
+    logger.info("[QwenAI] Model warm-up deferred (load-on-demand enabled).")
 
 
 # ══════════════════════════════════════════════════════════════

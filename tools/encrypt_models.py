@@ -49,11 +49,10 @@ MODEL_REGISTRY: Dict[str, list] = {
         "models--speechbrain--spkrec-ecapa-voxceleb",
     ],
     "align_engine": [
-        "models--facebook--wav2vec2-base",
-        "models--facebook--hubert-base-ls960",
+        "models--facebook--wav2vec2-base-960h",
     ],
     "wespeaker": [
-        "models--pyannote--wespeaker-voxceleb-resnet34-LM",
+        "models--hbredin--wespeaker-voxceleb-resnet34-LM",
     ],
 }
 
@@ -184,47 +183,39 @@ def copy_directory(src_dir: Path, dest_dir: Path) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Encrypt AI models for distribution")
-    parser.add_argument("--output", default="Application/runtime/models", help="Output directory for encrypted models")
-    parser.add_argument("--key-file", default="tools/model.key", help="Encryption key file path")
+    parser = argparse.ArgumentParser(description="Package AI models for distribution (unencrypted)")
+    parser.add_argument("--output", default="Application/runtime/models", help="Output directory for packaged models")
     parser.add_argument("--hf-cache", help="Override HuggingFace cache directory")
-    parser.add_argument("--dry-run", action="store_true", help="List models without encrypting")
+    parser.add_argument("--dry-run", action="store_true", help="List models without packaging")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
-    key_file = Path(args.key_file)
     cache_dir = Path(args.hf_cache) if args.hf_cache else get_hf_cache_dir()
 
     if args.dry_run:
         logger.info(f"DRY RUN — HF Cache: {cache_dir}")
-        logger.info("[ENCRYPTED]")
+        logger.info("[MODELS TO PACKAGE]")
         for generic_name, candidates in MODEL_REGISTRY.items():
             found = find_model_in_cache(candidates, cache_dir)
             status = "✓ FOUND" if found else "✗ MISSING"
             logger.info(f"  [{status}] {generic_name}: {found or candidates[0]}")
-        logger.info("[PLAIN COPY — no encryption]")
         for generic_name, candidates in PLAIN_COPY_REGISTRY.items():
             found = find_model_in_cache(candidates, cache_dir)
             status = "✓ FOUND" if found else "✗ MISSING"
             logger.info(f"  [{status}] {generic_name}: {found or candidates[0]}")
         return
 
-    try:
-        from cryptography.fernet import Fernet
-    except ImportError:
-        logger.error("Install cryptography: pip install cryptography")
-        sys.exit(1)
-
     output_dir.mkdir(parents=True, exist_ok=True)
-    key_file.parent.mkdir(parents=True, exist_ok=True)
-
-    key = get_or_create_key(key_file)
-    fernet = Fernet(key)
 
     manifest = {}
     missing = []
 
-    for generic_name, candidates in MODEL_REGISTRY.items():
+    # Merge registries so we process everything in the same way
+    all_registries = {}
+    all_registries.update(MODEL_REGISTRY)
+    all_registries.update(PLAIN_COPY_REGISTRY)
+
+    for generic_name, candidates in all_registries.items():
         logger.info(f"\n[{generic_name}]")
         model_path = find_model_in_cache(candidates, cache_dir)
 
@@ -240,35 +231,6 @@ def main():
             missing.append(generic_name)
             continue
 
-        dest = output_dir / f"{generic_name}.dat"
-        try:
-            checksum = encrypt_directory(actual_path, dest, fernet)
-            manifest[generic_name] = {
-                "original_name": candidates[0],
-                "checksum": checksum,
-                "file": f"{generic_name}.dat",
-            }
-        except Exception as e:
-            logger.error(f"  FAILED: {e}")
-            missing.append(generic_name)
-
-    # ── Plain-copy pass (large models, no encryption) ──────────
-    plain_copied = []
-    for generic_name, candidates in PLAIN_COPY_REGISTRY.items():
-        logger.info(f"\n[{generic_name}] (plain copy — no encryption)")
-        model_path = find_model_in_cache(candidates, cache_dir)
-
-        if model_path is None:
-            logger.warning(f"  SKIPPED — not found in cache: {candidates}")
-            missing.append(generic_name)
-            continue
-
-        actual_path = find_snapshots_dir(model_path)
-        if actual_path is None:
-            logger.warning(f"  SKIPPED — no snapshots found in {model_path}")
-            missing.append(generic_name)
-            continue
-
         dest_dir = output_dir / generic_name
         try:
             checksum = copy_directory(actual_path, dest_dir)
@@ -277,28 +239,22 @@ def main():
                 "checksum": checksum,
                 "type": "plain",
                 "dir": generic_name,
+                "snapshot_hash": actual_path.name,
             }
-            plain_copied.append(generic_name)
         except Exception as e:
             logger.error(f"  FAILED: {e}")
             missing.append(generic_name)
 
-    # Encrypt and write manifest
-    manifest_json = json.dumps(manifest, indent=2).encode()
-    encrypted_manifest = fernet.encrypt(manifest_json)
-    manifest_path = output_dir / "model_manifest.dat"
-    with open(manifest_path, "wb") as f:
-        f.write(b"VSDAT\x01")
-        f.write(encrypted_manifest)
+    # Write manifest in plain text JSON
+    manifest_path = output_dir / "model_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info(f"Wrote manifest: {manifest_path}")
 
-    encrypted_count = len(manifest) - len(plain_copied)
     logger.info(f"\n{'='*60}")
-    logger.info(f"Packaged: {encrypted_count} encrypted + {len(plain_copied)} plain → {output_dir}")
-    if plain_copied:
-        logger.info(f"Plain (no encryption): {plain_copied}")
+    logger.info(f"Packaged: {len(manifest)} models → {output_dir}")
     if missing:
         logger.warning(f"Missing:  {missing}")
-    logger.info(f"Key file: {key_file}  ← Keep this PRIVATE")
     logger.info(f"{'='*60}")
 
 

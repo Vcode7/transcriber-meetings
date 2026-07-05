@@ -37,6 +37,25 @@ def get_encoder():
     return _encoder
 
 
+def unload_encoder():
+    """Unload the speaker embedding encoder to free RAM/VRAM."""
+    global _encoder
+    if _encoder is not None:
+        logger.info("[Embedding] Unloading VoiceEncoder...")
+        del _encoder
+        _encoder = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[Embedding] VoiceEncoder unloaded.")
+
+
+
 def _load_audio(file_path: str, target_sr: int = SAMPLE_RATE) -> tuple[np.ndarray, int]:
     """Load mono float32 audio with librosa using keyword-only-safe resampling."""
     import librosa

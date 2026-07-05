@@ -8,6 +8,17 @@ import InlineEdit from '../components/InlineEdit'
 import api from '../api/client'
 import type { RecordingDetail } from '../types/recording'
 
+// MoM data shape (mirrors mom_router.py response)
+interface MomData {
+  title?: string
+  introduction?: string
+  points_discussed?: string[]
+  action_items?: Array<{ task: string; owner: string; deadline: string }>
+  conclusion?: string
+  participants?: string[]
+  date?: string
+}
+
 function fmtDuration(s: number) {
   const m = Math.floor(s / 60)
   const sec = Math.floor(s % 60).toString().padStart(2, '0')
@@ -43,6 +54,8 @@ export default function HistoryDetail() {
   const [regenerating, setRegenerating] = useState(false)
   const [regenDone, setRegenDone] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false);
+  const [momData, setMomData] = useState<MomData | null>(null)
+  const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
   // â”€â”€ Resizable chat panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [chatWidth, setChatWidth] = useState<number>(() => {
     const saved = localStorage.getItem('ai-chat-panel-width')
@@ -110,9 +123,34 @@ export default function HistoryDetail() {
     }
   }
 
+  /** Generate AI insights on-demand (called from AIChatPanel Generate button) */
+  const handleGenerateInsights = useCallback(async (tasks: string[]) => {
+    if (!id || isGeneratingInsights) return
+    setIsGeneratingInsights(true)
+    try {
+      const res = await api.post(`/history/${id}/generate-insights`, { tasks })
+      setRec((prev) => prev ? {
+        ...prev,
+        summary: res.data.short_summary ?? prev.summary,
+        short_summary: res.data.short_summary ?? prev.short_summary,
+        detailed_summary: res.data.detailed_summary ?? prev.detailed_summary,
+        key_points: res.data.key_points ?? prev.key_points,
+        action_items: res.data.action_items ?? prev.action_items,
+      } : prev)
+    } catch (err: unknown) {
+      console.error('[GenerateInsights] Failed:', err)
+    } finally {
+      setIsGeneratingInsights(false)
+    }
+  }, [id, isGeneratingInsights])
+
   useEffect(() => {
     if (!id) return
     api.get(`/history/${id}`).then((r) => setRec(r.data)).finally(() => setLoading(false))
+    // Also fetch MoM data (404 means not generated yet — that's fine)
+    api.get(`/mom/${id}`)
+      .then((r) => setMomData(r.data))
+      .catch(() => setMomData(null))
   }, [id])
 
   useEffect(() => {
@@ -405,8 +443,11 @@ export default function HistoryDetail() {
           keyPoints={rec.key_points}
           actionItems={rec.action_items}
           speakerSummary={rec.speaker_summary}
+          momData={momData}
           isOpen={chatOpen}
           onToggle={() => setChatOpen((o) => !o)}
+          onGenerateInsights={handleGenerateInsights}
+          isGeneratingInsights={isGeneratingInsights}
         />
       </div>
     </div>

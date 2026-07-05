@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import api from '../api/client'
 import type { ProcessingResult } from '../types/recording'
 
-type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'done' | 'error'
+type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'done' | 'error' | 'cancelled'
 
 interface PollResult {
   status: JobStatus
@@ -57,6 +57,10 @@ export function useJobPoller(
         if (intervalRef.current) clearInterval(intervalRef.current)
         intervalRef.current = null
         onDoneRef.current?.(res.data.result as ProcessingResult)
+      } else if (res.data.status === 'cancelled') {
+        console.log('[JobPoller] Job cancelled! Stopping polling.')
+        if (intervalRef.current) clearInterval(intervalRef.current)
+        intervalRef.current = null
       } else if (res.data.status === 'error') {
         console.error('[JobPoller] Job error:', res.data.error)
         if (intervalRef.current) clearInterval(intervalRef.current)

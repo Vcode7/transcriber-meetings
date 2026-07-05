@@ -4,18 +4,23 @@
 # at import time (not just at model-load time), so setting these env vars after
 # any `import transformers / whisperx / pyannote` is already too late.
 import os
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
 # ─────────────────────────────────────────────────────────────────────────────
+import json
 import logging
 import warnings
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 import torch
 import torchaudio
+
+from license import check_license, LICENSE_EXPIRED_BODY
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='pyannote')
@@ -34,6 +39,7 @@ from routers.pdf_router import router as pdf_router
 from routers.mom_router import router as mom_router
 from routers.prompt_router import router as prompt_router
 from routers.dictionary_router import router as dictionary_router
+from routers.analytics_router import router as analytics_router
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
 
@@ -64,8 +70,26 @@ def _load_overlap_model() -> OverlapModel | None:
         )
         return None
 
+    # Resolve the local Wav2Vec2 encoder directory.
+    wav2vec2_dir: str | None = None
     try:
-        m = OverlapModel()
+        from services.model_loader import ModelLoader
+        align_path = ModelLoader.get_model_path("align_engine")
+        if align_path and align_path.exists():
+            wav2vec2_dir = str(align_path)
+            logger.info(f"[OverlapModel] Using local Wav2Vec2 encoder from: {wav2vec2_dir}")
+        else:
+            logger.error(
+                "[OverlapModel] align_engine/ not found in MODELS_DIR. "
+                "Cross-talk detection cannot start in offline mode."
+            )
+            return None
+    except Exception as e:
+        logger.error(f"[OverlapModel] Could not resolve align_engine path ({e}).")
+        return None
+
+    try:
+        m = OverlapModel(model_dir=wav2vec2_dir)
         m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=False))
         m.eval()
         logger.info(f"[OverlapModel] Loaded from '{model_path}' ✓")
@@ -75,12 +99,51 @@ def _load_overlap_model() -> OverlapModel | None:
         return None
 
 
+def get_overlap_model() -> OverlapModel | None:
+    """Lazy-load overlap model when first required."""
+    global _overlap_model, _overlap_device
+    if _overlap_model is None:
+        logger.info("[OverlapModel] Lazy loading overlap classifier...")
+        _overlap_model = _load_overlap_model()
+        if _overlap_model is not None:
+            _overlap_model.to(_overlap_device)
+    return _overlap_model
+
+
+def unload_overlap_model():
+    """Unload overlap model from memory."""
+    global _overlap_model
+    if _overlap_model is not None:
+        logger.info("[OverlapModel] Unloading overlap classifier...")
+        del _overlap_model
+        _overlap_model = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[OverlapModel] Overlap classifier unloaded.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _overlap_model, _overlap_device
 
     # Startup
     logger.info("Starting VoiceSum API (fully offline mode)...")
+
+    # ── License check ─────────────────────────────────────────────
+    _valid, _msg = check_license()
+    if not _valid:
+        logger.critical(f"[License] APPLICATION LICENSE HAS EXPIRED: {_msg}")
+        logger.critical("[License] All API requests will be rejected with HTTP 503.")
+    else:
+        logger.info("[License] License valid — application is authorized to run.")
+    # ─────────────────────────────────────────────────────────────
+
     # Apply HF offline environment settings (belt-and-suspenders after top-of-file injection)
     from services.model_loader import setup_offline_hf_environment
     setup_offline_hf_environment()
@@ -88,22 +151,18 @@ async def lifespan(app: FastAPI):
     await connect_db()
     init_diarization()      # try load pyannote if HF_TOKEN set
 
-    # Overlap model — loaded on the same device as everything else
-    _overlap_model = _load_overlap_model()
+    # Overlap model device setup (do not pre-load model to save RAM/VRAM)
     _overlap_device = _ML_DEVICE
-    if _overlap_model is not None:
-        _overlap_model.to(_overlap_device)
 
     # Ensure upload dir exists
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
-    # Warm up the Qwen3 model — loads once, stays resident in memory
+    # Warm up the Qwen3 model (now a deferred log to optimize startup/idle footprint)
     try:
         from services.ai_provider import warm_up_model
-        import asyncio
-        await asyncio.get_event_loop().run_in_executor(None, warm_up_model)
+        warm_up_model()
     except Exception as e:
-        logger.warning(f"[Startup] Qwen3 model warm-up failed (non-fatal): {e}")
+        logger.warning(f"[Startup] Qwen3 model warm-up skipped: {e}")
 
     yield
 
@@ -118,6 +177,26 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+# ── License Middleware ─────────────────────────────────────────
+# Runs before every request. Returns HTTP 503 after the license expiry date.
+# Passes /health through so the frontend can detect the expired state.
+class LicenseMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        valid, _ = check_license()
+        if not valid:
+            # Allow /health so clients can detect the expired state
+            if request.url.path in ("/health", "/"):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=503,
+                content=LICENSE_EXPIRED_BODY,
+            )
+        return await call_next(request)
+
+
+app.add_middleware(LicenseMiddleware)
 
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(
@@ -145,6 +224,7 @@ app.include_router(pdf_router)
 app.include_router(mom_router)
 app.include_router(prompt_router)
 app.include_router(dictionary_router)
+app.include_router(analytics_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):
@@ -160,8 +240,12 @@ async def root():
 async def health():
     from services.diarization import is_pyannote_available
     from services.ai_provider import QwenProvider
+    from license import check_license, LICENSE_EXPIRY_DATE
+    license_valid, _ = check_license()
     return {
         "status": "ok",
+        "license_valid": license_valid,
+        "license_expiry": LICENSE_EXPIRY_DATE.isoformat(),
         "pyannote_available": is_pyannote_available(),
         "llm_ready": QwenProvider._pipeline is not None,
         "llm_model": settings.QWEN_MODEL_ID,
@@ -181,7 +265,8 @@ async def detect_overlap(file: UploadFile = File(...)):
     """
     import subprocess, tempfile, uuid
 
-    if _overlap_model is None:
+    model = get_overlap_model()
+    if model is None:
         return {"overlap": 0, "status": "disabled"}
 
     audio_bytes = await file.read()
@@ -252,7 +337,7 @@ async def detect_overlap(file: UploadFile = File(...)):
     waveform = waveform.unsqueeze(0).to(_overlap_device)
 
     with torch.no_grad():
-        prob: float = _overlap_model(waveform).item()
+        prob: float = model(waveform).item()
     logger.debug(f"[OverlapDetect] overlap_prob={prob:.4f}")
     return {"overlap": 1 if prob > 0.6 else 0, "probability": round(prob, 4)}
 

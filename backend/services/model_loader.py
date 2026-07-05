@@ -29,78 +29,8 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Magic header written by encrypt_models.py
-_MAGIC = b"VSDAT\x01"
-
-# Tracks temp dirs created this session → cleaned up on exit
+# Tracks temp dirs created this session (retained for backward compatibility, not used)
 _temp_dirs: list[Path] = []
-
-
-def _cleanup_temp_dirs():
-    """Remove all temporary decrypted model directories on exit."""
-    for d in _temp_dirs:
-        try:
-            if d.exists():
-                shutil.rmtree(d, ignore_errors=True)
-                logger.debug(f"[ModelLoader] Cleaned temp dir: {d}")
-        except Exception:
-            pass
-
-
-atexit.register(_cleanup_temp_dirs)
-
-
-def _get_fernet():
-    """Load Fernet instance using the embedded key."""
-    try:
-        from cryptography.fernet import Fernet
-    except ImportError:
-        raise RuntimeError(
-            "cryptography package is required for encrypted model loading. "
-            "Install with: pip install cryptography"
-        )
-
-    key = _load_key()
-    if key is None:
-        return None
-    return Fernet(key)
-
-
-def _load_key() -> Optional[bytes]:
-    """
-    Load the encryption key.
-    Search order:
-    1. VOICESUM_MODEL_KEY environment variable (base64)
-    2. model.key file in MODELS_DIR
-    3. model.key file adjacent to executable
-    """
-    from config import settings
-
-    # From environment (for CI/automated builds)
-    env_key = os.environ.get("VOICESUM_MODEL_KEY")
-    if env_key:
-        return env_key.encode()
-
-    # From MODELS_DIR
-    models_dir = Path(settings.MODELS_DIR)
-    candidates = [
-        models_dir / "model.key",
-        models_dir.parent / "model.key",
-        Path(sys.executable).parent / "model.key" if getattr(sys, "frozen", False) else None,
-    ]
-    for candidate in candidates:
-        if candidate and candidate.exists():
-            logger.debug(f"[ModelLoader] Using key from: {candidate}")
-            return candidate.read_bytes()
-
-    return None
-
-
-def _get_temp_base() -> Path:
-    """Return the base temp directory for decrypted models."""
-    base = Path(tempfile.gettempdir()) / "voicesum_runtime"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
 
 
 def _ensure_wav2vec2_tokenizer_files(target_dir: Path):
@@ -157,94 +87,30 @@ def _ensure_wav2vec2_tokenizer_files(target_dir: Path):
 
 class ModelLoader:
     """
-    Transparently loads encrypted model .dat files.
-    Falls back to HuggingFace cache in development mode.
+    Transparently loads plain model directories.
     """
 
-    _cache: Dict[str, Path] = {}  # generic_name → decrypted path
+    _cache: Dict[str, Path] = {}  # generic_name → model path
 
     @classmethod
     def get_model_path(cls, generic_name: str) -> Optional[Path]:
         """
-        Get the path to a decrypted model directory.
+        Get the path to a model directory.
         Returns None if model is not found.
         """
         if generic_name in cls._cache:
             return cls._cache[generic_name]
 
-        # Try encrypted .dat first
-        path = cls._try_load_encrypted(generic_name)
-        if path:
-            cls._cache[generic_name] = path
-            return path
-
-        # Fallback: look in MODELS_DIR as plain directory (dev/test)
+        # Look in MODELS_DIR as plain directory (production and dev fallback)
         path = cls._try_load_plain(generic_name)
         if path:
+            if generic_name == "align_engine":
+                _ensure_wav2vec2_tokenizer_files(path)
             cls._cache[generic_name] = path
             return path
 
         logger.warning(f"[ModelLoader] Model not found: {generic_name}")
         return None
-
-    @classmethod
-    def _try_load_encrypted(cls, generic_name: str) -> Optional[Path]:
-        """Attempt to decrypt a .dat file and return extracted directory path."""
-        from config import settings
-
-        dat_file = Path(settings.MODELS_DIR) / f"{generic_name}.dat"
-        print(f"[ModelLoader] Looking for {generic_name}.dat at: {dat_file.resolve()}")
-        if not dat_file.exists():
-            print(f"[ModelLoader] NOT FOUND: {dat_file.resolve()}")
-            return None
-
-        fernet = _get_fernet()
-        if fernet is None:
-            logger.warning(
-                f"[ModelLoader] No encryption key found; cannot decrypt {generic_name}.dat. "
-                "Set VOICESUM_MODEL_KEY or place model.key in MODELS_DIR."
-            )
-            return None
-
-        try:
-            logger.info(f"[ModelLoader] Decrypting {generic_name}.dat ...")
-            with open(dat_file, "rb") as f:
-                header = f.read(6)
-                if header != _MAGIC:
-                    logger.error(f"[ModelLoader] Invalid magic header in {dat_file}")
-                    return None
-                encrypted_data = f.read()
-
-            decrypted = fernet.decrypt(encrypted_data)
-
-            # Extract tar.gz to temp directory
-            temp_dir = _get_temp_base() / generic_name
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-            temp_dir.mkdir(parents=True)
-
-            import io
-            with tarfile.open(fileobj=io.BytesIO(decrypted), mode="r:gz") as tar:
-                tar.extractall(temp_dir)
-
-            _temp_dirs.append(temp_dir)
-
-            # The tar contains a single root directory
-            extracted = list(temp_dir.iterdir())
-            if len(extracted) == 1 and extracted[0].is_dir():
-                result = extracted[0]
-            else:
-                result = temp_dir
-
-            if generic_name == "align_engine":
-                _ensure_wav2vec2_tokenizer_files(result)
-
-            logger.info(f"[ModelLoader] {generic_name} ready at {result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"[ModelLoader] Failed to decrypt {generic_name}: {e}")
-            return None
 
     @classmethod
     def _try_load_plain(cls, generic_name: str) -> Optional[Path]:
@@ -289,30 +155,21 @@ class ModelLoader:
     @classmethod
     def verify_manifest(cls) -> Dict[str, bool]:
         """
-        Verify all models listed in the encrypted manifest are present.
+        Verify all models listed in the manifest are present.
         Returns {generic_name: is_available} for each registered model.
         """
         from config import settings
-        from cryptography.fernet import Fernet
         import json
 
-        manifest_path = Path(settings.MODELS_DIR) / "model_manifest.dat"
+        manifest_path = Path(settings.MODELS_DIR) / "model_manifest.json"
         if not manifest_path.exists():
             logger.warning("[ModelLoader] No model manifest found.")
             return {}
 
-        fernet = _get_fernet()
-        if fernet is None:
-            return {}
-
         try:
-            with open(manifest_path, "rb") as f:
-                header = f.read(6)
-                if header != _MAGIC:
-                    return {}
-                encrypted = f.read()
-            manifest = json.loads(fernet.decrypt(encrypted))
-            return {name: (Path(settings.MODELS_DIR) / info.get("file", info.get("dir", ""))).exists()
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            return {name: (Path(settings.MODELS_DIR) / info.get("dir", info.get("file", ""))).exists()
                     for name, info in manifest.items()}
         except Exception as e:
             logger.error(f"[ModelLoader] Manifest verification failed: {e}")
@@ -322,7 +179,7 @@ class ModelLoader:
 # ── Install hook: redirect HuggingFace downloads to local cache ──
 def restore_hf_cache():
     """
-    Decrypt all models in the manifest and copy/link them to the standard HF cache.
+    Copy/link plain models in the manifest to the standard HF cache.
     Allows all third-party libraries (transformers, speechbrain, pyannote, whisperx)
     to load models fully offline without modifying their from_pretrained calls.
     """
@@ -331,14 +188,9 @@ def restore_hf_cache():
     from pathlib import Path
     import shutil
 
-    manifest_path = Path(settings.MODELS_DIR) / "model_manifest.dat"
+    manifest_path = Path(settings.MODELS_DIR) / "model_manifest.json"
     if not manifest_path.exists():
         logger.info("[ModelLoader] No model manifest found; skipping cache restoration.")
-        return
-
-    fernet = _get_fernet()
-    if fernet is None:
-        logger.warning("[ModelLoader] No encryption key found; skipping cache restoration.")
         return
 
     try:
@@ -348,14 +200,8 @@ def restore_hf_cache():
             str(Path.home() / ".cache" / "huggingface" / "hub")
         )).resolve()
 
-        with open(manifest_path, "rb") as f:
-            header = f.read(6)
-            if header != _MAGIC:
-                logger.error("[ModelLoader] Invalid magic header in manifest")
-                return
-            encrypted = f.read()
-
-        manifest = json.loads(fernet.decrypt(encrypted))
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
         logger.info(f"[ModelLoader] Restoring HF cache for {len(manifest)} models...")
 
         for generic_name, info in manifest.items():
@@ -363,18 +209,12 @@ def restore_hf_cache():
             if generic_name == "nlp_engine":
                 continue
 
-            dat_file = Path(settings.MODELS_DIR) / info["file"]
-            if not dat_file.exists():
-                logger.warning(f"[ModelLoader] Model file {info['file']} not found.")
+            model_path = ModelLoader.get_model_path(generic_name)
+            if not model_path or not model_path.exists():
+                logger.warning(f"[ModelLoader] Model directory for {generic_name} not found.")
                 continue
 
-            # Decrypt the model using existing try_load_encrypted
-            decrypted_path = ModelLoader.get_model_path(generic_name)
-            if not decrypted_path or not decrypted_path.exists():
-                continue
-
-            # The decrypted path points to the snapshots/<hash>/ directory
-            snapshot_hash = decrypted_path.name
+            snapshot_hash = info.get("snapshot_hash", "default")
             original_name = info["original_name"] # e.g. "models--pyannote--speaker-diarization-3.1"
 
             # Reconstruct the expected HF hub cache directory path
@@ -386,10 +226,10 @@ def restore_hf_cache():
                 logger.debug(f"[ModelLoader] Cache already exists for {original_name} at {target_hash_dir}")
                 continue
 
-            # Copy or link files from decrypted_path to target_hash_dir
+            # Copy or link files from model_path to target_hash_dir
             logger.info(f"[ModelLoader] Syncing {generic_name} to HF cache: {target_hash_dir}")
             target_hash_dir.mkdir(parents=True, exist_ok=True)
-            for item in decrypted_path.iterdir():
+            for item in model_path.iterdir():
                 dest_item = target_hash_dir / item.name
                 if item.is_dir():
                     if dest_item.exists():
@@ -409,23 +249,65 @@ def restore_hf_cache():
         logger.error(f"[ModelLoader] HF cache restoration failed: {e}", exc_info=True)
 
 
-# ── Install hook: redirect HuggingFace downloads to local cache ──
+def verify_all_models() -> Dict[str, bool]:
+    """
+    Verify all expected model directories are present in MODELS_DIR.
+    Logs a clear summary. Called once at startup.
+    Returns {generic_name: is_present} for all known models.
+    """
+    expected = [
+        "speech_engine",   # faster-whisper-medium
+        "audio_context",   # pyannote/speaker-diarization-3.1
+        "voice_segment",   # pyannote/segmentation-3.0
+        "wespeaker",       # pyannote/wespeaker-voxceleb-resnet34-LM
+        "align_engine",    # facebook/wav2vec2-base-960h
+        "nlp_engine",      # Qwen3-4B
+    ]
+    results: Dict[str, bool] = {}
+    for name in expected:
+        path = ModelLoader.get_model_path(name)
+        present = path is not None and path.exists()
+        results[name] = present
+
+    present_list = [n for n, ok in results.items() if ok]
+    missing_list = [n for n, ok in results.items() if not ok]
+
+    if missing_list:
+        logger.error(
+            f"[ModelLoader] ✕ {len(missing_list)} model(s) MISSING from MODELS_DIR:\n"
+            + "\n".join(f"  • {n}" for n in missing_list)
+            + "\n  The application may fail or degrade for features requiring these models."
+        )
+    else:
+        logger.info(f"[ModelLoader] ✓ All {len(present_list)} models present in MODELS_DIR.")
+
+    logger.info(
+        "[ModelLoader] Model presence summary: "
+        + ", ".join(f"{n}={'OK' if ok else 'MISSING'}" for n, ok in results.items())
+    )
+    return results
+
+
+# ── Install hook: configure HuggingFace offline mode ──
 def setup_offline_hf_environment():
     """
     Configure HuggingFace transformers/datasets to:
     1. Never download files from the internet
-    2. Use the standard HF hub cache (models are already cached there)
+    2. Use local model directories for all loads
 
     Always enforced — this application is deployed offline and never requires
-    internet access. Using setdefault so a developer can override by pre-setting
-    the env vars before launching.
+    internet access.
     """
     # Enforce offline mode unconditionally
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"] = "1"
 
     logger.info("[ModelLoader] HuggingFace offline mode enforced (no internet calls).")
 
-    # Restore/verify cache directories from local decrypted models
+    # Restore/verify cache directories from local model folders (for libraries that
+    # require HF hub cache layout, such as older whisperx align model loading)
     restore_hf_cache()
+
+    # Verify all models are present and log a startup summary
+    verify_all_models()

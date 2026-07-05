@@ -13,13 +13,13 @@
 ;   The installer creates these empty directories automatically.
 
 #define MyAppName "AI Meeting Transcriber"
-#define MyAppVersion "1.0.1"
-#define MyAppPublisher "VoiceSum Technologies"
+#define MyAppVersion "3.0"
+#define MyAppPublisher "It champs"
 #define MyAppExeName "launcher.exe"
 #define MyAppId "{B4C1D2A3-E5F6-4789-AB01-CD23EF456789}"
 
 [Setup]
-AppId={{#MyAppId}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -63,7 +63,7 @@ Name: "{app}\runtime\uploads"
 ; Main launcher (single .exe)
 Source: "..\Application\launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; Backend (directory of files from PyInstaller)
+; Backend (full directory from PyInstaller)
 Source: "..\Application\backend\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Frontend — Electron win-unpacked output

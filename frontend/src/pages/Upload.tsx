@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Upload, FileAudio, X, Loader, CheckCircle, CloudUpload, RotateCcw } from 'lucide-react'
+import { toast } from 'sonner'
 import { useJobPoller } from '../hooks/useJobPoller'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
@@ -10,6 +11,7 @@ import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
 import type { ProcessingResult } from '../types/recording'
+import { useJobsStore } from '../store/jobs'
 
 export default function UploadPage() {
   const [showConfidence, setShowConfidence] = useState(true);
@@ -34,7 +36,9 @@ export default function UploadPage() {
   }, [file])
 
   const [chatOpen, setChatOpen] = useState(true)
-  const [isGeneratingAI, setIsGeneratingAI] = useState(false)
+  const [isGeneratingMom, setIsGeneratingMom] = useState(false)
+  const [momData, setMomData] = useState<Record<string, unknown> | null>(null)
+  const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
   const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
     meetingPrompt: '', expectedSpeakers: null, selectedVoiceIds: [],
     useDictionary: false, useVocabularyInPrompt: false, speakerSummary: false,
@@ -80,18 +84,55 @@ export default function UploadPage() {
 
   const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
     setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setIsGeneratingAI(true)
+    setIsGeneratingMom(true)
+
     clearProcessing()
   }, [clearProcessing])
+
+
+
+
+
 
   const onDone = useCallback((data: ProcessingResult) => {
     setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setIsGeneratingAI(false)
+    setIsGeneratingMom(false)
     clearProcessing()
   }, [clearProcessing])
 
-  const shouldPoll = recordingId && (!result || isGeneratingAI)
+  const shouldPoll = recordingId && (!result || isGeneratingMom)
   const jobData = useJobPoller(shouldPoll ? recordingId : null, { onTranscriptReady, onDone })
+
+  useEffect(() => {
+    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'upload')
+    if (priorJob) {
+      setRecordingId(priorJob.jobId)
+      if (priorJob.status === 'done') {
+        setIsGeneratingMom(false)
+      } else if (priorJob.status === 'transcript_ready') {
+        setIsGeneratingMom(true)
+      }
+      if (priorJob.result) {
+        setResult(priorJob.result as ProcessingResult)
+      }
+      setProcessing('upload', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+    }
+  }, [setProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const jobs = useJobsStore((s) => s.jobs)
+  const currentJob = jobs.find((j) => j.jobId === recordingId)
+
+  useEffect(() => {
+    if (!currentJob) return
+    if (currentJob.status === 'cancelled') {
+      setFile(null)
+      setRecordingId(null)
+      setResult(null)
+      setError('')
+      setIsGeneratingMom(false)
+      clearProcessing()
+    }
+  }, [currentJob, clearProcessing])
 
   useEffect(() => {
     if (jobData?.progress) {
@@ -121,6 +162,24 @@ export default function UploadPage() {
     if (f) handleFile(f)
   }
 
+  const handleCancel = async () => {
+    if (!recordingId) return
+    try {
+      await api.post(`/audio/jobs/${recordingId}/cancel`)
+      useJobsStore.getState().removeJob(recordingId)
+      setFile(null)
+      setRecordingId(null)
+      setResult(null)
+      setError('')
+      setIsGeneratingMom(false)
+      clearProcessing()
+      toast.success('Processing cancelled successfully')
+    } catch (err: unknown) {
+      console.error('[Cancel] Failed:', err)
+      toast.error('Failed to cancel processing')
+    }
+  }
+
   const handleUpload = async () => {
     if (!file) return
     setUploading(true); setError('')
@@ -143,6 +202,37 @@ export default function UploadPage() {
     }
   }
 
+  // Fetch MoM when the pipeline completes or is already complete
+  useEffect(() => {
+    if (!recordingId || !result) return
+    const isTerminal = currentJob?.status === 'done' || currentJob?.status === 'error'
+    if (isTerminal) {
+      api.get(`/mom/${recordingId}`)
+        .then((r) => setMomData(r.data))
+        .catch(() => setMomData(null))
+    }
+  }, [recordingId, result, currentJob?.status])
+
+  const handleGenerateInsights = useCallback(async (tasks: string[]) => {
+    if (!recordingId || isGeneratingInsights) return
+    setIsGeneratingInsights(true)
+    try {
+      const res = await api.post(`/history/${recordingId}/generate-insights`, { tasks })
+      setResult((prev) => prev ? {
+        ...prev,
+        summary: res.data.short_summary ?? prev.summary,
+        short_summary: res.data.short_summary ?? prev.short_summary,
+        detailed_summary: res.data.detailed_summary ?? prev.detailed_summary,
+        key_points: res.data.key_points ?? prev.key_points,
+        action_items: res.data.action_items ?? prev.action_items,
+      } : prev)
+    } catch (err: unknown) {
+      console.error('[GenerateInsights] Failed:', err)
+    } finally {
+      setIsGeneratingInsights(false)
+    }
+  }, [recordingId, isGeneratingInsights])
+
   const isProcessingActive = useProcessingStore((s) => s.isProcessing && s.source === 'upload')
   const fmtSize = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`
 
@@ -157,7 +247,7 @@ export default function UploadPage() {
       <div className="center-panel" style={{ position: 'relative' }}>
 
         {isProcessingActive && (
-          <ProcessingOverlay stage={stage} startedAt={startedAt} source={source} />
+          <ProcessingOverlay stage={stage} startedAt={startedAt} source={source} onCancel={handleCancel} />
         )}
 
         <div className="panel-header">
@@ -395,14 +485,17 @@ export default function UploadPage() {
         <AIChatPanel
           recordingId={recordingId}
           summary={result?.summary}
-          shortSummary={result?.short_summary}
-          detailedSummary={result?.detailed_summary}
+          shortSummary={result?.short_summary as string | undefined}
+          detailedSummary={result?.detailed_summary as string | undefined}
           keyPoints={result?.key_points}
           actionItems={result?.action_items}
           speakerSummary={result?.speaker_summary}
+          momData={momData as any}
           isOpen={chatOpen}
           onToggle={() => setChatOpen((o) => !o)}
-          isGenerating={isGeneratingAI}
+          isGeneratingMom={isGeneratingMom}
+          onGenerateInsights={handleGenerateInsights}
+          isGeneratingInsights={isGeneratingInsights}
         />
       </div>
     </div>

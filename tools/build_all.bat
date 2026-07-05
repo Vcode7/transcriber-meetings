@@ -67,7 +67,7 @@ if %ERRORLEVEL% neq 0 (
 )
 echo      Python build deps: OK
 
-@REM REM ── Check encrypted models (dry-run only) ───────────────────
+@REM REM ── Check  models (dry-run only) ───────────────────
 @REM echo [4/7] Checking AI model availability...
 @REM python "%TOOLS_DIR%\download_all_models.py" --dry-run
 @REM echo.

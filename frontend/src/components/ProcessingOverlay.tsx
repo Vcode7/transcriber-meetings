@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, Loader, FileText, Users, Sparkles, CloudUpload, Zap } from 'lucide-react'
+import { CheckCircle2, Loader, FileText, Users, Sparkles, CloudUpload, Zap, ClipboardList, X } from 'lucide-react'
 import { ProcessingStage } from '../store/processing'
 
 // ── Stage definitions ────────────────────────────────────────────────────────
@@ -44,12 +44,12 @@ const STEPS: Array<{
     tip: 'Matching voice embeddings to known profiles…',
   },
   {
-    key: 'generating_insights',
-    label: 'AI Insights',
-    shortLabel: 'Insights',
-    icon: <Sparkles size={14} />,
+    key: 'generating_mom',
+    label: 'Generating MoM',
+    shortLabel: 'MoM',
+    icon: <ClipboardList size={14} />,
     color: 'hsl(130,60%,45%)',
-    tip: 'Generating summary, key points, and action items…',
+    tip: 'Drafting Minutes of Meeting — summary, action items, and conclusions…',
   },
 ]
 
@@ -60,7 +60,8 @@ const STAGE_INDEX: Record<string, number> = {
   transcribing: 1,
   diarizing: 2,
   identifying_speakers: 3,
-  generating_insights: 4,
+  generating_insights: 4, // kept for backward compat with in-flight jobs
+  generating_mom: 4,
   done: 5,
 }
 
@@ -184,9 +185,10 @@ interface Props {
   stage: ProcessingStage
   startedAt: number | null
   source: 'record' | 'upload' | 'tab-audio' | null
+  onCancel?: () => void
 }
 
-export default function ProcessingOverlay({ stage, startedAt, source }: Props) {
+export default function ProcessingOverlay({ stage, startedAt, source, onCancel }: Props) {
   const [elapsed, setElapsed] = useState(0)
   const [tipIndex, setTipIndex] = useState(0)
   const [tipKey, setTipKey] = useState(0)
@@ -405,6 +407,40 @@ export default function ProcessingOverlay({ stage, startedAt, source }: Props) {
             }} className="animate-pulse-rec" />
             Navigation locked until processing completes
           </div>
+        )}
+
+        {onCancel && !isDone && (
+          <button
+            onClick={onCancel}
+            style={{
+              marginTop: '0.25rem',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '.4rem 1.25rem',
+              background: 'transparent',
+              border: '1.5px dashed hsl(var(--destructive) / .45)',
+              borderRadius: '999px',
+              fontSize: '.78rem',
+              fontWeight: 600,
+              color: 'hsl(var(--destructive))',
+              cursor: 'pointer',
+              transition: 'all 0.18s ease',
+              fontFamily: 'Inter, sans-serif',
+              height: '32px',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'hsl(var(--destructive) / .08)'
+              e.currentTarget.style.borderColor = 'hsl(var(--destructive))'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'transparent'
+              e.currentTarget.style.borderColor = 'hsl(var(--destructive) / .45)'
+            }}
+          >
+            <X size={12} />
+            Cancel Processing
+          </button>
         )}
       </div>
     </div>

@@ -1,10 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   MonitorSpeaker, Square, RotateCcw, Loader, AlertTriangle,
-  Users, Mic, MicOff, Monitor, Radio, CheckCircle,
+  Users, Mic, MicOff, Monitor, Radio, CheckCircle, MoreVertical, FileText, X
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { useTabAudioRecorder } from '../hooks/useTabAudioRecorder'
-import { useJobPoller } from '../hooks/useJobPoller'
+import { useJobsStore } from '../store/jobs'
 import WaveformVisualizer from '../components/WaveformVisualizer'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
@@ -21,6 +23,8 @@ const OVERLAP_CONFIRM_COUNT = 2
 const OVERLAP_COOLDOWN_MS = 4000
 
 export default function TabAudioPage() {
+  const navigate = useNavigate()
+  const [menuOpen, setMenuOpen] = useState(false)
   const [showConfidence, setShowConfidence] = useState(true);
   const recorder = useTabAudioRecorder()
   const [stage, setStage] = useState<Stage>('idle')
@@ -71,32 +75,53 @@ export default function TabAudioPage() {
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }, [chatWidth])
-  const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setStage('transcript_ready')
-    // Dismiss overlay so the transcript is visible during AI generation
-    clearProcessing()
-  }, [clearProcessing])
+  const jobs = useJobsStore((s) => s.jobs)
+  const addJob = useJobsStore((s) => s.addJob)
 
-  const onDone = useCallback((data: ProcessingResult) => {
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setStage('done')
-    clearProcessing()
-  }, [clearProcessing])
-
-  const isPolling = stage === 'processing' || stage === 'transcript_ready'
-  const jobData = useJobPoller(isPolling ? recordingId : null, { onTranscriptReady, onDone })
-
-  // Sync job progress â†’ global processing store
+  // Reconnect to active or recently completed tab-audio job on mount
   useEffect(() => {
-    if (jobData?.progress) {
-      updateProcStage(jobData.progress as ProcessingStage)
+    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'tab-audio')
+    if (priorJob) {
+      setRecordingId(priorJob.jobId)
+      setStage(priorJob.status as Stage)
+      if (priorJob.result) {
+        setResult(priorJob.result as ProcessingResult)
+      }
+      setProcessing('tab-audio', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
     }
-    if (jobData?.status === 'error') {
+  }, [setProcessing])
+
+  const currentJob = jobs.find((j) => j.jobId === recordingId)
+
+  // Sync job state reactively from global store
+  useEffect(() => {
+    if (!currentJob) return
+
+    if (currentJob.status === 'cancelled') {
+      setStage('idle')
+      setRecordingId(null)
+      setResult(null)
+      clearProcessing()
+    } else if (currentJob.status === 'done') {
+      setStage('done')
+      if (currentJob.result) {
+        setResult(currentJob.result as ProcessingResult)
+      }
+      clearProcessing()
+    } else if (currentJob.status === 'error') {
       setStage('error')
       clearProcessing()
+    } else if (currentJob.status === 'transcript_ready') {
+      setStage('transcript_ready')
+      if (currentJob.result) {
+        setResult(currentJob.result as ProcessingResult)
+      }
+      clearProcessing()
+    } else {
+      setStage('processing')
+      setProcessing('tab-audio', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [jobData?.progress, jobData?.status, updateProcStage, clearProcessing])
+  }, [currentJob, setProcessing, clearProcessing])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -167,7 +192,14 @@ export default function TabAudioPage() {
       const form = new FormData()
       form.append('file', recorder.audioBlob, 'tab_recording.webm')
       const res = await api.post('/audio/record', form)
-      setRecordingId(res.data.recording_id)
+      const rId = res.data.recording_id
+      setRecordingId(rId)
+      addJob({
+        jobId: rId,
+        source: 'tab-audio',
+        filename: `Tab Audio (${new Date().toLocaleTimeString()})`,
+        startedAt: new Date().toISOString(),
+      })
       setStage('processing')
       updateProcStage('queued')
     } catch (e: unknown) {
@@ -178,12 +210,36 @@ export default function TabAudioPage() {
   }
 
   const handleReset = () => {
+    if (recordingId) {
+      useJobsStore.getState().removeJob(recordingId)
+    }
     recorder.reset(); setStage('idle')
     setRecordingId(null); setResult(null); setUploadError(null)
     setOverlapAlert(false)
     overlapCountRef.current = 0
     cooldownUntilRef.current = 0
     clearProcessing()
+  }
+
+  const handleCancel = async () => {
+    if (!recordingId) return
+    try {
+      await api.post(`/audio/jobs/${recordingId}/cancel`)
+      useJobsStore.getState().removeJob(recordingId)
+      recorder.reset()
+      setStage('idle')
+      setRecordingId(null)
+      setResult(null)
+      setUploadError(null)
+      setOverlapAlert(false)
+      overlapCountRef.current = 0
+      cooldownUntilRef.current = 0
+      clearProcessing()
+      toast.success('Processing cancelled successfully')
+    } catch (err: unknown) {
+      console.error('[Cancel] Failed:', err)
+      toast.error('Failed to cancel processing')
+    }
   }
 
   const processing = stage === 'uploading' || stage === 'processing'
@@ -198,16 +254,23 @@ export default function TabAudioPage() {
         : 'grid-template-columns .25s ease'
     }}>
 
-      {/* â”€â”€ Center panel */}
+      {/* — Center panel */}
       <div className="center-panel" style={{ position: 'relative' }}>
 
         {/* Processing overlay */}
         {processing && (
-          <ProcessingOverlay stage={procStage} startedAt={startedAt} source={source} />
+          <ProcessingOverlay stage={procStage} startedAt={startedAt} source={source} onCancel={handleCancel} />
         )}
 
         {/* Header */}
-        <div className="panel-header" style={{ position: 'relative', overflow: 'hidden' }}>
+        <div
+          className="panel-header"
+          style={{
+            position: 'relative',
+            overflow: menuOpen ? 'visible' : 'hidden',
+            zIndex: menuOpen ? 30 : 'auto',
+          }}
+        >
           <div style={{
             position: 'absolute', top: 0, left: 0, right: 0, height: '3px',
             background: isRecording
@@ -256,14 +319,8 @@ export default function TabAudioPage() {
               <span>{result.speakers_detected.join(', ')}</span>
             </div>
           )}
-
           {result && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-              <PDFButton
-                recordingId={recordingId}
-                filename={result?.filename}
-                variant="ghost"
-              />
               <button
                 className="btn btn-ghost animate-bounce-in"
                 onClick={handleReset}
@@ -271,6 +328,40 @@ export default function TabAudioPage() {
               >
                 <RotateCcw size={14} /> New Recording
               </button>
+
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  className="icon-btn"
+                  onClick={() => setMenuOpen((open) => !open)}
+                  aria-label="More recording options"
+                  aria-expanded={menuOpen}
+                >
+                  <MoreVertical size={18} />
+                </button>
+
+                {menuOpen && (
+                  <div className="header-dropdown">
+                    <button
+                      className="dropdown-item"
+                      onClick={() => {
+                        navigate(`/dashboard/history/${recordingId}/mom`);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <FileText size={14} />
+                      Minutes of Meeting
+                    </button>
+
+                    <div className="dropdown-item">
+                      <PDFButton
+                        recordingId={recordingId}
+                        filename={result?.filename || "recording"}
+                        variant="ghost"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

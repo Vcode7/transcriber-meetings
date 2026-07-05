@@ -9,6 +9,7 @@ export type ProcessingStage =
   | 'diarizing'
   | 'identifying_speakers'
   | 'generating_insights'
+  | 'generating_mom'
   | 'done'
   | null
 
@@ -18,7 +19,7 @@ interface ProcessingState {
   stage: ProcessingStage
   startedAt: number | null
 
-  setProcessing: (source: ProcessingSource, stage?: ProcessingStage) => void
+  setProcessing: (source: ProcessingSource, stage?: ProcessingStage, startedAt?: number) => void
   updateStage: (stage: ProcessingStage) => void
   clearProcessing: () => void
 }
@@ -29,8 +30,8 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
   stage: null,
   startedAt: null,
 
-  setProcessing: (source, stage = 'uploading') =>
-    set({ isProcessing: true, source, stage, startedAt: Date.now() }),
+  setProcessing: (source, stage = 'uploading', startedAt) =>
+    set({ isProcessing: true, source, stage, startedAt: startedAt ?? Date.now() }),
 
   updateStage: (stage) => set({ stage }),
 

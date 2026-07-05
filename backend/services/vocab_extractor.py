@@ -182,41 +182,46 @@ async def extract_ai_assisted(filename: str, data: bytes) -> Dict[str, Any]:
 
     provider = QwenProvider()
 
-    for idx, chunk in enumerate(chunks):
-        prompt = (
-            f"{_AI_EXTRACT_SYSTEM_PROMPT}\n\n"
-            f"Document chunk {idx + 1}/{len(chunks)}:\n{chunk}"
-        )
-        try:
-            raw = provider.generate(prompt, max_new_tokens=512, temperature=0.1)
-            # Strip markdown code fences if present
-            raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
-            # Find the JSON object
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if not m:
-                logger.warning(f"[VocabExtractor] AI chunk {idx+1}: no JSON found in response")
+    try:
+        for idx, chunk in enumerate(chunks):
+            prompt = (
+                f"{_AI_EXTRACT_SYSTEM_PROMPT}\n\n"
+                f"Document chunk {idx + 1}/{len(chunks)}:\n{chunk}"
+            )
+            try:
+                raw = provider.generate(prompt, max_new_tokens=512, temperature=0.1)
+                # Strip markdown code fences if present
+                raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
+                # Find the JSON object
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                if not m:
+                    logger.warning(f"[VocabExtractor] AI chunk {idx+1}: no JSON found in response")
+                    continue
+                parsed = json.loads(m.group())
+
+                for w in parsed.get("technical_words", []):
+                    w = str(w).strip()
+                    if w and w.lower() not in seen_words:
+                        seen_words.add(w.lower())
+                        all_words.append(w)
+
+                for s in parsed.get("shortcuts", []):
+                    short = str(s.get("short", "")).strip()
+                    full = str(s.get("full", "")).strip()
+                    if short and full and short.lower() not in seen_shorts:
+                        seen_shorts.add(short.lower())
+                        all_shortcuts.append({"short": short, "full": full})
+
+            except Exception as e:
+                logger.warning(f"[VocabExtractor] AI chunk {idx+1} failed: {e}")
                 continue
-            parsed = json.loads(m.group())
-
-            for w in parsed.get("technical_words", []):
-                w = str(w).strip()
-                if w and w.lower() not in seen_words:
-                    seen_words.add(w.lower())
-                    all_words.append(w)
-
-            for s in parsed.get("shortcuts", []):
-                short = str(s.get("short", "")).strip()
-                full = str(s.get("full", "")).strip()
-                if short and full and short.lower() not in seen_shorts:
-                    seen_shorts.add(short.lower())
-                    all_shortcuts.append({"short": short, "full": full})
-
-        except Exception as e:
-            logger.warning(f"[VocabExtractor] AI chunk {idx+1} failed: {e}")
-            continue
+    finally:
+        # Properly unload the LLM model immediately after processing completes
+        QwenProvider.unload_model()
 
     logger.info(
         f"[VocabExtractor] AI: {len(all_words)} terms, {len(all_shortcuts)} shortcuts "
         f"from '{filename}' ({len(chunks)} chunks)"
     )
     return {"technical_words": all_words, "shortcuts": all_shortcuts}
+

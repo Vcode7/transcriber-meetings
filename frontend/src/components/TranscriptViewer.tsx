@@ -45,6 +45,20 @@ const SPEAKER_COLORS = [
   "hsl(340, 80%, 60%)",
 ];
 
+/**
+ * Minimum average word-level confidence to include a segment in MoM/AI Insights.
+ * Must match backend config.MIN_AVG_SEGMENT_CONFIDENCE (default 0.35).
+ */
+const LOW_CONF_THRESHOLD = 0.35;
+
+/** Compute the average word-level confidence for a segment. Returns null when no word data. */
+function segmentAvgConf(seg: Segment): number | null {
+  const words = seg.words;
+  if (!words || words.length === 0) return null;
+  const probs = words.map((w) => w.probability ?? 1.0);
+  return probs.reduce((a, b) => a + b, 0) / probs.length;
+}
+
 function formatTime(s: number) {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60).toString().padStart(2, "0");
@@ -56,6 +70,7 @@ function wordClass(prob: number, low: number, mid: number) {
   if (prob < mid) return "word-mid";
   return "word-hi";
 }
+
 
 function SpeakerAvatar({ label, color }: { label: string; color: string }) {
   const initials = label.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2);
@@ -349,18 +364,28 @@ export default function TranscriptViewer({
         const isActive = i === activeSegIdx;
         const isEditing = i === editingIdx;
         const isSaving = i === savingIdx;
+        const avgConf = segmentAvgConf(seg);
+        const isLowConf = avgConf !== null && avgConf < LOW_CONF_THRESHOLD;
 
         return (
           <div
             key={i}
             className="transcript-segment animate-slide-up"
+            title={isLowConf
+              ? `⚠ Low confidence transcription (avg ${(avgConf! * 100).toFixed(0)}% < ${(LOW_CONF_THRESHOLD * 100).toFixed(0)}%). Excluded from MoM & AI Insights.`
+              : undefined
+            }
             style={{
               "--speaker-color": color,
               animationDelay: `${Math.min(i * 0.04, 0.5)}s`,
               animationFillMode: "both",
-              background: isActive ? `${color}0d` : undefined,
-              borderLeft: isActive ? `2.5px solid ${color}` : "2.5px solid transparent",
+              background: isLowConf
+                ? "hsl(0, 80%, 96%)"
+                : isActive ? `${color}0d` : undefined,
+              borderLeft: isActive ? `2.5px solid ${color}` : isLowConf ? "2.5px solid hsl(0,75%,65%)" : "2.5px solid transparent",
               transition: "background .25s, border-color .25s",
+              outline: isLowConf ? "1px solid hsl(0,75%,85%)" : undefined,
+              outlineOffset: "-1px",
             } as React.CSSProperties}
           >
             <div className="seg-meta">
@@ -391,6 +416,29 @@ export default function TranscriptViewer({
               {seg.is_overlap && (
                 <span style={{ fontSize: ".65rem", fontWeight: 700, color: "hsl(var(--destructive))", background: "hsl(var(--destructive) / .1)", border: "1px solid hsl(var(--destructive) / .3)", borderRadius: "999px", padding: ".1rem .45rem", fontFamily: "Inter, sans-serif", letterSpacing: ".04em", display: "inline-flex", alignItems: "center", gap: "3px" }}>
                   ⚡ OVERLAP
+                </span>
+              )}
+
+              {/* Low-confidence segment badge */}
+              {isLowConf && (
+                <span
+                  title={`Average confidence ${(avgConf! * 100).toFixed(0)}% — below the ${(LOW_CONF_THRESHOLD * 100).toFixed(0)}% threshold. This segment is excluded from MoM & AI Insights.`}
+                  style={{
+                    fontSize: ".62rem", fontWeight: 700,
+                    color: "hsl(0,65%,45%)",
+                    background: "hsl(0,80%,96%)",
+                    border: "1px solid hsl(0,75%,75%)",
+                    borderRadius: "999px",
+                    padding: ".1rem .45rem",
+                    fontFamily: "Inter, sans-serif",
+                    letterSpacing: ".04em",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "3px",
+                    cursor: "help",
+                  }}
+                >
+                  ⚠ Low Confidence
                 </span>
               )}
 

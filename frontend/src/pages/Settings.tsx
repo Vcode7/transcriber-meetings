@@ -396,51 +396,51 @@ export default function SettingsPage() {
             display: 'flex', flexDirection: 'column', gap: '2rem'
           }}>
             {([
-              { key: 'speaker_similarity_threshold', label: 'Speaker Similarity Threshold', min: 0.5, max: 0.99, step: 0.01, desc: 'Minimum cosine similarity to match a known speaker (default: 0.75)' },
+              { key: 'speaker_similarity_threshold', label: 'Speaker Similarity Threshold', min: 0.5, max: 0.99, step: 0.01, desc: 'Minimum cosine similarity to match a known speaker (default: 0.73)' },
               { key: 'word_conf_low', label: 'Low Confidence Threshold', min: 0.3, max: 0.9, step: 0.01, desc: 'Words below this are highlighted red (default: 0.70)' },
               { key: 'word_conf_mid', label: 'Mid Confidence Threshold', min: 0.5, max: 0.99, step: 0.01, desc: 'Words below this are highlighted yellow (default: 0.85)' },
               { key: 'min_segment_duration', label: 'Min. Segment Duration (s)', min: 0.5, max: 5, step: 0.5, desc: 'Segments shorter than this are ignored (default: 1.5s)' },
             ] as const).map(({ key, label, min, max, step, desc }) => {
-              const pct = ((settings[key] - min) / (max - min)) * 100
               return (
                 <div key={key}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
                     <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
                       {label}
                     </label>
-                    <span style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.3rem .65rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      minWidth: '56px', textAlign: 'center'
-                    }}>
-                      {settings[key]}
-                    </span>
+                    <input
+                      type="number"
+                      min={min} max={max} step={step}
+                      value={settings[key]}
+                      onChange={(e) => {
+                        const parsed = parseFloat(e.target.value)
+                        upd(key, isNaN(parsed) ? min : parsed)
+                      }}
+                      style={{
+                        fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
+                        color: 'hsl(var(--accent))', fontWeight: 700,
+                        padding: '.3rem .65rem',
+                        background: 'hsl(var(--accent) / .1)',
+                        borderRadius: '6px',
+                        border: '1.5px solid hsl(var(--accent) / .2)',
+                        width: '75px', textAlign: 'center',
+                        outline: 'none',
+                      }}
+                    />
                   </div>
 
-                  {/* Custom slider track */}
-                  <div style={{ position: 'relative', height: '8px', background: 'hsl(var(--muted))', borderRadius: '999px', marginBottom: '8px' }}>
-                    <div style={{
-                      position: 'absolute', left: 0, top: 0, bottom: 0,
-                      width: `${pct}%`,
-                      background: 'hsl(var(--accent))',
-                      borderRadius: '999px',
-                      transition: 'width .1s',
-                    }} />
-                  </div>
                   <input
                     type="range"
                     min={min} max={max} step={step}
                     value={settings[key]}
                     onChange={(e) => upd(key, parseFloat(e.target.value))}
                     style={{
-                      width: '100%', accentColor: 'hsl(var(--accent))',
-                      height: '4px', cursor: 'pointer',
-                      marginTop: '-12px', marginBottom: '4px',
-                      opacity: 0.01, position: 'relative', zIndex: 2,
+                      width: '100%',
+                      accentColor: 'hsl(var(--accent))',
+                      height: '6px',
+                      cursor: 'pointer',
+                      marginTop: '8px',
+                      marginBottom: '8px',
+                      outline: 'none',
                     }}
                   />
                   <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>

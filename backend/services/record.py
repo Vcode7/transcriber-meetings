@@ -2,10 +2,20 @@ import torch
 from transformers import Wav2Vec2Model
 import torch.nn as nn
 
+
 class OverlapModel(nn.Module):
-    def __init__(self):
+    """
+    Wav2Vec2-based binary classifier for cross-talk (overlap) detection.
+    Loads Wav2Vec2 base encoder strictly from a local directory — no internet.
+    """
+    def __init__(self, model_dir: str):
         super().__init__()
-        self.encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
+        if not model_dir:
+            raise ValueError("model_dir is required for offline overlap model loading")
+        self.encoder = Wav2Vec2Model.from_pretrained(
+            model_dir,
+            local_files_only=True,
+        )
         self.fc = nn.Linear(768, 1)
 
     def forward(self, x):

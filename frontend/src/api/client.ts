@@ -35,7 +35,10 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// ── Response interceptor — silent refresh on 401 ──────────────
+// ── Response interceptor — silent token refresh on 401 ────────
+// NOTE: A 401 response triggers a silent refresh using the HttpOnly cookie.
+// The user is NEVER automatically logged out by this interceptor.
+// Logout can only happen through explicit user action (clicking "Sign out").
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
@@ -80,7 +83,7 @@ api.interceptors.response.use(
       const newToken: string = res.data.access_token
       const user = res.data.user
 
-      // Update in-memory token and user
+      // Update persisted token and user
       useAuthStore.getState().setAuth(user, newToken)
 
       // Retry all queued requests with new token
@@ -95,13 +98,12 @@ api.interceptors.response.use(
     } catch (refreshError: unknown) {
       processQueue(refreshError, null)
 
-      const status = isAxiosError(refreshError) ? refreshError.response?.status : undefined
-
-      // Refresh token expired or invalid — full re-authentication required
-      if (status === 401 || status === 403) {
-        useAuthStore.getState().logout()
-        useAuthStore.getState().setSessionExpired(true)
-      }
+      // IMPORTANT: Do NOT call logout() here.
+      // A failed refresh means the cookie may be missing or the backend is
+      // temporarily unavailable — neither justifies signing the user out.
+      // The user keeps their localStorage session and will be prompted to
+      // sign in only if they explicitly click "Sign out" or if the stored
+      // user row is deleted.
 
       return Promise.reject(refreshError)
     } finally {

@@ -19,7 +19,18 @@ def _resolve_base_dir() -> Path:
 
 
 BASE_DIR = _resolve_base_dir()
-RUNTIME_DIR = BASE_DIR / "runtime"
+
+def _resolve_runtime_dir() -> Path:
+    """
+    Return the application runtime directory.
+    - When running as a PyInstaller .exe: sibling 'runtime' folder to backend (i.e. sys.executable's grandparent / runtime)
+    - When running normally (development): BASE_DIR / "runtime"
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent.parent / "runtime"
+    return BASE_DIR / "runtime"
+
+RUNTIME_DIR = _resolve_runtime_dir()
 
 def _resolve_models_dir() -> Path:
     # In development mode, check if sibling Application directory has models
@@ -41,10 +52,10 @@ class Settings(BaseSettings):
     # JWT — Access token (short-lived, in-memory on client)
     JWT_SECRET: str = "change-me-in-production-use-long-random-string"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 15  # 15 minutes — refresh token extends session
+    JWT_EXPIRE_MINUTES: int = 52560000  # 100 years — practically infinite
 
     # Refresh token (long-lived, HttpOnly cookie)
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 36500  # 100 years — practically infinite
 
     # Environment ("development" | "production") — controls Secure cookie flag
     ENVIRONMENT: str = "development"
@@ -69,11 +80,11 @@ class Settings(BaseSettings):
     MODELS_DIR: str = str(DEFAULT_MODELS_DIR)
 
     # Offline mode — when True, never attempt internet downloads
-    OFFLINE_MODE: bool = False
+    OFFLINE_MODE: bool = True
 
 
     # Speaker identification
-    SPEAKER_SIMILARITY_THRESHOLD: float = 0.65
+    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75
     MIN_SEGMENT_DURATION: float = 1.5  # seconds
 
     # Transcription
@@ -84,6 +95,11 @@ class Settings(BaseSettings):
     # Word confidence thresholds
     WORD_CONF_LOW: float = 0.7
     WORD_CONF_MID: float = 0.85
+
+    # Minimum average segment confidence for downstream AI processing.
+    # Segments whose average word probability < this threshold are excluded
+    # from MoM and AI Insights generation (but remain in the transcript).
+    MIN_AVG_SEGMENT_CONFIDENCE: float = 0.35
 
     # Overlap detection model (Wav2Vec2-based binary classifier)
     # Default is relative to base dir; override in .env with absolute path if needed
@@ -100,4 +116,3 @@ os.makedirs(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")).pare
 
 # Print resolved paths to standard output
 print(f"[Config] Resolved MODELS_DIR to: {settings.MODELS_DIR}")
-

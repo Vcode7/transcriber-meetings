@@ -58,6 +58,26 @@ def get_whisperx_model():
     return _whisperx_model
 
 
+def unload_whisperx_model():
+    """Unload the WhisperX model to free RAM/VRAM."""
+    global _whisperx_model
+    if _whisperx_model is not None:
+        logger.info("[Transcription] Unloading WhisperX model...")
+        # PyTorch model unloading
+        del _whisperx_model
+        _whisperx_model = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[Transcription] WhisperX model unloaded.")
+
+
+
 def _safe_float(val, default: float = 0.0) -> float:
     """Safely convert a value to float, returning default on failure."""
     try:
@@ -68,7 +88,7 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-def transcribe(file_path: str, initial_prompt: str = "") -> Dict[str, Any]:
+def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -> Dict[str, Any]:
     """
     Transcribe an audio file with WhisperX and run the forced-alignment step
     to obtain precise word-level timestamps.
@@ -77,6 +97,7 @@ def transcribe(file_path: str, initial_prompt: str = "") -> Dict[str, Any]:
         file_path: Path to a WAV audio file.
         initial_prompt: Optional Whisper initial_prompt for context injection
                         (global prompt + meeting prompt + vocabulary).
+        language: Optional detected language code to skip automatic language detection.
 
     Returns:
         {
@@ -105,28 +126,33 @@ def transcribe(file_path: str, initial_prompt: str = "") -> Dict[str, Any]:
     logger.info(f"[Transcription] Transcribing {file_path} on device={device} ...")
     if initial_prompt:
         logger.info(f"[Transcription] Using initial_prompt ({len(initial_prompt)} chars)")
+    if language:
+        logger.info(f"[Transcription] Reusing pre-detected language: {language}")
+
     try:
         transcribe_kwargs = {"batch_size": 4}
         if initial_prompt:
             transcribe_kwargs["initial_prompt"] = initial_prompt
+        if language:
+            transcribe_kwargs["language"] = language
         raw_result = model.transcribe(file_path, **transcribe_kwargs)
     except TypeError as te:
-        # FasterWhisperPipeline.transcribe() in some WhisperX / faster-whisper
-        # versions does not accept 'initial_prompt' as a top-level keyword argument.
-        # Retry without it — transcription still succeeds, just without the hint.
-        if initial_prompt and "initial_prompt" in str(te):
-            logger.warning(
-                f"[Transcription] initial_prompt not supported by this WhisperX build "
-                f"({te}). Retrying without it."
-            )
+        # Fallback if initial_prompt or language are not accepted as kwargs
+        logger.warning(f"[Transcription] model.transcribe failed with TypeError: {te}. Retrying with basic options.")
+        try:
+            transcribe_kwargs = {"batch_size": 4}
+            if language and "language" not in str(te):
+                transcribe_kwargs["language"] = language
+            if initial_prompt and "initial_prompt" not in str(te):
+                transcribe_kwargs["initial_prompt"] = initial_prompt
+            raw_result = model.transcribe(file_path, **transcribe_kwargs)
+        except Exception as e2:
             try:
+                # absolute minimal fallback
                 raw_result = model.transcribe(file_path, batch_size=4)
-            except Exception as e2:
-                logger.error(f"[Transcription] model.transcribe() FAILED on retry: {e2}", exc_info=True)
+            except Exception as e3:
+                logger.error(f"[Transcription] model.transcribe fallback FAILED: {e3}", exc_info=True)
                 raise
-        else:
-            logger.error(f"[Transcription] model.transcribe() FAILED (TypeError): {te}", exc_info=True)
-            raise
     except Exception as e:
         logger.error(f"[Transcription] model.transcribe() FAILED: {e}", exc_info=True)
         raise

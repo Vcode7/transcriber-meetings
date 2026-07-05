@@ -426,10 +426,8 @@ async def refresh(request: Request, response: Response):
             clear_refresh_cookie(response)
             raise HTTPException(status_code=401, detail="Session revoked. Please log in again.")
 
-        expires_at = str_to_dt(session["expires_at"])
-        if expires_at and now >= expires_at:
-            clear_refresh_cookie(response)
-            raise HTTPException(status_code=401, detail="Refresh token expired. Please log in again.")
+        # Session expiry is intentionally not enforced — sessions last until explicit logout.
+        # The refresh token rotation below issues a new 100-year cookie on every refresh.
 
         # Rotate refresh token
         new_raw, new_hash = create_refresh_token()

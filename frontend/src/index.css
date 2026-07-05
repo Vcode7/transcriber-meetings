@@ -3462,3 +3462,71 @@
   border: 1.5px solid hsl(var(--ink) / .12);
   border-radius: 12px;
 }
+
+/* AI Insights Markdown custom styling (.prose-ai) */
+.prose-ai {
+  font-family: 'Inter', sans-serif;
+}
+
+.prose-ai h1,
+.prose-ai h2 {
+  font-family: 'Inter', sans-serif !important;
+  font-size: 16px !important;
+  font-weight: 750 !important;
+  font-style: normal !important;
+  letter-spacing: 0 !important;
+  color: hsl(var(--ink)) !important;
+  margin-top: 1.2rem !important;
+  margin-bottom: 0.5rem !important;
+}
+
+.prose-ai h3,
+.prose-ai h4 {
+  font-family: 'Inter', sans-serif !important;
+  font-size: 14px !important;
+  font-weight: 750 !important;
+  font-style: normal !important;
+  letter-spacing: 0 !important;
+  color: hsl(var(--ink)) !important;
+  margin-top: 0.8rem !important;
+  margin-bottom: 0.4rem !important;
+}
+
+.prose-ai strong,
+.prose-ai b {
+  font-family: 'Inter', sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 750 !important;
+  font-style: normal !important;
+  letter-spacing: 0 !important;
+  color: hsl(var(--ink)) !important;
+}
+
+.prose-ai p,
+.prose-ai li,
+.prose-ai span,
+.prose-ai div {
+  font-size: 12px !important;
+  font-weight: 300 !important;
+  /* light weight */
+  font-style: normal !important;
+  color: hsl(var(--ink-soft)) !important;
+  line-height: 1.6 !important;
+}
+
+.prose-ai em,
+.prose-ai i {
+  font-style: normal !important;
+  /* disabled italic as per request */
+}
+
+.prose-ai ul,
+.prose-ai ol {
+  margin-top: 0.4rem !important;
+  margin-bottom: 0.4rem !important;
+  padding-left: 1.2rem !important;
+}
+
+.prose-ai li {
+  margin-bottom: 0.25rem !important;
+}

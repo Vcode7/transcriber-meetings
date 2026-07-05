@@ -17,8 +17,8 @@ Model list (total ~4 GB download):
   2. pyannote/speaker-diarization-3.1    ~10 MB  -- speaker diarization config
   3. pyannote/segmentation-3.0           ~10 MB  -- speaker segmentation
   4. speechbrain/spkrec-ecapa-voxceleb   ~85 MB  -- speaker embeddings
-  5. pyannote/wespeaker-voxceleb-resnet34-LM  ~25 MB -- speaker verification
-  6. facebook/wav2vec2-base             ~725 MB  -- word-level alignment
+  5. hbredin/wespeaker-voxceleb-resnet34-LM   ~25 MB -- speaker verification
+  6. facebook/wav2vec2-base-960h        ~360 MB  -- word-level alignment
   7. Qwen/Qwen3-4B                   ~2,300 MB  -- AI summarization / MoM / insights
 """
 from __future__ import annotations
@@ -87,18 +87,18 @@ MODELS: List[ModelSpec] = [
     ),
     ModelSpec(
         key="wespeaker",
-        hf_id="pyannote/wespeaker-voxceleb-resnet34-LM",
-        description="pyannote WeSpeaker (speaker verification)",
+        hf_id="hbredin/wespeaker-voxceleb-resnet34-LM",
+        description="WeSpeaker ONNX (speaker verification)",
         size_mb=25,
-        cache_dir_name="models--pyannote--wespeaker-voxceleb-resnet34-LM",
+        cache_dir_name="models--hbredin--wespeaker-voxceleb-resnet34-LM",
         download_fn="snapshot",
     ),
     ModelSpec(
         key="alignment",
-        hf_id="facebook/wav2vec2-base",
-        description="Wav2Vec2 Base (word-level alignment)",
-        size_mb=725,
-        cache_dir_name="models--facebook--wav2vec2-base",
+        hf_id="facebook/wav2vec2-base-960h",
+        description="Wav2Vec2 Base 960h CTC (word-level alignment)",
+        size_mb=360,
+        cache_dir_name="models--facebook--wav2vec2-base-960h",
         download_fn="snapshot",
     ),
     ModelSpec(

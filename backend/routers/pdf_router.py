@@ -766,125 +766,159 @@ async def generate_pdf_report(
 
     # Generate LLM content for PDF (may take 2-5s) — run in executor to avoid blocking event loop
     try:
-        import asyncio as _asyncio
-        _loop = _asyncio.get_event_loop()
-        logger.info(f"[PDF] Generating executive summary for {recording_id}")
-        exec_summary = await _loop.run_in_executor(None, generate_executive_summary, transcript)
-        decisions = await _loop.run_in_executor(None, generate_key_decisions, transcript)
-    except RuntimeError as e:
-        logger.error(f"[PDF] LLM error: {e}")
-        exec_summary = {
-            "purpose": "LLM unavailable — see full transcript for details.",
-            "discussion_points": [],
-            "outcomes": [],
-            "next_steps": [],
+        try:
+            import asyncio as _asyncio
+            _loop = _asyncio.get_running_loop()
+            from tasks.pipeline import _raw_text_hash
+            from services.llm import build_context_summary as _build_ctx
+
+            # Resolve context_summary (reuse cached or build fresh)
+            raw_text = rec.get("raw_text") or ""
+            current_hash = _raw_text_hash(raw_text)
+            ctx: str | None = None
+            if rec.get("context_summary") and rec.get("context_summary_hash") == current_hash:
+                ctx = rec["context_summary"]
+                logger.info(f"[PDF] Reusing cached context_summary for {recording_id}")
+            else:
+                logger.info(f"[PDF] Building fresh context_summary for {recording_id}")
+                try:
+                    ctx = await _loop.run_in_executor(None, _build_ctx, transcript)
+                    if ctx:
+                        async with get_db() as db:
+                            await db.execute(
+                                text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
+                                     "WHERE id = :id AND user_id = :uid"),
+                                {"ctx": ctx, "h": current_hash, "id": recording_id, "uid": user_id},
+                            )
+                            await db.commit()
+                except Exception as ctx_err:
+                    logger.warning(f"[PDF] context_summary build failed (non-fatal): {ctx_err}")
+                    ctx = None
+
+            logger.info(f"[PDF] Generating executive summary for {recording_id}")
+            exec_summary = await _loop.run_in_executor(
+                None, lambda: generate_executive_summary(transcript, context=ctx or None)
+            )
+            decisions = await _loop.run_in_executor(
+                None, lambda: generate_key_decisions(transcript, context=ctx or None)
+            )
+        except RuntimeError as e:
+            logger.error(f"[PDF] LLM error: {e}")
+            exec_summary = {
+                "purpose": "LLM unavailable — see full transcript for details.",
+                "discussion_points": [],
+                "outcomes": [],
+                "next_steps": [],
+            }
+            decisions = []
+
+        # Read uploaded files
+        ref_image_data: List[bytes] = []
+        ref_image_names: List[str] = []
+        ref_doc_pages: List[bytes] = []    # flattened PDF pages as individual PDFs
+        ref_doc_texts: List[tuple] = []    # (filename, text_content) for DOCX
+
+        for img_file in images:
+            if img_file.filename:
+                data = await img_file.read()
+                if data:
+                    ref_image_data.append(data)
+                    ref_image_names.append(img_file.filename)
+
+        for doc_file in documents:
+            if not doc_file.filename:
+                continue
+            data = await doc_file.read()
+            if not data:
+                continue
+            fname = doc_file.filename.lower()
+            if fname.endswith(".pdf"):
+                # Extract individual pages as separate PDFs using PyMuPDF
+                try:
+                    import fitz  # PyMuPDF
+                    src_doc = fitz.open(stream=data, filetype="pdf")
+                    for page_num in range(len(src_doc)):
+                        page_doc = fitz.open()
+                        page_doc.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
+                        ref_doc_pages.append(page_doc.tobytes())
+                        page_doc.close()
+                    src_doc.close()
+                except Exception as e:
+                    logger.warning(f"[PDF] Could not process PDF attachment {doc_file.filename}: {e}")
+            elif fname.endswith(".docx"):
+                # Extract text from DOCX using python-docx
+                try:
+                    import io as _io
+                    from docx import Document
+                    doc_obj = Document(_io.BytesIO(data))
+                    text_parts = [para.text for para in doc_obj.paragraphs if para.text.strip()]
+                    ref_doc_texts.append((doc_file.filename, "\n".join(text_parts)))
+                except Exception as e:
+                    logger.warning(f"[PDF] Could not process DOCX attachment {doc_file.filename}: {e}")
+
+        rec_plain = {
+            "filename": rec.get("filename", "meeting.pdf"),
+            "duration": rec.get("duration", 0),
+            "status": rec.get("status", "done"),
+            "transcript": transcript,
+            "summary": rec.get("summary", ""),
+            "short_summary": rec.get("short_summary", "") or rec.get("summary", ""),
+            "detailed_summary": rec.get("detailed_summary", "") or "",
+            "key_points": from_json(rec.get("key_points"), []),
+            "action_items": from_json(rec.get("action_items"), []),
+            "speakers_detected": from_json(rec.get("speakers_detected"), []),
+            "created_at": rec.get("created_at", ""),
         }
-        decisions = []
 
-    # Read uploaded files
-    ref_image_data: List[bytes] = []
-    ref_image_names: List[str] = []
-    ref_doc_pages: List[bytes] = []    # flattened PDF pages as individual PDFs
-    ref_doc_texts: List[tuple] = []    # (filename, text_content) for DOCX
+        # Load per-speaker summary data if available
+        speaker_summary_data = from_json(rec.get("speaker_summary"), None)
 
-    for img_file in images:
-        if img_file.filename:
-            data = await img_file.read()
-            if data:
-                ref_image_data.append(data)
-                ref_image_names.append(img_file.filename)
+        # Build PDF
+        try:
+            logger.info(f"[PDF] Building PDF for {recording_id} (include_transcription={include_transcription})")
+            pdf_bytes = _build_pdf(
+                rec_plain, exec_summary, decisions,
+                ref_image_data=ref_image_data,
+                ref_image_names=ref_image_names,
+                ref_doc_pages=ref_doc_pages,
+                ref_doc_texts=ref_doc_texts,
+                include_transcription=include_transcription,
+                speaker_summary_data=speaker_summary_data,
+            )
+            
+            # If there are attached PDF pages, append them directly using PyMuPDF (fitz)
+            if ref_doc_pages:
+                try:
+                    import fitz  # PyMuPDF
+                    main_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    for page_bytes in ref_doc_pages:
+                        page_doc = fitz.open(stream=page_bytes, filetype="pdf")
+                        main_doc.insert_pdf(page_doc)
+                        page_doc.close()
+                    pdf_bytes = main_doc.tobytes()
+                    main_doc.close()
+                    logger.info(f"[PDF] Merged {len(ref_doc_pages)} attached PDF pages into the report successfully.")
+                except Exception as e:
+                    logger.warning(f"[PDF] Failed to merge PDF attachments: {e}")
+        except Exception as e:
+            logger.exception(f"[PDF] Build error: {e}")
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
-    for doc_file in documents:
-        if not doc_file.filename:
-            continue
-        data = await doc_file.read()
-        if not data:
-            continue
-        fname = doc_file.filename.lower()
-        if fname.endswith(".pdf"):
-            # Extract individual pages as separate PDFs using PyMuPDF
-            try:
-                import fitz  # PyMuPDF
-                src_doc = fitz.open(stream=data, filetype="pdf")
-                for page_num in range(len(src_doc)):
-                    page_doc = fitz.open()
-                    page_doc.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
-                    ref_doc_pages.append(page_doc.tobytes())
-                    page_doc.close()
-                src_doc.close()
-            except Exception as e:
-                logger.warning(f"[PDF] Could not process PDF attachment {doc_file.filename}: {e}")
-        elif fname.endswith(".docx"):
-            # Extract text from DOCX using python-docx
-            try:
-                import io as _io
-                from docx import Document
-                doc_obj = Document(_io.BytesIO(data))
-                text_parts = [para.text for para in doc_obj.paragraphs if para.text.strip()]
-                ref_doc_texts.append((doc_file.filename, "\n".join(text_parts)))
-            except Exception as e:
-                logger.warning(f"[PDF] Could not process DOCX attachment {doc_file.filename}: {e}")
+        # Derive safe filename
+        raw_name = str(rec_plain.get("filename") or "meeting")
+        for ext in [".wav", ".mp3", ".webm", ".mp4", ".m4a", ".ogg", ".flac"]:
+            raw_name = raw_name.replace(ext, "")
+        safe_name = raw_name.replace(" ", "_").replace("/", "_")[:60] or "meeting"
+        pdf_filename = f"VoiceSum_Report_{safe_name}.pdf"
 
-    rec_plain = {
-        "filename": rec.get("filename", "meeting.pdf"),
-        "duration": rec.get("duration", 0),
-        "status": rec.get("status", "done"),
-        "transcript": transcript,
-        "summary": rec.get("summary", ""),
-        "short_summary": rec.get("short_summary", "") or rec.get("summary", ""),
-        "detailed_summary": rec.get("detailed_summary", "") or "",
-        "key_points": from_json(rec.get("key_points"), []),
-        "action_items": from_json(rec.get("action_items"), []),
-        "speakers_detected": from_json(rec.get("speakers_detected"), []),
-        "created_at": rec.get("created_at", ""),
-    }
-
-    # Load per-speaker summary data if available
-    speaker_summary_data = from_json(rec.get("speaker_summary"), None)
-
-    # Build PDF
-    try:
-        logger.info(f"[PDF] Building PDF for {recording_id} (include_transcription={include_transcription})")
-        pdf_bytes = _build_pdf(
-            rec_plain, exec_summary, decisions,
-            ref_image_data=ref_image_data,
-            ref_image_names=ref_image_names,
-            ref_doc_pages=ref_doc_pages,
-            ref_doc_texts=ref_doc_texts,
-            include_transcription=include_transcription,
-            speaker_summary_data=speaker_summary_data,
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{pdf_filename}"',
+                "Content-Length": str(len(pdf_bytes)),
+            },
         )
-        
-        # If there are attached PDF pages, append them directly using PyMuPDF (fitz)
-        if ref_doc_pages:
-            try:
-                import fitz  # PyMuPDF
-                main_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                for page_bytes in ref_doc_pages:
-                    page_doc = fitz.open(stream=page_bytes, filetype="pdf")
-                    main_doc.insert_pdf(page_doc)
-                    page_doc.close()
-                pdf_bytes = main_doc.tobytes()
-                main_doc.close()
-                logger.info(f"[PDF] Merged {len(ref_doc_pages)} attached PDF pages into the report successfully.")
-            except Exception as e:
-                logger.warning(f"[PDF] Failed to merge PDF attachments: {e}")
-    except Exception as e:
-        logger.exception(f"[PDF] Build error: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
-
-    # Derive safe filename
-    raw_name = str(rec_plain.get("filename") or "meeting")
-    for ext in [".wav", ".mp3", ".webm", ".mp4", ".m4a", ".ogg", ".flac"]:
-        raw_name = raw_name.replace(ext, "")
-    safe_name = raw_name.replace(" ", "_").replace("/", "_")[:60] or "meeting"
-    pdf_filename = f"VoiceSum_Report_{safe_name}.pdf"
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{pdf_filename}"',
-            "Content-Length": str(len(pdf_bytes)),
-        },
-    )
+    finally:
+        from services.ai_provider import QwenProvider
+        QwenProvider.unload_model()

@@ -209,6 +209,34 @@ async def connect_db():
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shortcuts_user_id ON shortcut_dictionary(user_id)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_vocab_user_id ON technical_vocabulary(user_id)"))
 
+        # ── recording_chunks — per-chunk transcription results ──────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS recording_chunks (
+                id           TEXT PRIMARY KEY,
+                recording_id TEXT,
+                chunk_index  INTEGER NOT NULL,
+                chunk_start_sec REAL NOT NULL DEFAULT 0.0,
+                chunk_end_sec   REAL NOT NULL DEFAULT 0.0,
+                file_path    TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                transcript   TEXT NOT NULL DEFAULT '[]',
+                raw_text     TEXT,
+                aligned_result TEXT,
+                error_message  TEXT,
+                created_at   TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_recording_id ON recording_chunks(recording_id)"
+        ))
+
+        # ── Processing Analytics — one row per completed pipeline job ──────────
+        # Imported here to avoid circular imports (analytics.py imports database.py)
+        from services.analytics import CREATE_TABLE_SQL, ADD_INDEX_SQL, ADD_INDEX_COMPLETED_SQL
+        await conn.execute(text(CREATE_TABLE_SQL))
+        await conn.execute(text(ADD_INDEX_SQL))
+        await conn.execute(text(ADD_INDEX_COMPLETED_SQL))
+
         # ── Migration: add short_summary / detailed_summary columns if missing ──
         for col in ("short_summary", "detailed_summary"):
             try:
@@ -223,11 +251,54 @@ async def connect_db():
             "use_vocabulary INTEGER DEFAULT 0",
             "speaker_summary TEXT DEFAULT NULL",
         ):
-            col_name = col_def.split()[0]
             try:
                 await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
             except Exception:
                 pass  # column already exists
+
+        for col_def in (
+            "chunk_ids TEXT DEFAULT '[]'",
+            "is_chunked INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+        # ── Migration: add context_summary caching columns to recordings ─────
+        # context_summary       — compressed hierarchical summary used by all AI tasks.
+        # context_summary_hash  — MD5 of raw_text at time of generation; used to detect
+        #                         stale context when the transcript is edited.
+        for col_def in (
+            "context_summary TEXT DEFAULT NULL",
+            "context_summary_hash TEXT DEFAULT NULL",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+        # ── Migration: add chunk_summary to recording_chunks ─────────────────
+        # Stores the compressed LLM summary of each 10-minute chunk so the
+        # finalize pipeline can merge them without re-reading the full transcript.
+        try:
+            await conn.execute(text(
+                "ALTER TABLE recording_chunks ADD COLUMN chunk_summary TEXT DEFAULT NULL"
+            ))
+        except Exception:
+            pass  # column already exists
+
+        # ── Migration: extend ALL existing sessions to year 2125 ─────────────
+        # Fixes users who have an old 30-day cookie that has already expired.
+        # Sessions are only revoked by explicit logout, never by time expiry.
+        try:
+            await conn.execute(text(
+                "UPDATE sessions SET expires_at = '2125-01-01T00:00:00+00:00' "
+                "WHERE is_revoked = 0"
+            ))
+            logger.info("[DB] Extended all active sessions to year 2125.")
+        except Exception as ext_err:
+            logger.warning(f"[DB] Could not extend sessions (non-fatal): {ext_err}")
 
     logger.info(f"[DB] SQLite database ready: {settings.DATABASE_URL}")
 

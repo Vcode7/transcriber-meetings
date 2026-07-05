@@ -16,6 +16,7 @@ from database import get_db, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from services.llm import generate_mom
 from config import settings
+from tasks.pipeline import _filter_high_confidence_segments
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -103,124 +104,165 @@ async def get_mom(recording_id: str, current_user: dict = Depends(get_current_us
 async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
 
-    async with get_db() as db:
-        r = await db.execute(
-            text("""
-                SELECT transcript, filename, created_at, duration, speakers_detected
-                FROM recordings WHERE id = :id AND user_id = :uid
-            """),
-            {"id": recording_id, "uid": user_id},
-        )
-        rec = r.mappings().fetchone()
-
-    if not rec:
-        raise HTTPException(status_code=404, detail="Recording not found")
-
-    transcript = from_json(rec["transcript"], [])
-    if not transcript:
-        raise HTTPException(status_code=400, detail="No transcript available to summarize")
-
-    meta = {
-        "filename": rec.get("filename", "Meeting Notes"),
-        "created_at": rec.get("created_at", ""),
-        "duration": rec.get("duration", 0),
-        "speakers_detected": from_json(rec["speakers_detected"], []),
-    }
-    import asyncio as _asyncio
-    _loop = _asyncio.get_event_loop()
-    mom_data = await _loop.run_in_executor(None, lambda: generate_mom(transcript, meta))
-
-    now = datetime.now(timezone.utc)
-    mom_id = str(uuid.uuid4())
-    initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now)}]
-
-    async with get_db() as db:
-        # Check if MoM already exists (upsert pattern)
-        r = await db.execute(
-            text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
-            {"rid": recording_id, "uid": user_id},
-        )
-        existing = r.fetchone()
-
-        if existing:
-            await db.execute(
+    try:
+        async with get_db() as db:
+            r = await db.execute(
                 text("""
-                    UPDATE minutes_of_meeting SET
-                        title = :title, date = :date, duration = :duration,
-                        planned_start_time = :planned_start_time,
-                        actual_start_time = :actual_start_time,
-                        participants = :participants,
-                        introduction = :introduction,
-                        points_discussed = :points_discussed,
-                        action_items = :action_items,
-                        conclusion = :conclusion,
-                        versions = :versions, is_draft = 0, updated_at = :updated_at
-                    WHERE recording_id = :rid AND user_id = :uid
+                    SELECT transcript, raw_text, filename, created_at, duration,
+                           speakers_detected, context_summary, context_summary_hash
+                    FROM recordings WHERE id = :id AND user_id = :uid
                 """),
-                {
-                    "title": mom_data.get("title", ""),
-                    "date": mom_data.get("date", ""),
-                    "duration": mom_data.get("duration", 0),
-                    "planned_start_time": mom_data.get("planned_start_time", ""),
-                    "actual_start_time": mom_data.get("actual_start_time", ""),
-                    "participants": to_json(mom_data.get("participants", [])),
-                    "introduction": mom_data.get("introduction", ""),
-                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
-                    "action_items": to_json(mom_data.get("action_items", [])),
-                    "conclusion": mom_data.get("conclusion", ""),
-                    "versions": to_json(initial_version),
-                    "updated_at": dt_to_str(now),
-                    "rid": recording_id,
-                    "uid": user_id,
-                },
+                {"id": recording_id, "uid": user_id},
             )
+            rec = r.mappings().fetchone()
+
+        if not rec:
+            raise HTTPException(status_code=404, detail="Recording not found")
+
+        transcript = from_json(rec["transcript"], [])
+        if not transcript:
+            raise HTTPException(status_code=400, detail="No transcript available to summarize")
+
+        # Filter low-confidence segments before generating MoM
+        filtered_transcript = _filter_high_confidence_segments(transcript, settings.MIN_AVG_SEGMENT_CONFIDENCE)
+        logger.info(
+            f"[MoM] generate: using {len(filtered_transcript)}/{len(transcript)} high-confidence segments "
+            f"for recording={recording_id}"
+        )
+
+        meta = {
+            "filename": rec.get("filename", "Meeting Notes"),
+            "created_at": rec.get("created_at", ""),
+            "duration": rec.get("duration", 0),
+            "speakers_detected": from_json(rec["speakers_detected"], []),
+        }
+
+        # Resolve context_summary (reuse cached or build fresh)
+        import asyncio as _asyncio
+        _loop = _asyncio.get_running_loop()
+        from tasks.pipeline import _raw_text_hash
+        from services.llm import build_context_summary as _build_ctx
+        raw_text = rec.get("raw_text") or ""
+        current_hash = _raw_text_hash(raw_text)
+        ctx: str | None = None
+        if rec.get("context_summary") and rec.get("context_summary_hash") == current_hash:
+            ctx = rec["context_summary"]
+            logger.info(f"[MoM] Reusing cached context_summary for {recording_id}")
         else:
-            await db.execute(
-                text("""
-                    INSERT INTO minutes_of_meeting (
-                        id, recording_id, user_id, title, date, duration,
-                        planned_start_time, actual_start_time,
-                        participants, introduction, points_discussed,
-                        action_items, conclusion,
-                        versions, is_draft, created_at, updated_at
-                    )
-                    VALUES (
-                        :id, :rid, :uid, :title, :date, :duration,
-                        :planned_start_time, :actual_start_time,
-                        :participants, :introduction, :points_discussed,
-                        :action_items, :conclusion,
-                        :versions, 0, :created_at, :updated_at
-                    )
-                """),
-                {
-                    "id": mom_id,
-                    "rid": recording_id,
-                    "uid": user_id,
-                    "title": mom_data.get("title", ""),
-                    "date": mom_data.get("date", ""),
-                    "duration": mom_data.get("duration", 0),
-                    "planned_start_time": mom_data.get("planned_start_time", ""),
-                    "actual_start_time": mom_data.get("actual_start_time", ""),
-                    "participants": to_json(mom_data.get("participants", [])),
-                    "introduction": mom_data.get("introduction", ""),
-                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
-                    "action_items": to_json(mom_data.get("action_items", [])),
-                    "conclusion": mom_data.get("conclusion", ""),
-                    "versions": to_json(initial_version),
-                    "created_at": dt_to_str(now),
-                    "updated_at": dt_to_str(now),
-                },
-            )
-        await db.commit()
+            logger.info(f"[MoM] Building fresh context_summary for {recording_id}")
+            try:
+                ctx = await _loop.run_in_executor(None, _build_ctx, filtered_transcript)
+                if ctx:
+                    async with get_db() as db:
+                        await db.execute(
+                            text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
+                                 "WHERE id = :id AND user_id = :uid"),
+                            {"ctx": ctx, "h": current_hash, "id": recording_id, "uid": user_id},
+                        )
+                        await db.commit()
+            except Exception as ctx_err:
+                logger.warning(f"[MoM] context_summary build failed (non-fatal): {ctx_err}")
+                ctx = None
 
-        # Fetch the saved record
-        r2 = await db.execute(
-            text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
-            {"rid": recording_id, "uid": user_id},
+        mom_data = await _loop.run_in_executor(
+            None, lambda: generate_mom(filtered_transcript, meta, context=ctx or None)
         )
-        saved = r2.mappings().fetchone()
 
-    return _mom_row_to_dict(saved)
+        now = datetime.now(timezone.utc)
+        mom_id = str(uuid.uuid4())
+        initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now)}]
+
+        async with get_db() as db:
+            # Check if MoM already exists (upsert pattern)
+            r = await db.execute(
+                text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+                {"rid": recording_id, "uid": user_id},
+            )
+            existing = r.fetchone()
+
+            if existing:
+                await db.execute(
+                    text("""
+                        UPDATE minutes_of_meeting SET
+                            title = :title, date = :date, duration = :duration,
+                            planned_start_time = :planned_start_time,
+                            actual_start_time = :actual_start_time,
+                            participants = :participants,
+                            introduction = :introduction,
+                            points_discussed = :points_discussed,
+                            action_items = :action_items,
+                            conclusion = :conclusion,
+                            versions = :versions, is_draft = 0, updated_at = :updated_at
+                        WHERE recording_id = :rid AND user_id = :uid
+                    """),
+                    {
+                        "title": mom_data.get("title", ""),
+                        "date": mom_data.get("date", ""),
+                        "duration": mom_data.get("duration", 0),
+                        "planned_start_time": mom_data.get("planned_start_time", ""),
+                        "actual_start_time": mom_data.get("actual_start_time", ""),
+                        "participants": to_json(mom_data.get("participants", [])),
+                        "introduction": mom_data.get("introduction", ""),
+                        "points_discussed": to_json(mom_data.get("points_discussed", [])),
+                        "action_items": to_json(mom_data.get("action_items", [])),
+                        "conclusion": mom_data.get("conclusion", ""),
+                        "versions": to_json(initial_version),
+                        "updated_at": dt_to_str(now),
+                        "rid": recording_id,
+                        "uid": user_id,
+                    },
+                )
+            else:
+                await db.execute(
+                    text("""
+                        INSERT INTO minutes_of_meeting (
+                            id, recording_id, user_id, title, date, duration,
+                            planned_start_time, actual_start_time,
+                            participants, introduction, points_discussed,
+                            action_items, conclusion,
+                            versions, is_draft, created_at, updated_at
+                        )
+                        VALUES (
+                            :id, :rid, :uid, :title, :date, :duration,
+                            :planned_start_time, :actual_start_time,
+                            :participants, :introduction, :points_discussed,
+                            :action_items, :conclusion,
+                            :versions, 0, :created_at, :updated_at
+                        )
+                    """),
+                    {
+                        "id": mom_id,
+                        "rid": recording_id,
+                        "uid": user_id,
+                        "title": mom_data.get("title", ""),
+                        "date": mom_data.get("date", ""),
+                        "duration": mom_data.get("duration", 0),
+                        "planned_start_time": mom_data.get("planned_start_time", ""),
+                        "actual_start_time": mom_data.get("actual_start_time", ""),
+                        "participants": to_json(mom_data.get("participants", [])),
+                        "introduction": mom_data.get("introduction", ""),
+                        "points_discussed": to_json(mom_data.get("points_discussed", [])),
+                        "action_items": to_json(mom_data.get("action_items", [])),
+                        "conclusion": mom_data.get("conclusion", ""),
+                        "versions": to_json(initial_version),
+                        "created_at": dt_to_str(now),
+                        "updated_at": dt_to_str(now),
+                    },
+                )
+            await db.commit()
+
+            # Fetch the saved record
+            r2 = await db.execute(
+                text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+                {"rid": recording_id, "uid": user_id},
+            )
+            saved = r2.mappings().fetchone()
+
+        return _mom_row_to_dict(saved)
+    finally:
+        from services.ai_provider import QwenProvider
+        QwenProvider.unload_model()
+
 
 
 @router.patch("/{recording_id}")

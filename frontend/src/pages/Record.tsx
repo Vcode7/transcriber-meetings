@@ -1,7 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Mic, Square, RotateCcw, Loader, AlertTriangle, Users, Radio, CheckCircle } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Mic, Square, RotateCcw, Loader, AlertTriangle, Users, Radio, CheckCircle, MoreVertical, FileText, X } from 'lucide-react'
+import { toast } from 'sonner'
 import { useAudioRecorder } from '../hooks/useAudioRecorder'
-import { useJobPoller } from '../hooks/useJobPoller'
+import { useJobsStore } from '../store/jobs'
 import WaveformVisualizer from '../components/WaveformVisualizer'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
@@ -16,19 +18,29 @@ import type { ProcessingResult } from '../types/recording'
 type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'done' | 'error'
 
 const PROGRESS: Record<string, string> = {
-  queued: 'Queuedâ€¦',
-  transcribing: 'Transcribing audioâ€¦',
-  diarizing: 'Identifying speakersâ€¦',
-  identifying_speakers: 'Matching voice profilesâ€¦',
-  generating_insights: 'Generating AI insightsâ€¦',
+  queued: 'Queued…',
+  transcribing: 'Transcribing audio…',
+  diarizing: 'Identifying speakers…',
+  identifying_speakers: 'Matching voice profiles…',
+  generating_insights: 'Generating AI insights…',
+  generating_mom: 'Generating Minutes of Meeting…',
 }
 
 const OVERLAP_CONFIRM_COUNT = 2
 const OVERLAP_COOLDOWN_MS = 4000
 
 export default function RecordPage() {
+  const navigate = useNavigate()
+  const [menuOpen, setMenuOpen] = useState(false)
   const [showConfidence, setShowConfidence] = useState(true);
-  const recorder = useAudioRecorder()
+  const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
+    meetingPrompt: '', expectedSpeakers: null, selectedVoiceIds: [],
+    useDictionary: false, useVocabularyInPrompt: false, speakerSummary: false,
+  })
+  const recorder = useAudioRecorder({
+    meetingPrompt: advancedOpts.meetingPrompt,
+    useVocabularyInPrompt: advancedOpts.useVocabularyInPrompt,
+  })
   const [stage, setStage] = useState<Stage>('idle')
   const [recordingId, setRecordingId] = useState<string | null>(null)
   const [result, setResult] = useState<ProcessingResult | null>(null)
@@ -36,10 +48,8 @@ export default function RecordPage() {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [chatOpen, setChatOpen] = useState(true)
   const [overlapAlert, setOverlapAlert] = useState(false)
-  const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
-    meetingPrompt: '', expectedSpeakers: null, selectedVoiceIds: [],
-    useDictionary: false, useVocabularyInPrompt: false, speakerSummary: false,
-  })
+  const [momData, setMomData] = useState<Record<string, unknown> | null>(null)
+  const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
 
   const overlapCountRef = useRef(0)
   const cooldownUntilRef = useRef(0)
@@ -82,35 +92,54 @@ export default function RecordPage() {
       window.addEventListener('mouseup', onUp)
     }, [chatWidth])
 
-  const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
-    // Phase 1 done ── show transcript immediately, keep polling for AI
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setStage('transcript_ready')
-    // Dismiss overlay so the transcript is visible during AI generation
-    clearProcessing()
-  }, [clearProcessing])
+  const jobs = useJobsStore((s) => s.jobs)
+  const addJob = useJobsStore((s) => s.addJob)
 
-  const onDone = useCallback((data: ProcessingResult) => {
-    // Phase 2 done ── merge AI fields into existing result
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setStage('done')
-    clearProcessing()
-  }, [clearProcessing])
-
-  // Poll while processing OR while transcript is ready (waiting for AI)
-  const isPolling = stage === 'processing' || stage === 'transcript_ready'
-  const jobData = useJobPoller(isPolling ? recordingId : null, { onTranscriptReady, onDone })
-
-  // Sync job progress ── global processing store
+  // Reconnect to an active or recently completed record job on mount
   useEffect(() => {
-    if (jobData?.progress) {
-      updateProcStage(jobData.progress as ProcessingStage)
+    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'record')
+    if (priorJob) {
+      setRecordingId(priorJob.jobId)
+      setStage(priorJob.status as Stage)
+      if (priorJob.result) {
+        setResult(priorJob.result as ProcessingResult)
+      }
+      setProcessing('record', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
     }
-    if (jobData?.status === 'error') {
+  }, [setProcessing])
+
+  const currentJob = jobs.find((j) => j.jobId === recordingId)
+
+  // Sync job status/stage/result reactively from global store
+  useEffect(() => {
+    if (!currentJob) return
+
+    if (currentJob.status === 'cancelled') {
+      setStage('idle')
+      setRecordingId(null)
+      setResult(null)
+      setMomData(null)
+      clearProcessing()
+    } else if (currentJob.status === 'done') {
+      setStage('done')
+      if (currentJob.result) {
+        setResult(currentJob.result as ProcessingResult)
+      }
+      clearProcessing()
+    } else if (currentJob.status === 'error') {
       setStage('error')
       clearProcessing()
+    } else if (currentJob.status === 'transcript_ready') {
+      setStage('transcript_ready')
+      if (currentJob.result) {
+        setResult(currentJob.result as ProcessingResult)
+      }
+      clearProcessing()
+    } else {
+      setStage('processing')
+      setProcessing('record', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [jobData?.progress, jobData?.status, updateProcStage, clearProcessing])
+  }, [currentJob, setProcessing, clearProcessing])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -135,6 +164,17 @@ export default function RecordPage() {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
     }
   }, [recordingId, !!result]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch MoM when the pipeline completes or is already complete
+  useEffect(() => {
+    if (!recordingId || !result) return
+    const isTerminal = currentJob?.status === 'done' || currentJob?.status === 'error'
+    if (isTerminal) {
+      api.get(`/mom/${recordingId}`)
+        .then((r) => setMomData(r.data))
+        .catch(() => setMomData(null))
+    }
+  }, [recordingId, result, currentJob?.status])
 
   // Cross-talk detection
   useEffect(() => {
@@ -176,7 +216,19 @@ export default function RecordPage() {
     }
   }, [stage, recorder.latestChunkRef])
 
-  const handleStop = () => { recorder.stop(); setStage('stopped') }
+  const handleStop = () => {
+    recorder.stop()
+    setStage('stopped')
+    // Auto-submit immediately after stopping — no manual step required
+  }
+
+  // Auto-submit whenever stage transitions to 'stopped'
+  useEffect(() => {
+    if (stage === 'stopped' && recorder.audioBlob) {
+      handleSubmit()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, recorder.audioBlob])
 
   const handleSubmit = async () => {
     if (!recorder.audioBlob) return
@@ -190,8 +242,26 @@ export default function RecordPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
-      const res = await api.post('/audio/record', form)
-      setRecordingId(res.data.recording_id)
+
+      const hasChunks = recorder.chunkIdsRef.current.length > 0
+      let rId = ''
+      if (hasChunks) {
+        // Long recording — finalize with merged chunks
+        form.append('chunk_ids', JSON.stringify(recorder.chunkIdsRef.current))
+        const res = await api.post('/audio/record-finalize', form)
+        rId = res.data.recording_id
+      } else {
+        // Short recording (< 10 min) — standard pipeline
+        const res = await api.post('/audio/record', form)
+        rId = res.data.recording_id
+      }
+      setRecordingId(rId)
+      addJob({
+        jobId: rId,
+        source: 'record',
+        filename: `Recording (${new Date().toLocaleTimeString()})`,
+        startedAt: new Date().toISOString(),
+      })
       setStage('processing')
       updateProcStage('queued')
     } catch (e: unknown) {
@@ -202,17 +272,64 @@ export default function RecordPage() {
   }
 
   const handleReset = () => {
+    if (recordingId) {
+      useJobsStore.getState().removeJob(recordingId)
+    }
     recorder.reset(); setStage('idle')
     setRecordingId(null); setResult(null); setUploadError(null)
+    setMomData(null)
     setOverlapAlert(false)
     overlapCountRef.current = 0
     cooldownUntilRef.current = 0
     clearProcessing()
   }
 
+  const handleCancel = async () => {
+    if (!recordingId) return
+    try {
+      await api.post(`/audio/jobs/${recordingId}/cancel`)
+      useJobsStore.getState().removeJob(recordingId)
+      recorder.reset()
+      setStage('idle')
+      setRecordingId(null)
+      setResult(null)
+      setUploadError(null)
+      setMomData(null)
+      setOverlapAlert(false)
+      overlapCountRef.current = 0
+      cooldownUntilRef.current = 0
+      clearProcessing()
+      toast.success('Processing cancelled successfully')
+    } catch (err: unknown) {
+      console.error('[Cancel] Failed:', err)
+      toast.error('Failed to cancel processing')
+    }
+  }
+
+  const handleGenerateInsights = useCallback(async (tasks: string[]) => {
+    if (!recordingId || isGeneratingInsights) return
+    setIsGeneratingInsights(true)
+    try {
+      const res = await api.post(`/history/${recordingId}/generate-insights`, { tasks })
+      setResult((prev) => prev ? {
+        ...prev,
+        summary: res.data.short_summary ?? prev.summary,
+        short_summary: res.data.short_summary ?? prev.short_summary,
+        detailed_summary: res.data.detailed_summary ?? prev.detailed_summary,
+        key_points: res.data.key_points ?? prev.key_points,
+        action_items: res.data.action_items ?? prev.action_items,
+      } : prev)
+    } catch (err: unknown) {
+      console.error('[GenerateInsights] Failed:', err)
+    } finally {
+      setIsGeneratingInsights(false)
+    }
+  }, [recordingId, isGeneratingInsights])
+
   const processing = stage === 'uploading' || stage === 'processing'
   const isProcessingActive = useProcessingStore((s) => s.isProcessing && s.source === 'record')
-  const isGeneratingAI = stage === 'transcript_ready'
+  // MoM is being generated when stage is transcript_ready (pipeline phase 2)
+  const isGeneratingMom = stage === 'transcript_ready'
   const chatW = chatOpen ? `${chatWidth}px` : '48px'
   const isRecording = stage === 'recording'
 
@@ -221,16 +338,23 @@ export default function RecordPage() {
     ? 'none'
     : 'grid-template-columns .25s ease' }}>
 
-      {/* â”€â”€ Center panel */}
+      {/* — Center panel */}
       <div className="center-panel" style={{ position: 'relative' }}>
 
         {/* Processing overlay */}
         {processing && (
-          <ProcessingOverlay stage={procStage} startedAt={startedAt} source={source} />
+          <ProcessingOverlay stage={procStage} startedAt={startedAt} source={source} onCancel={handleCancel} />
         )}
 
         {/* Header */}
-        <div className="panel-header" style={{ position: 'relative', overflow: 'hidden' }}>
+        <div
+          className="panel-header"
+          style={{
+            position: 'relative',
+            overflow: menuOpen ? 'visible' : 'hidden',
+            zIndex: menuOpen ? 30 : 'auto',
+          }}
+        >
           {/* Stage progress bar */}
           <div style={{
             position: 'absolute', top: 0, left: 0, right: 0, height: '3px',
@@ -283,15 +407,8 @@ export default function RecordPage() {
               <span>{result.speakers_detected.join(', ')}</span>
             </div>
           )}
-
           {result && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-              
-              <PDFButton
-                recordingId={recordingId}
-                filename="recording"
-                variant="ghost"
-              />
               <button
                 className="btn btn-ghost animate-bounce-in"
                 onClick={handleReset}
@@ -299,11 +416,45 @@ export default function RecordPage() {
               >
                 <RotateCcw size={14} /> New Recording
               </button>
+
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  className="icon-btn"
+                  onClick={() => setMenuOpen((open) => !open)}
+                  aria-label="More recording options"
+                  aria-expanded={menuOpen}
+                >
+                  <MoreVertical size={18} />
+                </button>
+
+                {menuOpen && (
+                  <div className="header-dropdown">
+                    <button
+                      className="dropdown-item"
+                      onClick={() => {
+                        navigate(`/dashboard/history/${recordingId}/mom`);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <FileText size={14} />
+                      Minutes of Meeting
+                    </button>
+
+                    <div className="dropdown-item">
+                      <PDFButton
+                        recordingId={recordingId}
+                        filename="recording"
+                        variant="ghost"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
 
-        {/* Recording Section â€” hidden after results arrive */}
+        {/* Recording Section — hidden after results arrive */}
         {!result && (<div className="capture-setup" style={{
           padding: '1.75rem 2rem',
           borderBottom: '2px dashed hsl(var(--border))',
@@ -382,7 +533,7 @@ export default function RecordPage() {
                 boxShadow: '0 0 16px hsl(var(--destructive) / .12)',
               }}>
                 <AlertTriangle size={16} style={{ flexShrink: 0 }} />
-                <span> Cross-talk detected  please speak one at a time</span>
+                <span>  Cross-talk detected  please speak one at a time</span>
               </div>
             )}
 
@@ -403,7 +554,9 @@ export default function RecordPage() {
           {/* Controls */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '18px' }}>
             {stage === 'idle' && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', width: '100%', maxWidth: '520px' }}>
+                {/* Advanced options — configured BEFORE recording starts */}
+                <AdvancedOptionsPanel onChange={setAdvancedOpts} />
                 <button
                   className="record-btn idle"
                   onClick={() => { recorder.start(); setStage('recording') }}
@@ -432,19 +585,7 @@ export default function RecordPage() {
                 <Square size={32} color="hsl(var(--accent-foreground))" fill="hsl(var(--accent-foreground))" />
               </button>
             )}
-            {stage === 'stopped' && (
-              <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'stretch', width: '100%', maxWidth: '520px' }}>
-                <AdvancedOptionsPanel onChange={setAdvancedOpts} />
-                <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-                  <button className="btn btn-ghost" onClick={handleReset}>
-                    <RotateCcw size={15} /> Discard
-                  </button>
-                  <button className="btn btn-primary" onClick={handleSubmit} id="submit-btn">
-                    Analyse Recording
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* 'stopped' stage is now handled automatically — no manual Analyse button */}
             {processing && (
               <button className="record-btn idle" disabled style={{ opacity: .5, cursor: 'not-allowed' }}>
                 <Loader size={32} color="hsl(var(--accent-foreground))" className="spin" />
@@ -458,21 +599,9 @@ export default function RecordPage() {
           </div>
 
           {/* Audio preview */}
-          {recorder.audioUrl && stage === 'stopped' && (
-            <div className="animate-slide-up">
-              <audio
-                src={recorder.audioUrl}
-                controls
-                style={{
-                  width: '100%',
-                  height: 40,
-                  accentColor: 'hsl(var(--accent))',
-                  borderRadius: '10px',
-                }}
-              />
-            </div>
-          )}
         </div>)}
+
+
 
         {/* Transcript */}
         <div className="transcript-scroll" style={{
@@ -569,7 +698,7 @@ export default function RecordPage() {
 
       {/* AI Insights */}
        <div className={`insights-pane ${chatOpen ? 'is-open' : ''}`} style={{ position: 'relative', display: 'flex' }}>
-        {/* Drag handle â€” only visible when panel is open */}
+        {/* Drag handle — only visible when panel is open */}
         {chatOpen && (
           <div
             onMouseDown={handleDragStart}
@@ -594,9 +723,12 @@ export default function RecordPage() {
         keyPoints={result?.key_points}
         actionItems={result?.action_items}
         speakerSummary={result?.speaker_summary}
+        momData={momData as any}
         isOpen={chatOpen}
         onToggle={() => setChatOpen((o) => !o)}
-        isGenerating={isGeneratingAI}
+        isGeneratingMom={isGeneratingMom}
+        onGenerateInsights={handleGenerateInsights}
+        isGeneratingInsights={isGeneratingInsights}
       />
       </div>
     </div>
