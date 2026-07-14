@@ -67,10 +67,16 @@ def _get_machine_id() -> str:
 
     # Windows volume serial number (most stable identifier)
     if platform.system() == "Windows":
+        run_kwargs = {
+            "capture_output": True,
+            "text": True,
+            "creationflags": 0x08000000  # CREATE_NO_WINDOW
+        }
         try:
             result = subprocess.run(
                 ["wmic", "diskdrive", "get", "SerialNumber"],
-                capture_output=True, text=True, timeout=5
+                timeout=5,
+                **run_kwargs
             )
             if result.returncode == 0:
                 serial = result.stdout.strip().split("\n")[-1].strip()
@@ -83,7 +89,9 @@ def _get_machine_id() -> str:
         try:
             result = subprocess.run(
                 ["vol", "C:"],
-                capture_output=True, text=True, shell=True, timeout=3
+                shell=True,
+                timeout=3,
+                **run_kwargs
             )
             if result.returncode == 0:
                 parts.append(result.stdout.strip())

@@ -40,7 +40,7 @@ a = Analysis(
         # does not accidentally pull them in from the active venv.
         "torch", "torchaudio", "torchvision",
         "transformers", "whisperx", "faster_whisper",
-        "pyannote", "speechbrain", "resemblyzer",
+        "pyannote", "speechbrain",
         "librosa", "soundfile", "scipy", "numpy",
         "sklearn", "pandas", "matplotlib",
         "bitsandbytes", "accelerate", "ctranslate2",

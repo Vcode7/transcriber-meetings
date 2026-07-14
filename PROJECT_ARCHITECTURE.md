@@ -36,7 +36,7 @@
 │                         │                                    │
 │  ┌──────────────────────┴────────────────────────────────┐  │
 │  │                  AI/ML Services                        │  │
-│  │  WhisperX  Pyannote  Resemblyzer  Groq LLM           │  │
+│  │  WhisperX  Pyannote  WeSpeaker CAM++  Groq LLM       │  │
 │  └────────────────────────────────────────────────────────┘  │
 └────────────────────────┬────────────────────────────────────┘
                          │
@@ -758,27 +758,27 @@ class StreamingTranscriber:
 
 ### 2. **Pyannote.audio** (Speaker Diarization)
 - **Purpose**: "Who spoke when?" - segments audio by speaker
-- **Model**: pyannote/speaker-diarization-3.1
+- **Model**: pyannote/speaker-diarization-community-1
 - **Features**:
-  - Multi-speaker detection
+  - Multi-speaker detection (via VBx clustering)
   - Overlap detection (cross-talk)
   - No speaker count limit
-- **Requires**: HuggingFace token (HF_TOKEN)
+- **Requires**: HuggingFace token (HF_TOKEN) for initial download
 - **Fallback**: Energy-based diarization (if HF_TOKEN not set)
   - Uses RMS energy to detect speech
   - Alternates between 2 speakers
   - Less accurate but works without API key
 
-### 3. **Resemblyzer** (Speaker Embedding)
+### 3. **WeSpeaker CAM++** (Speaker Embedding)
 - **Purpose**: Generate voice "fingerprints" for identification
-- **Model**: GE2E (Generalized End-to-End) speaker encoder
-- **Output**: 256-dimensional embedding vector
+- **Model**: Context-Aware Masking with Channel Attention Plus Plus (ONNX)
+- **Output**: 512-dimensional embedding vector
 - **Features**:
   - Voice profile creation from 1-3 samples
   - Cosine similarity matching
   - Speaker identification across recordings
 - **Process**:
-  1. Extract embedding from audio segment
+  1. Extract embedding from audio segment using ONNX Runtime
   2. Compare with stored voice profiles
   3. Match if similarity > threshold (default 0.75)
 
@@ -824,10 +824,10 @@ class StreamingTranscriber:
    ├─ Detect overlapping speech
    └─ Output: time segments with speaker IDs
 
-4. SPEAKER IDENTIFICATION (Resemblyzer)
+4. SPEAKER IDENTIFICATION (WeSpeaker CAM++)
    ├─ For each diarization segment:
    │  ├─ Extract audio slice
-   │  ├─ Generate 256-d embedding
+   │  ├─ Generate 512-d embedding
    │  ├─ Compare with stored voice profiles
    │  └─ Assign label if similarity > threshold
    └─ Output: segments with human-readable labels
@@ -1615,7 +1615,6 @@ MONGODB_DB=voicesum
 # Authentication
 JWT_SECRET=your-super-secret-key-change-in-production
 JWT_ALGORITHM=HS256
-JWT_EXPIRE_MINUTES=10080  # 7 days
 
 # AI Services
 GROQ_API_KEY=your_groq_api_key_here          # REQUIRED
@@ -1744,8 +1743,8 @@ api.interceptors.response.use(
 ### **Model Sizes**
 - WhisperX medium: ~1.5GB RAM
 - Pyannote: ~500MB RAM
-- Resemblyzer: ~100MB RAM
-- **Total**: ~2GB RAM minimum
+- WeSpeaker CAM++: ~150MB RAM
+- **Total**: ~2.2GB RAM minimum
 
 ### **Storage**
 - Audio: ~1MB per minute (16kHz WAV)
@@ -1761,9 +1760,9 @@ api.interceptors.response.use(
 1. **"email-validator not installed"**
    - Solution: `uv pip install email-validator`
 
-2. **"webrtcvad build failed"**
-   - Solution: Install pre-built wheel or skip resemblyzer
-   - Alternative: Use pyannote embeddings
+2. **"onnxruntime initialization failed"**
+   - Solution: Ensure the VC++ Redistributable is installed on Windows.
+   - Alternatively: Set WHISPER_DEVICE=cpu to avoid CUDA/ONNX GPU conflicts.
 
 3. **"MongoDB connection failed"**
    - Check MongoDB service is running
@@ -1793,7 +1792,7 @@ Core:
 AI/ML:
 - whisperx: Transcription
 - pyannote.audio: Diarization
-- resemblyzer: Speaker embeddings
+- onnxruntime: ONNX inference engine (CAM++)
 - torch/torchaudio: Deep learning
 - librosa: Audio processing
 - groq: LLM API client
@@ -1862,7 +1861,7 @@ Build:
 **Models Used:**
 - WhisperX: MIT License
 - Pyannote.audio: MIT License
-- Resemblyzer: Apache 2.0
+- WeSpeaker / CAM++: Apache 2.0
 - Groq LLM: Commercial API
 
 **Built With:**

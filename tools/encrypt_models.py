@@ -35,24 +35,20 @@ logger = logging.getLogger(__name__)
 # The first match found in HF_CACHE is used.
 MODEL_REGISTRY: Dict[str, list] = {
     "speech_engine": [
+        "models--Systran--faster-whisper-large-v3",
         "models--Systran--faster-whisper-medium",
         "models--Systran--faster-whisper-small",
         "models--openai--whisper-medium",
     ],
     "audio_context": [
-        "models--pyannote--speaker-diarization-3.1",
+        # community-1 (complete snapshot with bundled embedding, segmentation, plda)
+        "models--pyannote--speaker-diarization-community-1",
     ],
-    "voice_segment": [
-        "models--pyannote--segmentation-3.0",
-    ],
-    "voice_context": [
+    "ecapa_tdnn": [
         "models--speechbrain--spkrec-ecapa-voxceleb",
     ],
     "align_engine": [
         "models--facebook--wav2vec2-base-960h",
-    ],
-    "wespeaker": [
-        "models--hbredin--wespeaker-voxceleb-resnet34-LM",
     ],
 }
 

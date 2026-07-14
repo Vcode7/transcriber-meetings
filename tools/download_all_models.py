@@ -13,13 +13,11 @@ After this completes, run:
     python tools/encrypt_models.py
 
 Model list (total ~4 GB download):
-  1. faster-whisper/medium             ~1.5 GB  -- speech transcription
-  2. pyannote/speaker-diarization-3.1    ~10 MB  -- speaker diarization config
-  3. pyannote/segmentation-3.0           ~10 MB  -- speaker segmentation
-  4. speechbrain/spkrec-ecapa-voxceleb   ~85 MB  -- speaker embeddings
-  5. hbredin/wespeaker-voxceleb-resnet34-LM   ~25 MB -- speaker verification
-  6. facebook/wav2vec2-base-960h        ~360 MB  -- word-level alignment
-  7. Qwen/Qwen3-4B                   ~2,300 MB  -- AI summarization / MoM / insights
+  1. faster-whisper/large-v3                     ~3,100 MB  -- speech transcription
+  2. pyannote/speaker-diarization-community-1      ~100 MB  -- speaker diarization (complete snapshot)
+  3. speechbrain/spkrec-ecapa-voxceleb           ~80 MB   -- speaker ID embedding (ECAPA-TDNN)
+  4. facebook/wav2vec2-base-960h                   ~360 MB  -- word-level alignment
+  5. Qwen/Qwen3-4B                              ~2,300 MB  -- AI summarization / MoM / insights
 """
 from __future__ import annotations
 
@@ -55,42 +53,26 @@ class ModelSpec:
 MODELS: List[ModelSpec] = [
     ModelSpec(
         key="whisper",
-        hf_id="Systran/faster-whisper-medium",
-        description="Whisper Medium (speech transcription)",
-        size_mb=1500,
-        cache_dir_name="models--Systran--faster-whisper-medium",
+        hf_id="Systran/faster-whisper-large-v3",
+        description="Whisper Large V3 (speech transcription)",
+        size_mb=3100,
+        cache_dir_name="models--Systran--faster-whisper-large-v3",
         download_fn="snapshot",
     ),
     ModelSpec(
         key="diarization",
-        hf_id="pyannote/speaker-diarization-3.1",
-        description="pyannote Speaker Diarization 3.1",
-        size_mb=10,
-        cache_dir_name="models--pyannote--speaker-diarization-3.1",
+        hf_id="pyannote/speaker-diarization-community-1",
+        description="pyannote Speaker Diarization Community-1 (complete snapshot)",
+        size_mb=100,
+        cache_dir_name="models--pyannote--speaker-diarization-community-1",
         download_fn="snapshot",
     ),
     ModelSpec(
-        key="segmentation",
-        hf_id="pyannote/segmentation-3.0",
-        description="pyannote Segmentation 3.0",
-        size_mb=10,
-        cache_dir_name="models--pyannote--segmentation-3.0",
-        download_fn="snapshot",
-    ),
-    ModelSpec(
-        key="speechbrain",
+        key="ecapa",
         hf_id="speechbrain/spkrec-ecapa-voxceleb",
-        description="SpeechBrain Speaker Recognition (ECAPA-VOXCELEB)",
-        size_mb=85,
+        description="SpeechBrain ECAPA-TDNN (speaker identification)",
+        size_mb=80,
         cache_dir_name="models--speechbrain--spkrec-ecapa-voxceleb",
-        download_fn="snapshot",
-    ),
-    ModelSpec(
-        key="wespeaker",
-        hf_id="hbredin/wespeaker-voxceleb-resnet34-LM",
-        description="WeSpeaker ONNX (speaker verification)",
-        size_mb=25,
-        cache_dir_name="models--hbredin--wespeaker-voxceleb-resnet34-LM",
         download_fn="snapshot",
     ),
     ModelSpec(
@@ -322,9 +304,9 @@ def main():
         print(f"  FAILED:                    {', '.join(failed)}")
         print()
         print("  Troubleshooting:")
-        if any(k in failed for k in ("diarization", "segmentation", "wespeaker")):
-            print("  -> pyannote models require HF_TOKEN with accepted terms.")
-            print("     Visit: https://huggingface.co/pyannote/speaker-diarization-3.1")
+        if any(k in failed for k in ("diarization", "campplus")):
+            print("  -> pyannote community-1 requires HF_TOKEN with accepted terms.")
+            print("     Visit: https://huggingface.co/pyannote/speaker-diarization-community-1")
             print("     Accept terms, then pass: --hf-token hf_xxx...")
         if "qwen3" in failed:
             print("  -> Qwen3 download failed. Ensure 'transformers>=4.45' is installed.")

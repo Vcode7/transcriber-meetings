@@ -8,6 +8,12 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
 # ─────────────────────────────────────────────────────────────────────────────
+# ── Apply SpeechBrain / torchaudio compatibility patches ──────────────────────
+# Must run BEFORE any import of whisperx, pyannote, speechbrain, or ECAPA so
+# that SpeechBrain's k2/flair lazy-import machinery is mocked out in advance.
+from services.compat import apply_compatibility_patches
+apply_compatibility_patches()
+# ─────────────────────────────────────────────────────────────────────────────
 import json
 import logging
 import warnings
@@ -90,7 +96,7 @@ def _load_overlap_model() -> OverlapModel | None:
 
     try:
         m = OverlapModel(model_dir=wav2vec2_dir)
-        m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=False))
+        m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
         m.eval()
         logger.info(f"[OverlapModel] Loaded from '{model_path}' ✓")
         return m
@@ -134,6 +140,24 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting VoiceSum API (fully offline mode)...")
+
+    # Disable access logs for /audio/jobs endpoint
+    class EndpointFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.args:
+                for arg in record.args:
+                    if isinstance(arg, str) and "/audio/jobs" in arg:
+                        return False
+            try:
+                msg = record.getMessage()
+                if "/audio/jobs" in msg:
+                    return False
+            except Exception:
+                pass
+            return True
+
+    logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
 
     # ── License check ─────────────────────────────────────────────
     _valid, _msg = check_license()
@@ -281,7 +305,13 @@ async def detect_overlap(file: UploadFile = File(...)):
         f.write(audio_bytes)
 
     try:
-        # Transcode WebM → 16-kHz mono PCM WAV via ffmpeg
+        run_kwargs = {
+            "capture_output": True,
+            "timeout": 5,
+        }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -291,8 +321,7 @@ async def detect_overlap(file: UploadFile = File(...)):
                 "-f", "wav",
                 dst_path,
             ],
-            capture_output=True,
-            timeout=5,
+            **run_kwargs
         )
         if result.returncode != 0:
             logger.warning(

@@ -15,6 +15,7 @@ import PDFButton from '../components/PDFButton'
 import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
+import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 
 type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'done' | 'error'
@@ -87,15 +88,24 @@ export default function TabAudioPage() {
       if (priorJob.result) {
         setResult(priorJob.result as ProcessingResult)
       }
-      setProcessing('tab-audio', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+      if (isActiveJobStatus(priorJob.status)) {
+        setProcessing('tab-audio', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+      } else {
+        clearProcessing()
+      }
     }
-  }, [setProcessing])
+  }, [setProcessing, clearProcessing])
 
   const currentJob = jobs.find((j) => j.jobId === recordingId)
 
   // Sync job state reactively from global store
   useEffect(() => {
-    if (!currentJob) return
+    if (!currentJob) {
+      if (recordingId) {
+        clearProcessing()
+      }
+      return
+    }
 
     if (currentJob.status === 'cancelled') {
       setStage('idle')
@@ -104,7 +114,10 @@ export default function TabAudioPage() {
       clearProcessing()
     } else if (currentJob.status === 'done') {
       setStage('done')
-      if (currentJob.result) {
+      // Sync result from store (populated by global poller on completion / reconnect)
+      // Guard: only apply if the store has a result and it's different from our local state
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[TabAudio] Applying done result from store')
         setResult(currentJob.result as ProcessingResult)
       }
       clearProcessing()
@@ -113,7 +126,9 @@ export default function TabAudioPage() {
       clearProcessing()
     } else if (currentJob.status === 'transcript_ready') {
       setStage('transcript_ready')
-      if (currentJob.result) {
+      // Sync result from store if poller already has it (reconnect path)
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[TabAudio] Applying transcript_ready result from store')
         setResult(currentJob.result as ProcessingResult)
       }
       clearProcessing()
@@ -121,7 +136,7 @@ export default function TabAudioPage() {
       setStage('processing')
       setProcessing('tab-audio', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [currentJob, setProcessing, clearProcessing])
+  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup on unmount
   useEffect(() => {

@@ -501,3 +501,97 @@ async def update_transcript(
     )
     return {"status": "success", "segment_index": segment_index, "segment": seg}
 
+
+@router.post("/{recording_id}/reidentify-speakers")
+async def reidentify_speakers(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Re-run diarization + speaker identification on a completed recording.
+
+    * Does NOT re-transcribe or re-align the audio.
+    * Replaces speaker labels in the stored transcript using current voice profiles.
+    * Conditionally regenerates the MoM if speaker names change.
+    * The frontend can poll GET /audio/jobs/{recording_id} for progress.
+
+    Returns immediately with status="processing"; caller must poll for completion.
+    """
+    import asyncio as _asyncio
+    import os as _os
+    import json as _json
+    from tasks.rereid_pipeline import run_reidentify_pipeline, register_reid_task, is_reid_running
+
+    user_id = current_user["id"]
+
+    # ── Fetch recording ───────────────────────────────────────────────────────
+    async with get_db() as db:
+        r = await db.execute(
+            text(
+                "SELECT id, status, file_path, transcript "
+                "FROM recordings WHERE id = :id AND user_id = :uid"
+            ),
+            {"id": recording_id, "uid": user_id},
+        )
+        rec = r.mappings().fetchone()
+
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+
+    status = rec.get("status", "")
+    if status not in ("done", "transcript_ready", "error"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Recording must be fully processed before re-running speaker identification. "
+                f"Current status: {status!r}"
+            ),
+        )
+
+    transcript = _json.loads(rec.get("transcript") or "[]")
+    if not transcript:
+        raise HTTPException(
+            status_code=400,
+            detail="Recording has no transcript. Please wait for transcription to complete.",
+        )
+
+    file_path = rec.get("file_path", "")
+    if not file_path or not _os.path.exists(file_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Audio file is no longer available on disk. Cannot re-run speaker identification.",
+        )
+
+    # ── Guard against duplicate reid runs ─────────────────────────────────────
+    if is_reid_running(recording_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Speaker re-identification is already running for this recording.",
+        )
+
+    # ── Mark as processing immediately so the frontend can poll ───────────────
+    async with get_db() as db:
+        await db.execute(
+            text(
+                "UPDATE recordings SET status='processing', progress='diarizing' "
+                "WHERE id = :id"
+            ),
+            {"id": recording_id},
+        )
+        await db.commit()
+
+    # ── Schedule the background task ─────────────────────────────────────────
+    task = _asyncio.create_task(
+        run_reidentify_pipeline(recording_id, file_path, user_id)
+    )
+    register_reid_task(recording_id, task)
+    logger.info(
+        f"[ReID] Re-identification task scheduled for recording={recording_id} "
+        f"user={user_id}"
+    )
+
+    return {
+        "status": "processing",
+        "recording_id": recording_id,
+        "message": "Speaker re-identification started. Poll /audio/jobs/{recording_id} for progress.",
+    }

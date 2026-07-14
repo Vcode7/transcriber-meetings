@@ -60,7 +60,8 @@ for pkg in metadata_packages:
 data_packages = [
     "pyannote.audio",
     "whisperx",
-    "resemblyzer",
+    "onnxruntime",
+    "speechbrain",
 ]
 collected_datas = []
 for pkg in data_packages:
@@ -75,7 +76,7 @@ submodule_packages = [
     "faster_whisper",
     "pyannote",
     "speechbrain",
-    "resemblyzer",
+    "onnxruntime",
 ]
 collected_submodules = []
 for pkg in submodule_packages:
@@ -132,7 +133,29 @@ a = Analysis(
         "pyannote.audio",
         "pyannote.audio.pipelines",
         "speechbrain",
-        "resemblyzer",
+        # SpeechBrain submodules required for ECAPA-TDNN speaker embeddings
+        "speechbrain.utils",
+        "speechbrain.utils.fetching",
+        "speechbrain.utils.checkpoints",
+        "speechbrain.utils.parameter_transfer",
+        "speechbrain.utils.data_utils",
+        "speechbrain.inference",
+        "speechbrain.inference.speaker",
+        "speechbrain.inference.interfaces",
+        "speechbrain.nnet",
+        "speechbrain.nnet.linear",
+        "speechbrain.nnet.normalization",
+        "speechbrain.nnet.CNN",
+        "speechbrain.nnet.pooling",
+        "speechbrain.nnet.attention",
+        "speechbrain.nnet.RNN",
+        "speechbrain.lobes",
+        "speechbrain.lobes.models",
+        "speechbrain.lobes.models.ECAPA_TDNN",
+        "speechbrain.lobes.features",
+        "speechbrain.core",
+        "speechbrain.pretrained",
+        "onnxruntime",
         "librosa",
         "soundfile",
         "numpy",

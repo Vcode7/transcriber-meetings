@@ -215,7 +215,7 @@ def restore_hf_cache():
                 continue
 
             snapshot_hash = info.get("snapshot_hash", "default")
-            original_name = info["original_name"] # e.g. "models--pyannote--speaker-diarization-3.1"
+            original_name = info["original_name"] # e.g. "models--pyannote--speaker-diarization-community-1"
 
             # Reconstruct the expected HF hub cache directory path
             target_snapshots_dir = hf_home / original_name / "snapshots"
@@ -256,10 +256,9 @@ def verify_all_models() -> Dict[str, bool]:
     Returns {generic_name: is_present} for all known models.
     """
     expected = [
-        "speech_engine",   # faster-whisper-medium
-        "audio_context",   # pyannote/speaker-diarization-3.1
-        "voice_segment",   # pyannote/segmentation-3.0
-        "wespeaker",       # pyannote/wespeaker-voxceleb-resnet34-LM
+        "speech_engine",   # faster-whisper-large-v3
+        "audio_context",   # pyannote/speaker-diarization-community-1 (complete snapshot)
+        "ecapa_tdnn",      # SpeechBrain ECAPA-TDNN (speaker identification)
         "align_engine",    # facebook/wav2vec2-base-960h
         "nlp_engine",      # Qwen3-4B
     ]

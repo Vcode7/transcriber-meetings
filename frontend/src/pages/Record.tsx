@@ -13,6 +13,7 @@ import AdvancedOptionsPanel, { type AdvancedOptions } from '../components/Advanc
 import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
+import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 
 type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'done' | 'error'
@@ -104,15 +105,24 @@ export default function RecordPage() {
       if (priorJob.result) {
         setResult(priorJob.result as ProcessingResult)
       }
-      setProcessing('record', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+      if (isActiveJobStatus(priorJob.status)) {
+        setProcessing('record', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+      } else {
+        clearProcessing()
+      }
     }
-  }, [setProcessing])
+  }, [setProcessing, clearProcessing])
 
   const currentJob = jobs.find((j) => j.jobId === recordingId)
 
   // Sync job status/stage/result reactively from global store
   useEffect(() => {
-    if (!currentJob) return
+    if (!currentJob) {
+      if (recordingId) {
+        clearProcessing()
+      }
+      return
+    }
 
     if (currentJob.status === 'cancelled') {
       setStage('idle')
@@ -122,7 +132,10 @@ export default function RecordPage() {
       clearProcessing()
     } else if (currentJob.status === 'done') {
       setStage('done')
-      if (currentJob.result) {
+      // Sync result from store (populated by global poller on completion / reconnect)
+      // Guard: only apply if the store has a result and it's different from our local state
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[Record] Applying done result from store')
         setResult(currentJob.result as ProcessingResult)
       }
       clearProcessing()
@@ -131,7 +144,9 @@ export default function RecordPage() {
       clearProcessing()
     } else if (currentJob.status === 'transcript_ready') {
       setStage('transcript_ready')
-      if (currentJob.result) {
+      // Sync result from store if poller already has it (reconnect path)
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[Record] Applying transcript_ready result from store')
         setResult(currentJob.result as ProcessingResult)
       }
       clearProcessing()
@@ -139,7 +154,7 @@ export default function RecordPage() {
       setStage('processing')
       setProcessing('record', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [currentJob, setProcessing, clearProcessing])
+  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup on unmount
   useEffect(() => {

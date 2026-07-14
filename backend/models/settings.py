@@ -8,7 +8,7 @@ class UserSettings(BaseModel):
     word_conf_low: float = 0.7
     word_conf_mid: float = 0.85
     min_segment_duration: float = 1.5
-    whisper_model_size: str = "medium"
+    whisper_model_size: str = "large-v3"
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     model_config = {"arbitrary_types_allowed": True}

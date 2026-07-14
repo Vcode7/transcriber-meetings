@@ -52,10 +52,6 @@ class Settings(BaseSettings):
     # JWT — Access token (short-lived, in-memory on client)
     JWT_SECRET: str = "change-me-in-production-use-long-random-string"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 52560000  # 100 years — practically infinite
-
-    # Refresh token (long-lived, HttpOnly cookie)
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 36500  # 100 years — practically infinite
 
     # Environment ("development" | "production") — controls Secure cookie flag
     ENVIRONMENT: str = "development"
@@ -84,11 +80,28 @@ class Settings(BaseSettings):
 
 
     # Speaker identification
-    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75
+    # --- Embedding model used for speaker ID ---
+    # Valid values: "ecapa_tdnn" (others reserved for future)
+    SPEAKER_EMBEDDING_MODEL: str = "ecapa_tdnn"
+
+    # --- Similarity thresholds ---
+    # SPEAKER_SIMILARITY_THRESHOLD is the user-visible global default.
+    # ECAPA-TDNN cosine scores differ from CAM++ — 0.75 is a good starting point.
+    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75          # backward-compat user default
+    SPEAKER_SIMILARITY_THRESHOLD_ECAPA_TDNN: float = 0.72  # model-specific default
+
     MIN_SEGMENT_DURATION: float = 1.5  # seconds
 
+    speaker_refinement_margin: float = 0.10  # margins/similarity difference for refinement
+
+    # --- Audio preprocessing before alignment ---
+    # When True, a lightweight cleanup pass (silence trim, clipping repair,
+    # loudness normalization) is applied to the audio before WhisperX alignment.
+    # Set to False to skip preprocessing and use the raw WAV directly.
+    AUDIO_PREPROCESS_BEFORE_ALIGNMENT: bool = True
+
     # Transcription
-    WHISPER_MODEL_SIZE: str = "medium"
+    WHISPER_MODEL_SIZE: str = "large-v3"
     WHISPER_DEVICE: str = "auto"  # "cuda", "cpu", "auto"
     WHISPER_COMPUTE_TYPE: str = "int8"
 
@@ -99,7 +112,7 @@ class Settings(BaseSettings):
     # Minimum average segment confidence for downstream AI processing.
     # Segments whose average word probability < this threshold are excluded
     # from MoM and AI Insights generation (but remain in the transcript).
-    MIN_AVG_SEGMENT_CONFIDENCE: float = 0.35
+    MIN_AVG_SEGMENT_CONFIDENCE: float = 0.40
 
     # Overlap detection model (Wav2Vec2-based binary classifier)
     # Default is relative to base dir; override in .env with absolute path if needed

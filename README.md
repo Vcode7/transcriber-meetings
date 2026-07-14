@@ -24,7 +24,7 @@ A production-ready full-stack application for recording, transcribing, diarizing
 - **Speaker Diarization**: 
   - Advanced: pyannote.audio (optional, requires HuggingFace token)
   - Fallback: Energy-based diarization
-- **Speaker Identification**: resemblyzer embeddings for voice matching
+- **Speaker Identification**: WeSpeaker CAM++ embeddings for voice matching
 - **Background Processing**: Async pipeline for efficient processing
 
 ### 🤖 AI-Powered Insights
@@ -59,7 +59,7 @@ A production-ready full-stack application for recording, transcribing, diarizing
 - **Authentication**: JWT tokens
 - **AI Models**:
   - faster-whisper (transcription)
-  - resemblyzer (voice embeddings)
+  - WeSpeaker CAM++ / onnxruntime (voice embeddings)
   - pyannote.audio (optional diarization)
   - Groq LLM (summaries & Q&A)
 - **Audio Processing**: librosa, pydub, webrtcvad
@@ -310,7 +310,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [faster-whisper](https://github.com/guillaumekln/faster-whisper) for efficient transcription
 - [pyannote.audio](https://github.com/pyannote/pyannote-audio) for speaker diarization
-- [resemblyzer](https://github.com/resemble-ai/Resemblyzer) for voice embeddings
+- [WeSpeaker](https://github.com/modelscope/3D-Speaker) for CAM++ voice embeddings
 - [Groq](https://groq.com) for fast LLM inference
 - [shadcn/ui](https://ui.shadcn.com/) for beautiful UI components
 

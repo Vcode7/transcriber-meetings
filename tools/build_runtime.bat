@@ -152,7 +152,7 @@ echo   Step 5b: Core ML libraries...
     faster-whisper ^
     whisperx ^
     pyannote.audio ^
-    resemblyzer ^
+    onnxruntime ^
     speechbrain ^
     --target "%SITE_PACKAGES%" ^
     --no-warn-script-location

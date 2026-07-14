@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck } from 'lucide-react'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
 import PDFButton from '../components/PDFButton'
@@ -56,6 +56,9 @@ export default function HistoryDetail() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [momData, setMomData] = useState<MomData | null>(null)
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
+  const [reidentifying, setReidentifying] = useState(false)
+  const [reidentifyDone, setReidentifyDone] = useState(false)
+  const reidentifyPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // â”€â”€ Resizable chat panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [chatWidth, setChatWidth] = useState<number>(() => {
     const saved = localStorage.getItem('ai-chat-panel-width')
@@ -121,6 +124,53 @@ export default function HistoryDetail() {
     } finally {
       setRegenerating(false)
     }
+  }
+
+  const handleReidentify = async () => {
+    if (!id || reidentifying) return
+    setReidentifying(true)
+    setReidentifyDone(false)
+
+    // Clear any previous poll
+    if (reidentifyPollRef.current) clearInterval(reidentifyPollRef.current)
+    reidentifyPollRef.current = null
+
+    try {
+      await api.post(`/history/${id}/reidentify-speakers`)
+    } catch (err: unknown) {
+      console.error('[ReidentifySpeakers] Failed to start:', err)
+      setReidentifying(false)
+      return
+    }
+
+    // Poll /audio/jobs/:id every 2.5 s until done/error
+    reidentifyPollRef.current = setInterval(async () => {
+      try {
+        const r = await api.get(`/audio/jobs/${id}`)
+        const { status, result } = r.data
+        if (status === 'done' || status === 'transcript_ready') {
+          if (reidentifyPollRef.current) clearInterval(reidentifyPollRef.current)
+          reidentifyPollRef.current = null
+          if (result?.transcript) {
+            setRec(prev => prev ? {
+              ...prev,
+              transcript: result.transcript,
+              speakers_detected: result.speakers_detected ?? prev.speakers_detected,
+            } : prev)
+          }
+          setReidentifyDone(true)
+          setTimeout(() => setReidentifyDone(false), 4000)
+          setReidentifying(false)
+        } else if (status === 'error' || status === 'cancelled') {
+          if (reidentifyPollRef.current) clearInterval(reidentifyPollRef.current)
+          reidentifyPollRef.current = null
+          console.error('[ReidentifySpeakers] Job ended with status:', status)
+          setReidentifying(false)
+        }
+      } catch (pollErr) {
+        console.warn('[ReidentifySpeakers] Poll failed (will retry):', pollErr)
+      }
+    }, 2500)
   }
 
   /** Generate AI insights on-demand (called from AIChatPanel Generate button) */
@@ -278,7 +328,7 @@ export default function HistoryDetail() {
                       handleRegenerate();
                       setMenuOpen(false);
                     }}
-                    disabled={regenerating}
+                    disabled={regenerating || reidentifying}
                   >
                     {regenerating ? (
                       <>
@@ -289,6 +339,29 @@ export default function HistoryDetail() {
                       <>
                         <RefreshCw size={14} />
                         Regenerate AI
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      handleReidentify();
+                      setMenuOpen(false);
+                    }}
+                    disabled={reidentifying || regenerating}
+                    id="btn-reidentify-speakers"
+                    aria-label="Re-run speaker identification"
+                  >
+                    {reidentifying ? (
+                      <>
+                        <Loader size={14} className="spin" />
+                        Re-identifying...
+                      </>
+                    ) : (
+                      <>
+                        <UserCheck size={14} />
+                        Re-run Speaker ID
                       </>
                     )}
                   </button>
@@ -317,6 +390,23 @@ export default function HistoryDetail() {
             </div>
 
         </div>
+
+        {/* Re-identification success banner */}
+        {reidentifyDone && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '.45rem 1.25rem',
+            background: 'hsl(130,55%,95%)',
+            borderBottom: '1px solid hsl(130,55%,80%)',
+            fontSize: '.78rem', fontWeight: 600,
+            color: 'hsl(130,55%,30%)',
+            fontFamily: 'Inter, sans-serif',
+            animation: 'fadeIn .25s ease',
+          }}>
+            <UserCheck size={13} />
+            Speaker IDs updated ✓
+          </div>
+        )}
 
         {/* Transcript */}
         <div className="transcript-scroll" style={{

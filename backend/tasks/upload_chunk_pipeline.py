@@ -241,10 +241,13 @@ async def _run_upload_chunk_pipeline_impl(
                         f"{chunk_path}: {rm_err}"
                     )
 
-        logger.info(
-            f"[UploadChunkPipeline] {recording_id} — "
-            f"All chunks transcribed. Starting finalize pipeline."
-        )
+        # Unload transcription models immediately to free VRAM before finalization
+        try:
+            from services.transcription import unload_whisperx_model, unload_align_model
+            unload_whisperx_model()
+            unload_align_model()
+        except Exception as e:
+            logger.warning(f"[UploadChunkPipeline] {recording_id} — Failed to unload transcription models: {e}")
 
         # ── Step 4: Run finalize pipeline ───────────────────────────────────────
         await run_finalize_pipeline(

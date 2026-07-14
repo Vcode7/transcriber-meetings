@@ -96,3 +96,6 @@ bun.lockb
 Application
 /Application
 
+*.zip
+*.pt
+*.pth

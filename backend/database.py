@@ -288,6 +288,15 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
+        # ── Migration: add speaker_reid_at to recordings ──────────────────────
+        # Timestamp of the most recent "Re-run Speaker Identification" operation.
+        try:
+            await conn.execute(text(
+                "ALTER TABLE recordings ADD COLUMN speaker_reid_at TEXT DEFAULT NULL"
+            ))
+        except Exception:
+            pass  # column already exists
+
         # ── Migration: extend ALL existing sessions to year 2125 ─────────────
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.

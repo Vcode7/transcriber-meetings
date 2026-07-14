@@ -551,7 +551,7 @@ function ProcessPath() {
           {/* Scroll-driven path */}
           <svg
             className="absolute left-1/2 -translate-x-1/2 top-0 h-full pointer-events-none"
-            width="60"
+            width="100"
             viewBox="0 0 60 800"
             preserveAspectRatio="none"
           >
@@ -857,8 +857,7 @@ function Navbar() {
         <div className="hidden md:flex items-center justify-center" style={{ gap: 2 }}>
           {[
             { label: "Features", href: "#features" },
-            { label: "How It Works", href: "#process" },
-            { label: "Pricing", href: "#pricing" },
+            { label: "How It Works", href: "#process" }
           ].map((item) => (
             <a
               key={item.label}

@@ -48,10 +48,9 @@ def hash_token(raw: str) -> str:
 
 
 def create_access_token(user_id: str, session_id: str) -> str:
-    """Short-lived JWT carrying user_id and session_id for revocation checks."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
+    """JWT carrying user_id and session_id. Expiration (exp) is intentionally excluded."""
     return jwt.encode(
-        {"sub": user_id, "sid": session_id, "exp": expire},
+        {"sub": user_id, "sid": session_id},
         settings.JWT_SECRET,
         algorithm=settings.JWT_ALGORITHM,
     )
@@ -63,14 +62,14 @@ def create_refresh_token() -> tuple[str, str]:
     return raw, hash_token(raw)
 
 
-def set_refresh_cookie(response: Response, raw_token: str, expires_at: datetime) -> None:
-    """Set HttpOnly refresh token cookie with proper security flags."""
-    max_age = int((expires_at - datetime.now(timezone.utc)).total_seconds())
+def set_refresh_cookie(response: Response, raw_token: str) -> None:
+    """Set HttpOnly refresh token cookie with a very long persistent lifetime (400 days browser max)."""
+    # 400 days is the maximum persistent lifetime allowed/coped by modern browsers
+    max_age = 400 * 86400  # 34,560,000 seconds
     response.set_cookie(
         key=REFRESH_COOKIE,
         value=raw_token,
         max_age=max_age,
-        expires=expires_at.strftime("%a, %d %b %Y %H:%M:%S GMT"),
         httponly=True,
         samesite="lax",
         secure=(settings.ENVIRONMENT == "production"),
@@ -208,7 +207,6 @@ async def _record_attempt(email: str, ip: str, success: bool) -> None:
 
 async def _create_session(user_id: str, raw_refresh: str, request: Request) -> dict:
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     session = {
         "id": str(uuid.uuid4()),
         "session_id": str(uuid.uuid4()),
@@ -217,7 +215,7 @@ async def _create_session(user_id: str, raw_refresh: str, request: Request) -> d
         "device_name": _get_device_name(request),
         "ip_address": _get_client_ip(request),
         "created_at": dt_to_str(now),
-        "expires_at": dt_to_str(expires_at),
+        "expires_at": "2125-01-01T00:00:00+00:00",  # static placeholder for schema compatibility
         "last_used": dt_to_str(now),
         "is_revoked": 0,
     }
@@ -232,7 +230,6 @@ async def _create_session(user_id: str, raw_refresh: str, request: Request) -> d
             session,
         )
         await db.commit()
-    session["expires_at"] = str_to_dt(session["expires_at"])
     return session
 
 
@@ -301,11 +298,11 @@ async def _issue_tokens_and_respond(
     raw_refresh, _ = create_refresh_token()
     session = await _create_session(user_id, raw_refresh, request)
     access_token = create_access_token(user_id, session["session_id"])
-    set_refresh_cookie(response, raw_refresh, session["expires_at"])
+    set_refresh_cookie(response, raw_refresh)
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "expires_in": settings.JWT_EXPIRE_MINUTES * 60,
+        "expires_in": 315360000,  # 10 years / static placeholder for Swagger/API compat
         "user": _user_payload(user),
     }
 
@@ -426,19 +423,15 @@ async def refresh(request: Request, response: Response):
             clear_refresh_cookie(response)
             raise HTTPException(status_code=401, detail="Session revoked. Please log in again.")
 
-        # Session expiry is intentionally not enforced — sessions last until explicit logout.
-        # The refresh token rotation below issues a new 100-year cookie on every refresh.
-
         # Rotate refresh token
         new_raw, new_hash = create_refresh_token()
-        new_expires = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
         await db.execute(
             text("""
-                UPDATE sessions SET refresh_token_hash = :hash, expires_at = :exp, last_used = :lu
+                UPDATE sessions SET refresh_token_hash = :hash, last_used = :lu
                 WHERE session_id = :sid
             """),
-            {"hash": new_hash, "exp": dt_to_str(new_expires), "lu": dt_to_str(now), "sid": session["session_id"]},
+            {"hash": new_hash, "lu": dt_to_str(now), "sid": session["session_id"]},
         )
 
         r2 = await db.execute(
@@ -452,12 +445,12 @@ async def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="User not found.")
 
     access_token = create_access_token(session["user_id"], session["session_id"])
-    set_refresh_cookie(response, new_raw, new_expires)
+    set_refresh_cookie(response, new_raw)
 
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "expires_in": settings.JWT_EXPIRE_MINUTES * 60,
+        "expires_in": 315360000,
         "user": _user_payload(dict(user)),
     }
 
@@ -494,8 +487,7 @@ async def list_sessions(
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    """Return all active (non-revoked, non-expired) sessions for current user."""
-    now = datetime.now(timezone.utc)
+    """Return all active (non-revoked) sessions for current user."""
     raw_refresh = request.cookies.get(REFRESH_COOKIE)
     current_hash = hash_token(raw_refresh) if raw_refresh else None
 
@@ -503,9 +495,9 @@ async def list_sessions(
         r = await db.execute(
             text("""
                 SELECT * FROM sessions
-                WHERE user_id = :uid AND is_revoked = 0 AND expires_at > :now
+                WHERE user_id = :uid AND is_revoked = 0
             """),
-            {"uid": current_user["id"], "now": dt_to_str(now)},
+            {"uid": current_user["id"]},
         )
         rows = r.mappings().fetchall()
 
@@ -517,7 +509,6 @@ async def list_sessions(
             "ip_address": s["ip_address"],
             "created_at": s["created_at"],
             "last_used": s["last_used"],
-            "expires_at": s["expires_at"],
             "is_current": s["refresh_token_hash"] == current_hash,
         })
 

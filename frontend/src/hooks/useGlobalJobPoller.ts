@@ -112,9 +112,13 @@ export function useGlobalJobPoller() {
           stage: newStage,
         })
       }
-    } catch (err) {
-      // Silent retry — network blips shouldn't disrupt the poller
-      console.warn(`[GlobalPoller] Poll failed for job ${job.jobId}:`, err)
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        console.log(`[GlobalPoller] Job ${job.jobId} returned 404. Removing from store.`);
+        useJobsStore.getState().removeJob(job.jobId)
+      } else {
+        console.warn(`[GlobalPoller] Poll failed for job ${job.jobId}:`, err)
+      }
     }
   }, [updateJob])
 
@@ -136,12 +140,77 @@ export function useGlobalJobPoller() {
         startedAt: j.created_at,
         source: 'upload' as const,  // source is unknown from backend; will be overridden if local copy exists
       }))
+
+      // Find local active (pending/processing) jobs missing from backend active jobs
+      const localJobs = useJobsStore.getState().jobs
+      const backendIds = new Set(backendJobs.map((j) => j.jobId))
+      const missingActiveJobs = localJobs.filter(
+        (j) => (j.status === 'pending' || j.status === 'processing') && !backendIds.has(j.jobId)
+      )
+
+      // Query status individually for each missing active job to resolve its terminal state
+      for (const job of missingActiveJobs) {
+        try {
+          const jobRes = await api.get(`/audio/jobs/${job.jobId}`)
+          const jd = jobRes.data
+          // Update status & result so UI executes its final stages normally
+          updateJob(job.jobId, { status: jd.status, stage: jd.progress || null, result: jd.result })
+          
+          const eventName = jd.status === 'done' ? JOB_DONE_EVENT :
+                            jd.status === 'transcript_ready' ? JOB_TRANSCRIPT_READY_EVENT :
+                            JOB_UPDATE_EVENT;
+          dispatchJobEvent(eventName, {
+            jobId: job.jobId,
+            status: jd.status,
+            stage: jd.progress || null,
+            result: jd.result,
+          })
+          console.log(`[GlobalPoller] Reconciler resolved missing job ${job.jobId} to status: ${jd.status}`)
+        } catch (err: any) {
+          if (err?.response?.status === 404) {
+            console.log(`[GlobalPoller] Reconciler found job ${job.jobId} deleted (404). Removing from store.`)
+            useJobsStore.getState().removeJob(job.jobId)
+          } else {
+            console.warn(`[GlobalPoller] Reconciler status check failed for ${job.jobId}:`, err)
+          }
+        }
+      }
+
       reconcile(backendJobs)
       lastReconcileRef.current = Date.now()
+
+      // After reconcile, re-fetch results for any locally-known completed jobs
+      // that have no result in the store yet (e.g. after a page navigation/refresh).
+      // This restores the transcript without triggering a processing overlay.
+      const allJobs = useJobsStore.getState().jobs
+      for (const job of allJobs) {
+        if (
+          (job.status === 'transcript_ready' || job.status === 'done') &&
+          !job.result
+        ) {
+          try {
+            const jobRes = await api.get(`/audio/jobs/${job.jobId}`)
+            const jd = jobRes.data
+            if (jd.result) {
+              updateJob(job.jobId, { result: jd.result, status: jd.status, stage: jd.progress || null })
+              const eventName = jd.status === 'done' ? JOB_DONE_EVENT : JOB_TRANSCRIPT_READY_EVENT
+              dispatchJobEvent(eventName, {
+                jobId: job.jobId,
+                status: jd.status,
+                stage: jd.progress || null,
+                result: jd.result,
+              })
+              console.log(`[GlobalPoller] Restored result for completed job ${job.jobId} (${jd.status})`)
+            }
+          } catch (e) {
+            console.warn(`[GlobalPoller] Failed to restore result for job ${job.jobId}:`, e)
+          }
+        }
+      }
     } catch (err) {
       console.warn('[GlobalPoller] Reconcile failed (non-fatal):', err)
     }
-  }, [reconcile])
+  }, [reconcile, updateJob])
 
   // ── Main polling effect ──────────────────────────────────────
   useEffect(() => {
@@ -152,6 +221,8 @@ export function useGlobalJobPoller() {
 
     const intervalId = setInterval(() => {
       const activeJobs = useJobsStore.getState().jobs.filter(
+        // Only poll jobs that are still in-flight — skip done/error/cancelled.
+        // transcript_ready is still polled (waiting for MoM / done transition).
         (j) => j.status !== 'done' && j.status !== 'error' && j.status !== 'cancelled'
       )
 

@@ -10,6 +10,7 @@ import AdvancedOptionsPanel, { type AdvancedOptions } from '../components/Advanc
 import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
+import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 import { useJobsStore } from '../store/jobs'
 
@@ -82,48 +83,69 @@ export default function UploadPage() {
     window.addEventListener('mouseup', onUp)
   }, [chatWidth])
 
-  const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
-    setIsGeneratingMom(true)
+  // Derive currentJob BEFORE the poller callbacks so it can be referenced in shouldPoll
+  const jobs = useJobsStore((s) => s.jobs)
+  const addJob = useJobsStore((s) => s.addJob)
 
+  const currentJob = jobs.find((j) => j.jobId === recordingId)
+
+  const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
+    // Direct assignment — never spread-merge transcript arrays to avoid duplicates.
+    // The per-page poller only fires this when currentJob is NOT in the global store;
+    // once the global store tracks the job, shouldPoll becomes false.
+    console.log('[Upload] onTranscriptReady fired from per-page poller')
+    setResult(data as ProcessingResult)
+    setIsGeneratingMom(true)
     clearProcessing()
   }, [clearProcessing])
 
-
-
-
-
-
   const onDone = useCallback((data: ProcessingResult) => {
-    setResult(prev => ({ ...(prev ?? {}), ...data } as ProcessingResult))
+    // Direct assignment — same rationale as onTranscriptReady above.
+    console.log('[Upload] onDone fired from per-page poller')
+    setResult(data)
     setIsGeneratingMom(false)
     clearProcessing()
   }, [clearProcessing])
 
-  const shouldPoll = recordingId && (!result || isGeneratingMom)
+  // Only run the per-page poller when:
+  // 1. We have a recordingId (job exists)
+  // 2. We don't yet have a result (transcript not loaded)
+  // 3. The job is NOT yet tracked in the global store
+  //    (global poller handles all known jobs — running both causes duplicate setResult calls)
+  const shouldPoll = recordingId && !result && !currentJob
   const jobData = useJobPoller(shouldPoll ? recordingId : null, { onTranscriptReady, onDone })
 
   useEffect(() => {
     const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'upload')
-    if (priorJob) {
-      setRecordingId(priorJob.jobId)
-      if (priorJob.status === 'done') {
-        setIsGeneratingMom(false)
-      } else if (priorJob.status === 'transcript_ready') {
-        setIsGeneratingMom(true)
-      }
-      if (priorJob.result) {
-        setResult(priorJob.result as ProcessingResult)
-      }
-      setProcessing('upload', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
-    }
-  }, [setProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (!priorJob) return
 
-  const jobs = useJobsStore((s) => s.jobs)
-  const currentJob = jobs.find((j) => j.jobId === recordingId)
+    setRecordingId(priorJob.jobId)
+
+    if (priorJob.result?.transcript) {
+      // Result is already in the store (persisted from a previous session)
+      setResult(priorJob.result as ProcessingResult)
+      setIsGeneratingMom(priorJob.status === 'transcript_ready')
+      clearProcessing()
+    } else if (isActiveJobStatus(priorJob.status)) {
+      // Still in-flight: show the processing overlay, poller will update
+      setIsGeneratingMom(priorJob.status === 'transcript_ready')
+      setProcessing('upload', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+    } else {
+      // Done/terminal but result not yet in store — the global poller reconcile
+      // will re-fetch it and dispatch a JOB_DONE_EVENT / JOB_TRANSCRIPT_READY_EVENT.
+      setIsGeneratingMom(false)
+      clearProcessing()
+    }
+  }, [setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!currentJob) return
+    if (!currentJob) {
+      if (recordingId) {
+        clearProcessing()
+      }
+      return
+    }
+    console.log('[Upload] currentJob effect:', currentJob.status, 'has result:', !!currentJob.result?.transcript, 'local result:', !!result)
     if (currentJob.status === 'cancelled') {
       setFile(null)
       setRecordingId(null)
@@ -131,9 +153,30 @@ export default function UploadPage() {
       setError('')
       setIsGeneratingMom(false)
       clearProcessing()
+    } else if (currentJob.status === 'done') {
+      // Apply result from store when the global poller provides it.
+      // Guard: only apply if the store has a result and it's different from our local state
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[Upload] Applying done result from store')
+        setResult(currentJob.result as ProcessingResult)
+      }
+      setIsGeneratingMom(false)
+      clearProcessing()
+    } else if (currentJob.status === 'error') {
+      setIsGeneratingMom(false)
+      clearProcessing()
+    } else if (currentJob.status === 'transcript_ready') {
+      // Apply result from store if poller already has it (reconnect path).
+      if (currentJob.result?.transcript && result !== currentJob.result) {
+        console.log('[Upload] Applying transcript_ready result from store')
+        setResult(currentJob.result as ProcessingResult)
+      }
+      setIsGeneratingMom(true)
+    } else {
+      // In-flight pending/processing stages (sync stage reactively)
+      setProcessing('upload', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [currentJob, clearProcessing])
-
+  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (jobData?.progress) {
       updateStage(jobData.progress as ProcessingStage)
@@ -160,6 +203,18 @@ export default function UploadPage() {
     e.preventDefault(); setDragging(false)
     const f = e.dataTransfer.files[0]
     if (f) handleFile(f)
+  }
+
+  const handleReset = () => {
+    if (recordingId) {
+      useJobsStore.getState().removeJob(recordingId)
+    }
+    setFile(null)
+    setRecordingId(null)
+    setResult(null)
+    setError('')
+    setIsGeneratingMom(false)
+    clearProcessing()
   }
 
   const handleCancel = async () => {
@@ -192,7 +247,14 @@ export default function UploadPage() {
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
       const res = await api.post('/audio/upload', form)
-      setRecordingId(res.data.recording_id)
+      const rId = res.data.recording_id
+      setRecordingId(rId)
+      addJob({
+        jobId: rId,
+        source: 'upload',
+        filename: file.name,
+        startedAt: new Date().toISOString(),
+      })
       updateStage('queued')
     } catch (e: unknown) {
       setError(getApiErrorDetail(e, 'Upload failed.'))
@@ -277,7 +339,7 @@ export default function UploadPage() {
               />
               <button
                 className="btn btn-ghost animate-bounce-in"
-                onClick={() => { setFile(null); setRecordingId(null); setResult(null); setError('') }}
+                onClick={handleReset}
                 style={{ flexShrink: 0, fontSize: '.82rem', padding: '.4rem .85rem' }}
               >
                 <RotateCcw size={14} /> New Upload
@@ -378,7 +440,7 @@ export default function UploadPage() {
                     {fmtSize(file.size)}
                   </div>
                 </div>
-                <button onClick={() => { setFile(null); setRecordingId(null); setResult(null) }} className="icon-btn" style={{ flexShrink: 0 }}>
+                <button onClick={handleReset} className="icon-btn" style={{ flexShrink: 0 }}>
                   <X size={15} />
                 </button>
               </div>

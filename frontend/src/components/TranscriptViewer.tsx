@@ -8,6 +8,13 @@ export interface Word {
   start: number;
   end: number;
   probability: number;
+  score?: number;  // raw WhisperX field — aliased to probability in pipeline but may appear in fallback paths
+}
+
+export interface OverlapRegion {
+  start: number;
+  end: number;
+  speakers: string[];   // resolved names after speaker identification
 }
 
 export interface Segment {
@@ -17,6 +24,7 @@ export interface Segment {
   text: string;
   words: Word[];
   is_overlap: boolean;
+  overlap_regions?: OverlapRegion[];
 }
 
 interface Shortcut {
@@ -49,14 +57,19 @@ const SPEAKER_COLORS = [
  * Minimum average word-level confidence to include a segment in MoM/AI Insights.
  * Must match backend config.MIN_AVG_SEGMENT_CONFIDENCE (default 0.35).
  */
-const LOW_CONF_THRESHOLD = 0.35;
+const LOW_CONF_THRESHOLD = 0.40;
+
+/** Safe confidence accessor: accepts both `probability` and `score` fields. */
+function wordConf(w: Word): number {
+  const v = w.probability ?? w.score;
+  return typeof v === 'number' ? v : 1.0;
+}
 
 /** Compute the average word-level confidence for a segment. Returns null when no word data. */
 function segmentAvgConf(seg: Segment): number | null {
   const words = seg.words;
   if (!words || words.length === 0) return null;
-  const probs = words.map((w) => w.probability ?? 1.0);
-  return probs.reduce((a, b) => a + b, 0) / probs.length;
+  return words.reduce((sum, w) => sum + wordConf(w), 0) / words.length;
 }
 
 function formatTime(s: number) {
@@ -306,10 +319,10 @@ export default function TranscriptViewer({
 
   const hasWordConf = segments.some((s) => s.words && s.words.length > 0);
   const totalWords = segments.reduce((sum, seg) => sum + (seg.words?.length || 0), 0);
-  const highWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => w.probability >= wordConfMid).length || 0), 0);
-  const midWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => w.probability >= wordConfLow && w.probability < wordConfMid).length || 0), 0);
-  const lowWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => w.probability < wordConfLow).length || 0), 0);
-  const avgConfidence = totalWords > 0 ? (segments.reduce((sum, seg) => sum + (seg.words?.reduce((s, w) => s + w.probability, 0) || 0), 0) / totalWords) * 100 : 0;
+  const highWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => wordConf(w) >= wordConfMid).length || 0), 0);
+  const midWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => wordConf(w) >= wordConfLow && wordConf(w) < wordConfMid).length || 0), 0);
+  const lowWords = segments.reduce((sum, seg) => sum + (seg.words?.filter((w) => wordConf(w) < wordConfLow).length || 0), 0);
+  const avgConfidence = totalWords > 0 ? (segments.reduce((sum, seg) => sum + (seg.words?.reduce((s, w) => s + wordConf(w), 0) || 0), 0) / totalWords) * 100 : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0" }}>
@@ -413,11 +426,21 @@ export default function TranscriptViewer({
                 {formatTime(seg.start)} → {formatTime(seg.end)}
               </button>
 
-              {seg.is_overlap && (
-                <span style={{ fontSize: ".65rem", fontWeight: 700, color: "hsl(var(--destructive))", background: "hsl(var(--destructive) / .1)", border: "1px solid hsl(var(--destructive) / .3)", borderRadius: "999px", padding: ".1rem .45rem", fontFamily: "Inter, sans-serif", letterSpacing: ".04em", display: "inline-flex", alignItems: "center", gap: "3px" }}>
-                  ⚡ OVERLAP
-                </span>
-              )}
+              {seg.is_overlap && (() => {
+                // Collect all unique speaker names from overlap_regions
+                const regions = seg.overlap_regions ?? [];
+                const speakerSet = new Set<string>();
+                regions.forEach(r => r.speakers.forEach(sp => speakerSet.add(sp)));
+                const speakerNames = Array.from(speakerSet);
+                const label = speakerNames.length > 0
+                  ? `Overlap: ${speakerNames.join(", ")}`
+                  : "Overlap";
+                return (
+                  <span style={{ fontSize: ".65rem", fontWeight: 700, color: "hsl(var(--destructive))", background: "hsl(var(--destructive) / .1)", border: "1px solid hsl(var(--destructive) / .3)", borderRadius: "999px", padding: ".1rem .5rem", fontFamily: "Inter, sans-serif", letterSpacing: ".04em", display: "inline-flex", alignItems: "center", gap: "3px" }}>
+                    ⚡ {label}
+                  </span>
+                );
+              })()}
 
               {/* Low-confidence segment badge */}
               {isLowConf && (
@@ -522,15 +545,16 @@ export default function TranscriptViewer({
                   {seg.words && seg.words.length > 0
                     ? seg.words.map((w, wi) => {
                         const wordText = expander ? expander(w.word) : w.word;
+                        const conf = wordConf(w);
                         if (showConfidence) {
                           return (
-                            <span key={wi} className={wordClass(w.probability, wordConfLow, wordConfMid)} title={`${(w.probability * 100).toFixed(0)}% confidence`}>
+                            <span key={wi} className={wordClass(conf, wordConfLow, wordConfMid)} title={`${(conf * 100).toFixed(0)}% confidence`}>
                               {wordText}{" "}
                             </span>
                           );
                         }
                         return (
-                          <span key={wi} className={w.probability < 0.3 ? "word-underlined" : ""} title={w.probability < 0.3 ? `${(w.probability * 100).toFixed(0)}% confidence` : ""}>
+                          <span key={wi} className={conf < 0.3 ? "word-underlined" : ""} title={conf < 0.3 ? `${(conf * 100).toFixed(0)}% confidence` : ""}>
                             {wordText}{" "}
                           </span>
                         );

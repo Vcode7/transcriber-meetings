@@ -28,8 +28,15 @@ export interface ActiveJob {
   result?: Partial<ProcessingResult>
 }
 
-// ── Serializable slice that goes into localStorage ────────────
-type PersistedJob = Omit<ActiveJob, 'result'>
+/**
+ * Serializable slice that goes into localStorage.
+ * We persist `result` for terminal states (transcript_ready, done) so the
+ * transcript is immediately available after navigation/refresh without
+ * requiring a re-fetch from the backend.
+ */
+type PersistedJob = Omit<ActiveJob, 'result'> & {
+  result?: Partial<ProcessingResult>
+}
 
 const STORAGE_KEY = 'vs_active_jobs'
 
@@ -38,10 +45,11 @@ function loadFromStorage(): ActiveJob[] {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
     const parsed: PersistedJob[] = JSON.parse(raw)
-    // On load, only include jobs that weren't already terminal when we last saved
+    // On load, filter out error/cancelled jobs only — keep pending, processing,
+    // transcript_ready, and done so completed transcripts survive navigation.
     return parsed
-      .filter((j) => j.status !== 'done' && j.status !== 'error' && j.status !== 'cancelled')
-      .map((j) => ({ ...j, result: undefined }))
+      .filter((j) => j.status !== 'error' && j.status !== 'cancelled')
+      .map((j) => ({ ...j }))
   } catch {
     return []
   }
@@ -49,10 +57,25 @@ function loadFromStorage(): ActiveJob[] {
 
 function saveToStorage(jobs: ActiveJob[]) {
   try {
-    // Only persist non-result fields to keep localStorage small
+    // Persist all non-error, non-cancelled jobs.
+    // Include result for transcript_ready/done so transcript survives navigation.
     const toSave: PersistedJob[] = jobs
-      .filter((j) => j.status !== 'done' && j.status !== 'error' && j.status !== 'cancelled')
-      .map(({ result: _r, ...rest }) => rest)
+      .filter((j) => j.status !== 'error' && j.status !== 'cancelled')
+      .map((j) => {
+        const base: PersistedJob = {
+          jobId: j.jobId,
+          source: j.source,
+          status: j.status,
+          stage: j.stage,
+          filename: j.filename,
+          startedAt: j.startedAt,
+        }
+        // Persist result only for completed states to keep localStorage lean
+        if ((j.status === 'transcript_ready' || j.status === 'done') && j.result) {
+          base.result = j.result
+        }
+        return base
+      })
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
   } catch {
     // Ignore quota errors
@@ -114,8 +137,10 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   },
 
   getActiveJobBySource: (source) => {
+    // Returns the most-recent non-error, non-cancelled job for a given source.
+    // Includes transcript_ready and done so pages can reconnect to completed jobs.
     return get().jobs.find(
-      (j) => j.source === source && j.status !== 'done' && j.status !== 'error' && j.status !== 'cancelled'
+      (j) => j.source === source && j.status !== 'error' && j.status !== 'cancelled'
     )
   },
 
@@ -165,7 +190,12 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       // Remove local jobs that are no longer active on the backend
       const backendIds = new Set(backendJobs.map((j) => j.jobId))
       const final = reconciled.filter(
-        (j) => backendIds.has(j.jobId) || (j.status !== 'pending' && j.status !== 'processing')
+        // Keep backend-known jobs; also keep done jobs that have a result loaded
+        // (the backend doesn't return done jobs from /audio/jobs, but we want
+        //  to retain them locally until the page explicitly clears them).
+        (j) => backendIds.has(j.jobId) ||
+               j.status === 'done' ||
+               (j.status !== 'pending' && j.status !== 'processing')
       )
 
       saveToStorage(final)

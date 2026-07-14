@@ -110,6 +110,13 @@ def convert_to_wav(input_path: str, output_path: str, sr: int = 16000) -> str:
     output_path on success.  Raises RuntimeError on failure.
     """
     try:
+        run_kwargs = {
+            "capture_output": True,
+            "timeout": 7200,  # 2-hour timeout for very long files
+        }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
         result = subprocess.run(
             [
                 "ffmpeg", "-y",          # overwrite output without asking
@@ -120,8 +127,7 @@ def convert_to_wav(input_path: str, output_path: str, sr: int = 16000) -> str:
                 "-acodec", "pcm_s16le",  # 16-bit PCM
                 output_path,
             ],
-            capture_output=True,
-            timeout=7200,  # 2-hour timeout for very long files
+            **run_kwargs
         )
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace")[-500:]
@@ -189,6 +195,13 @@ def split_wav_to_files(
         end_sec = min(start_sec + chunk_sec, total_duration)
         chunk_path = os.path.join(output_dir, f"{prefix}{chunk_index:04d}.wav")
 
+        run_kwargs = {
+            "capture_output": True,
+            "timeout": 300,  # 5-minute timeout per chunk
+        }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -201,8 +214,7 @@ def split_wav_to_files(
                 "-acodec", "pcm_s16le",
                 chunk_path,
             ],
-            capture_output=True,
-            timeout=300,  # 5-minute timeout per chunk
+            **run_kwargs
         )
 
         if result.returncode != 0:

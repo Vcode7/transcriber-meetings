@@ -744,7 +744,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return "No transcript available to summarize."
         result = self._infer(
-            SHORT_SUMMARY_PROMPT.format(transcript=context[:3000]),
+            SHORT_SUMMARY_PROMPT.format(transcript=context),
             max_new_tokens=120,
         )
         return result or "Unable to generate summary."
@@ -759,7 +759,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return "No transcript available to summarize."
         result = self._infer(
-            DETAILED_SUMMARY_PROMPT.format(transcript=context[:4000]),
+            DETAILED_SUMMARY_PROMPT.format(transcript=context),
             max_new_tokens=3000,
         )
         return result or "Unable to generate detailed summary."
@@ -774,7 +774,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            KEY_POINTS_PROMPT.format(transcript=context[:3500]),
+            KEY_POINTS_PROMPT.format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw:
@@ -807,17 +807,19 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            ACTION_ITEMS_PROMPT.format(transcript=context[:3500]),
+            ACTION_ITEMS_PROMPT.format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw or "none identified" in raw.lower():
             return []
 
+        # Clean/split Qwen output
         lines = []
         for line in raw.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue
+            # Remove leading numbers/bullets
             stripped = re.sub(r'^\d+\.\s*', '', stripped)
             lines.append(stripped)
         return lines if lines else []
@@ -832,7 +834,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            KEY_DECISIONS_PROMPT.format(transcript=context[:3500]),
+            KEY_DECISIONS_PROMPT.format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw or "none identified" in raw.lower():
@@ -855,7 +857,7 @@ class QwenProvider(AIProvider):
                 "discussion_points": [], "outcomes": [], "next_steps": [],
             }
         raw = self._infer(
-            EXECUTIVE_SUMMARY_PROMPT.format(transcript=context[:4000]),
+            EXECUTIVE_SUMMARY_PROMPT.format(transcript=context),
             max_new_tokens=700,
         )
 
@@ -927,7 +929,7 @@ class QwenProvider(AIProvider):
         speaker_segments: Dict[str, List[Dict]] = {}
         for seg in transcript:
             label = seg.get("speaker_label", "Unknown")
-            if label in ("Unknown", "[Multiple Speakers]"):
+            if label in ("Unknown",) or seg.get("is_overlap"):
                 continue
             speaker_segments.setdefault(label, []).append(seg)
 
@@ -1007,7 +1009,7 @@ class QwenProvider(AIProvider):
             return _empty_mom(recording_meta)
 
         raw = self._infer(
-            MOM_PROMPT.format(transcript=context[:4500]),
+            MOM_PROMPT.format(transcript=context),
             max_new_tokens=3072,
         )
 

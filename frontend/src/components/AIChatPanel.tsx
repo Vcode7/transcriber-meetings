@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Bot, Sparkles, FileText, ListChecks, ChevronRight, ChevronLeft,
   Copy, Check, Loader, Users, ClipboardList, Zap, CheckCircle,
 } from 'lucide-react'
+import api from '../api/client'
 import { renderMarkdown } from '../lib/markdown'
 
 // ── Types ─────────────────────────────────────────────────────
@@ -156,9 +158,128 @@ function AIGeneratingSkeleton({ messages = GENERATING_MESSAGES }: { messages?: s
 }
 
 // ── MoM Section renderer ──────────────────────────────────────
-function MomDisplay({ mom }: { mom: MomData }) {
+function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string }) {
+  const navigate = useNavigate()
+  const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+
+  const handlePdf = async () => {
+    setPdfStatus('loading')
+    try {
+      const res = await api.post(`/mom/${recordingId}/pdf`, {}, { responseType: 'blob' })
+      const blob = new Blob([res.data], { type: 'application/pdf' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `MoM_${mom?.title?.replace(/\s+/g, '_') || 'Meeting'}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      setPdfStatus('success')
+      setTimeout(() => setPdfStatus('idle'), 2500)
+    } catch (err: unknown) {
+      console.error('[MoMPdf] Failed:', err)
+      setPdfStatus('error')
+      setTimeout(() => setPdfStatus('idle'), 3000)
+    }
+  }
+  
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '.9rem 1rem' }}>
+ 
+      {/* View & Download buttons */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '.5rem .75rem',
+        background: 'hsl(var(--paper) / .4)',
+        border: '1.5px solid hsl(var(--border) / .15)',
+        borderRadius: '10px',
+        marginBottom: '4px',
+        gap: '10px',
+      }}>
+        <button
+          onClick={() => navigate(`/dashboard/history/${recordingId}/mom`)}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            background: 'transparent',
+            border: '1.5px solid hsl(var(--accent) / .4)',
+            borderRadius: '6px',
+            padding: '.35rem .75rem',
+            fontSize: '.76rem',
+            fontWeight: 600,
+            color: 'hsl(var(--accent))',
+            cursor: 'pointer',
+            fontFamily: 'Inter, sans-serif',
+            height: '32px',
+            transition: 'all 0.15s ease',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.background = 'hsl(var(--accent) / .08)'
+            e.currentTarget.style.borderColor = 'hsl(var(--accent))'
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.background = 'transparent'
+            e.currentTarget.style.borderColor = 'hsl(var(--accent) / .4)'
+          }}
+        >
+          <FileText size={13} />
+          <span>View MoM Page</span>
+        </button>
+ 
+        <button
+          onClick={handlePdf}
+          disabled={pdfStatus === 'loading'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            background: 'transparent',
+            border: `1.5px solid ${pdfStatus === 'error' ? 'hsl(var(--destructive))' : pdfStatus === 'success' ? 'hsl(var(--success))' : 'hsl(var(--pencil) / .3)'}`,
+            borderRadius: '6px',
+            padding: '.35rem .75rem',
+            fontSize: '.76rem',
+            fontWeight: 600,
+            color: pdfStatus === 'error' ? 'hsl(var(--destructive))' : pdfStatus === 'success' ? 'hsl(var(--success))' : 'hsl(var(--ink-soft))',
+            cursor: pdfStatus === 'loading' ? 'not-allowed' : 'pointer',
+            fontFamily: 'Inter, sans-serif',
+            height: '32px',
+            transition: 'all 0.15s ease',
+          }}
+          onMouseEnter={e => {
+            if (pdfStatus === 'idle') {
+              e.currentTarget.style.background = 'hsl(var(--muted))'
+              e.currentTarget.style.borderColor = 'hsl(var(--pencil) / .6)'
+            }
+          }}
+          onMouseLeave={e => {
+            if (pdfStatus === 'idle') {
+              e.currentTarget.style.background = 'transparent'
+              e.currentTarget.style.borderColor = 'hsl(var(--pencil) / .3)'
+            }
+          }}
+        >
+          {pdfStatus === 'loading' ? (
+            <Loader size={13} className="spin" />
+          ) : pdfStatus === 'success' ? (
+            <Check size={13} style={{ color: 'hsl(var(--success))' }} />
+          ) : (
+            <FileText size={13} />
+          )}
+          <span>
+            {pdfStatus === 'loading'
+              ? 'Downloading…'
+              : pdfStatus === 'success'
+              ? 'Downloaded!'
+              : pdfStatus === 'error'
+              ? 'Failed'
+              : 'Download PDF'}
+          </span>
+        </button>
+      </div>
 
       {/* Title */}
       {mom.title && (
@@ -446,7 +567,8 @@ function ActionItemsRenderer({ items }: { items: string[] }) {
                 </span>
               )}
 
-              {section.header}
+
+              <MarkdownContent content={section.header} />
             </div>
 
             {section.items.map((item, i) => (
@@ -678,7 +800,7 @@ export default function AIChatPanel({
 
             {/* MoM ready */}
             {!showMomGenerating && hasMom && (
-              <MomDisplay mom={momData!} />
+              <MomDisplay mom={momData!} recordingId={recordingId} />
             )}
 
             {/* No MoM yet (pipeline done, MoM failed or not yet run) */}

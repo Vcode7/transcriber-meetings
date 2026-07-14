@@ -367,6 +367,14 @@ async def extract_voice_samples(
         out_path = str(sample_dir / out_filename)
 
         try:
+            run_kwargs = {
+                "capture_output": True,
+                "check": True,
+                "timeout": 30,
+            }
+            if os.name == "nt":
+                run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
             subprocess.run(
                 [
                     "ffmpeg", "-y",
@@ -378,9 +386,7 @@ async def extract_voice_samples(
                     "-vn",
                     out_path,
                 ],
-                capture_output=True,
-                check=True,
-                timeout=30,
+                **run_kwargs
             )
             samples.append({
                 "file_path": out_path,
@@ -477,7 +483,21 @@ async def train_from_transcript(
             prof = r.mappings().fetchone()
             if prof:
                 existing_embs = from_json(prof["embeddings"], [])
-                merged = existing_embs + embeddings
+                # Filter out stale embeddings with a different dimension (e.g. old 256-d
+                # Resemblyzer vectors) — mixing dimensions breaks cosine similarity.
+                if existing_embs and embeddings:
+                    new_dim = len(embeddings[0])
+                    compatible = [e for e in existing_embs if len(e) == new_dim]
+                    if len(compatible) < len(existing_embs):
+                        logger.warning(
+                            f"[TrainFromTranscript] Filtered out "
+                            f"{len(existing_embs) - len(compatible)} stale embeddings "
+                            f"with wrong dimension from profile {existing_profile_id}. "
+                            f"Expected {new_dim}-d, keeping only matching ones."
+                        )
+                    merged = compatible + embeddings
+                else:
+                    merged = existing_embs + embeddings
                 await db.execute(
                     text("""
                         UPDATE voice_profiles
@@ -559,6 +579,24 @@ async def train_from_transcript(
         f"[TrainFromTranscript] Done — profile={profile_id}, label='{new_label}', "
         f"segments_updated={updated_count}, embeddings={len(embeddings)}"
     )
+
+    # ── Fire-and-forget: propagate updated speaker name to MoM ───────────
+    # When the speaker label changed (new_label != speaker_label) or a new
+    # profile was created, the stored MoM may still reference the old name.
+    # We kick off a background task that reads the updated transcript,
+    # refreshes speakers_detected, and regenerates the MoM asynchronously so
+    # the HTTP response returns immediately.
+    if speaker_label != new_label or existing_profile_id is None:
+        import asyncio as _asyncio
+        _asyncio.create_task(
+            _refresh_mom_after_voice_training(
+                recording_id=recording_id,
+                user_id=user_id,
+                old_label=speaker_label,
+                new_label=new_label,
+            )
+        )
+
     return {
         "profile_id": profile_id,
         "new_label": new_label,
@@ -594,3 +632,92 @@ async def get_sample_audio(
         raise HTTPException(status_code=404, detail="Sample file not found.")
 
     return FileResponse(requested, media_type="audio/wav")
+
+
+# ── Background helper: refresh MoM after voice profile training ───────────────
+
+async def _refresh_mom_after_voice_training(
+    recording_id: str,
+    user_id: str,
+    old_label: str,
+    new_label: str,
+) -> None:
+    """
+    Re-derive speakers_detected from the updated transcript and regenerate the
+    MoM so the new speaker name appears everywhere.
+
+    Runs as a fire-and-forget asyncio task — all failures are logged but never
+    re-raised so they cannot affect the HTTP response or other pipeline state.
+    """
+    import json as _json
+    import asyncio as _asyncio
+    logger.info(
+        f"[VoiceTrain/MoM] {recording_id} — Propagating label change "
+        f"'{old_label}' → '{new_label}' to speakers_detected and MoM"
+    )
+    try:
+        # Re-read the transcript that was already relabeled by train_from_transcript
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT transcript, raw_text FROM recordings WHERE id = :id AND user_id = :uid"),
+                {"id": recording_id, "uid": user_id},
+            )
+            rec = r.mappings().fetchone()
+
+        if not rec:
+            logger.warning(f"[VoiceTrain/MoM] {recording_id} — Recording not found; skipping MoM refresh.")
+            return
+
+        transcript: list = _json.loads(rec.get("transcript") or "[]")
+        raw_text: str = rec.get("raw_text") or ""
+
+        if not transcript:
+            logger.warning(f"[VoiceTrain/MoM] {recording_id} — Empty transcript; skipping MoM refresh.")
+            return
+
+        # Re-derive speakers_detected from the updated transcript
+        speakers_detected = list({
+            seg["speaker_label"]
+            for seg in transcript
+            if seg.get("speaker_label") not in ("Unknown", None, "") and not seg.get("is_overlap")
+        })
+
+        # Persist updated speakers_detected
+        async with get_db() as db:
+            await db.execute(
+                text("UPDATE recordings SET speakers_detected = :sd WHERE id = :id AND user_id = :uid"),
+                {"sd": to_json(speakers_detected), "id": recording_id, "uid": user_id},
+            )
+            await db.commit()
+        logger.info(f"[VoiceTrain/MoM] {recording_id} — speakers_detected updated: {speakers_detected}")
+
+        # Check if a MoM exists for this recording
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid LIMIT 1"),
+                {"rid": recording_id, "uid": user_id},
+            )
+            mom_row = r.fetchone()
+
+        if not mom_row:
+            logger.info(f"[VoiceTrain/MoM] {recording_id} — No existing MoM; skipping regeneration.")
+            return
+
+        # Regenerate the MoM using the existing helper from rereid_pipeline
+        from tasks.rereid_pipeline import _regenerate_mom
+        loop = _asyncio.get_event_loop()
+        await _regenerate_mom(
+            recording_id=recording_id,
+            user_id=user_id,
+            final_segments=transcript,
+            raw_text=raw_text,
+            speakers_detected=speakers_detected,
+            loop=loop,
+        )
+        logger.info(f"[VoiceTrain/MoM] {recording_id} — MoM regeneration complete ✓")
+
+    except Exception as e:
+        logger.warning(
+            f"[VoiceTrain/MoM] {recording_id} — MoM refresh failed (non-fatal): {e}",
+            exc_info=True,
+        )

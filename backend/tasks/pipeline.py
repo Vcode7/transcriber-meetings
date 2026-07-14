@@ -23,7 +23,7 @@ import hashlib
 from database import get_db, dt_to_str, to_json, from_json
 from services.transcription import transcribe
 from services.diarization import diarize, is_pyannote_available
-from services.identification import identify_speakers
+from services.identification import identify_speakers, refine_transcript_speakers_with_ecapa
 from services.llm import (
     generate_summary, generate_key_points, generate_action_items,
     generate_short_summary, generate_detailed_summary,
@@ -64,13 +64,14 @@ async def cancel_task(recording_id: str) -> bool:
 
 
 def unload_all_models():
-    """Unload all models (WhisperX, Pyannote Diarization, VoiceEncoder, Qwen LLM, Overlap Model) to release RAM/VRAM."""
+    """Unload all models (WhisperX, Pyannote Diarization, ECAPA-TDNN Encoder, Qwen LLM, Overlap Model) to release RAM/VRAM."""
     logger.info("[Pipeline] Initiating global AI model memory cleanup...")
     
     # 1. Unload WhisperX
     try:
-        from services.transcription import unload_whisperx_model
+        from services.transcription import unload_whisperx_model, unload_align_model
         unload_whisperx_model()
+        unload_align_model()
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload WhisperX model: {e}")
         
@@ -81,7 +82,7 @@ def unload_all_models():
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload pyannote diarization pipeline: {e}")
         
-    # 3. Unload Resemblyzer Encoder
+    # 3. Unload ECAPA-TDNN Embedding Encoder
     try:
         from services.embedding import unload_encoder
         unload_encoder()
@@ -113,6 +114,60 @@ def unload_all_models():
     except Exception:
         pass
     logger.info("[Pipeline] Global AI model memory cleanup complete.")
+
+
+def _empty_mom(recording_meta: dict) -> dict:
+    return {
+        "title": recording_meta.get("filename", "Meeting Notes"),
+        "date": recording_meta.get("created_at", ""),
+        "duration": recording_meta.get("duration", 0),
+        "planned_start_time": "",
+        "actual_start_time": "",
+        "participants": recording_meta.get("speakers_detected", []),
+        "introduction": "No introduction generated (LLM failed).",
+        "points_discussed": [],
+        "action_items": [],
+        "conclusion": "No conclusion generated (LLM failed)."
+    }
+
+
+async def _recover_gpu_and_run_llm(recording_id: str, task_name: str, fn_to_run):
+    """
+    Executes the recovery sequence to free VRAM, reload Qwen, and run a fallback LLM generation.
+    Any error is caught and logged, returning None.
+    """
+    logger.info(f"[GPURecovery] {recording_id} — Starting recovery sequence for missing AI output: {task_name}")
+    try:
+        # 1. Ensure diarization and speaker ID models are fully unloaded
+        from services.diarization import unload_diarization_pipeline
+        from services.embedding import unload_encoder
+        from services.transcription import unload_whisperx_model, unload_align_model
+
+        unload_diarization_pipeline()
+        unload_encoder()
+        unload_whisperx_model()
+        unload_align_model()
+
+        # 2. Free PyTorch CUDA cache
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                logger.info(f"[GPURecovery] {recording_id} — VRAM cleared. Current memory allocated: {torch.cuda.memory_allocated() / 1024 / 1024:.1f} MB")
+        except Exception as torch_err:
+            logger.warning(f"[GPURecovery] {recording_id} — PyTorch CUDA cache clear failed: {torch_err}")
+
+        # 3. Reload Qwen model and run the callback
+        logger.info(f"[GPURecovery] {recording_id} — Retrying {task_name}...")
+        result = await fn_to_run()
+        logger.info(f"[GPURecovery] {recording_id} — Recovery for {task_name} SUCCEEDED ✓")
+        return result
+    except Exception as e:
+        logger.error(f"[GPURecovery] {recording_id} — Recovery for {task_name} FAILED: {e}", exc_info=True)
+        return None
 
 
 # ── Confidence threshold (from config) ────────────────────────────────────────
@@ -275,23 +330,31 @@ def _convert_diar_to_whisperx_format(
 ) -> Any:
     """
     Convert our pyannote diarization output to the format whisperx.assign_word_speakers
-    expects.  WhisperX wants a pandas DataFrame (or object with an .itertracks()-like
-    interface), but its internal `assign_word_speakers` actually just needs a list of
-    dicts with keys: segment, label.
+    expects.
 
-    We replicate the minimal DataFrame structure whisperx expects by wrapping in a
-    simple object — or we can use the pandas route which is more robust.
+    WhisperX's assign_word_speakers reads:
+        row['start'], row['end'], row['speaker']
+    directly from each DataFrame row (via iterrows).  The keys must be flat columns —
+    NOT nested under a 'segment' dict.  The old code used a nested dict which caused
+    KeyError: 'start'.
     """
     try:
         import pandas as pd
-        rows = []
-        for seg in diar_segments:
-            rows.append({
-                "segment": {"start": seg["start"], "end": seg["end"]},
-                "label": seg["speaker"],
+        rows = [
+            {
+                "start":   seg["start"],
+                "end":     seg["end"],
                 "speaker": seg["speaker"],
-            })
-        return pd.DataFrame(rows)
+            }
+            for seg in diar_segments
+        ]
+        df = pd.DataFrame(rows)
+        # Ensure correct dtypes so IntervalTree construction doesn't fail on
+        # edge cases (e.g., float32 vs float64 comparisons).
+        df["start"]   = df["start"].astype(float)
+        df["end"]     = df["end"].astype(float)
+        df["speaker"] = df["speaker"].astype(str)
+        return df
     except ImportError:
         return None
 
@@ -313,17 +376,19 @@ def _assign_speakers_to_words_manual(
         seg_end = seg["end"]
 
         # Find best segment match by time overlap
-        best_label = "Unknown"
+        best_label = "Speaker 1"
         best_profile_id = None
         best_is_overlap = False
+        best_overlap_regions: List[Dict[str, Any]] = []
         best_overlap = 0.0
         for s in identified_segs:
             ov = max(0.0, min(seg_end, s["end"]) - max(seg_start, s["start"]))
             if ov > best_overlap:
                 best_overlap = ov
-                best_label = s.get("speaker_label", "Unknown")
+                best_label = s.get("speaker_label") or s.get("speaker") or best_label
                 best_profile_id = s.get("speaker_profile_id")
                 best_is_overlap = s.get("is_overlap", False)
+                best_overlap_regions = s.get("overlap_regions", [])
 
         # Per-word speaker (fine-grained)
         enriched_words = []
@@ -335,7 +400,7 @@ def _assign_speakers_to_words_manual(
             for s in identified_segs:
                 ov = max(0.0, min(w_end, s["end"]) - max(w_start, s["start"]))
                 if ov > 0.0:
-                    w_label = s.get("speaker_label", w_label)
+                    w_label = s.get("speaker_label") or s.get("speaker") or w_label
                     w_profile_id = s.get("speaker_profile_id", w_profile_id)
                     break
             enriched_words.append({
@@ -357,6 +422,7 @@ def _assign_speakers_to_words_manual(
             "speaker_label": best_label,
             "speaker_profile_id": best_profile_id,
             "is_overlap": best_is_overlap,
+            "overlap_regions": best_overlap_regions,
         })
 
     return out_segments
@@ -543,6 +609,14 @@ async def _run_pipeline_impl(
         })
         logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
 
+        # Unload transcription model immediately to free GPU memory
+        try:
+            from services.transcription import unload_whisperx_model, unload_align_model
+            unload_whisperx_model()
+            unload_align_model()
+        except Exception as e:
+            logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
+
         # ── Stage 2: Diarization ──────────────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
         await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
@@ -554,6 +628,13 @@ async def _run_pipeline_impl(
         _analytics["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
         _analytics["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
         logger.info(f"[Pipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
+
+        # Unload diarization pipeline immediately to free VRAM
+        try:
+            from services.diarization import unload_diarization_pipeline
+            unload_diarization_pipeline()
+        except Exception as e:
+            logger.warning(f"[Pipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
 
         # ── Stage 3: Load voice profiles ──────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 3: Loading voice profiles for user {user_id}")
@@ -652,9 +733,17 @@ async def _run_pipeline_impl(
             import whisperx
             diar_df = _convert_diar_to_whisperx_format(identified_segs)
             if diar_df is not None and not diar_df.empty:
-                wx_assigned = whisperx.assign_word_speakers(diar_df, aligned_result)
+                # fill_nearest=True: words with no exact diarization overlap get the
+                # speaker from the nearest segment rather than being left without a label.
+                wx_assigned = whisperx.assign_word_speakers(
+                    diar_df, aligned_result, fill_nearest=True
+                )
                 speaker_segments = _post_process_whisperx_segments(wx_assigned, identified_segs)
-                logger.info(f"[Pipeline] {recording_id} — whisperx.assign_word_speakers succeeded")
+                speaker_segments = _resegment_by_word_speakers(speaker_segments)
+                logger.info(
+                    f"[Pipeline] {recording_id} — whisperx.assign_word_speakers succeeded "
+                    f"→ {len(speaker_segments)} speaker-turn segments after resegmentation"
+                )
             else:
                 raise ValueError("Empty diarization dataframe — using manual assignment")
         except Exception as e:
@@ -664,9 +753,27 @@ async def _run_pipeline_impl(
             )
             _speaker_assignment_method = "manual"
             speaker_segments = _assign_speakers_to_words_manual(aligned_result, identified_segs)
+            speaker_segments = _resegment_by_word_speakers(speaker_segments)
         _analytics["speaker_assignment_method"] = _speaker_assignment_method
 
         logger.info(f"[Pipeline] {recording_id} — Speaker segments: {len(speaker_segments)}")
+
+        # ── ECAPA refinement pass on final segments ──
+        logger.info(f"[Pipeline] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+        speaker_segments = refine_transcript_speakers_with_ecapa(
+            file_path=file_path,
+            speaker_segments=speaker_segments,
+            voice_profiles=voice_profiles,
+            similarity_threshold=threshold,
+            use_model_default_threshold=True,
+        )
+
+        # Unload speaker embedding encoder immediately to free VRAM
+        try:
+            from services.embedding import unload_encoder
+            unload_encoder()
+        except Exception as e:
+            logger.warning(f"[Pipeline] {recording_id} — Failed to unload speaker encoder: {e}")
 
         # ── Stage 6: Build final segments ─────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 6: Building final segments")
@@ -674,19 +781,21 @@ async def _run_pipeline_impl(
         for seg in speaker_segments:
             words = seg.get("words", [])
             final_segments.append({
-                "speaker_label": seg.get("speaker_label", "Unknown"),
+                "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
                 "speaker_profile_id": seg.get("speaker_profile_id"),
+                "speaker": seg.get("speaker"),
                 "start": seg["start"],
                 "end": seg["end"],
                 "text": seg["text"],
                 "words": words,
                 "is_overlap": seg.get("is_overlap", False),
+                "overlap_regions": seg.get("overlap_regions", []),
             })
 
         speakers_detected = list({
             s["speaker_label"]
             for s in final_segments
-            if s["speaker_label"] not in ("Unknown", "[Multiple Speakers]")
+            if not s.get("is_overlap") and s["speaker_label"] not in ("Unknown",)
         })
         _analytics["final_segment_count"] = len(final_segments)
         _analytics["speakers_detected_count"] = len(speakers_detected)
@@ -761,14 +870,38 @@ async def _run_pipeline_impl(
         # Building it once here means generate_mom skips its own
         # _hierarchical_summarize() call, saving significant LLM inference.
         _t0_ctx = time.monotonic()
-        context_summary = await _build_and_store_context_summary(
-            recording_id, filtered_for_mom, raw_text, loop
-        )
+        try:
+            context_summary = await _build_and_store_context_summary(
+                recording_id, filtered_for_mom, raw_text, loop
+            )
+        except Exception as ctx_err:
+            logger.warning(
+                f"[Pipeline] {recording_id} — Initial context summary generation failed: {ctx_err}. "
+                "Triggering VRAM recovery and retry..."
+            )
+            context_summary = None
+        # Also recover when no exception was raised but the result is empty/invalid
+        if not (context_summary and context_summary.strip()):
+            if context_summary is not None:
+                logger.warning(
+                    f"[Pipeline] {recording_id} — Context summary returned empty without exception. "
+                    "Triggering VRAM recovery and retry..."
+                )
+            context_summary = await _recover_gpu_and_run_llm(
+                recording_id=recording_id,
+                task_name="context_summary",
+                fn_to_run=lambda: _build_and_store_context_summary(
+                    recording_id, filtered_for_mom, raw_text, loop
+                )
+            )
         _analytics["context_summary_sec"] = round(time.monotonic() - _t0_ctx, 3)
-        logger.info(
-            f"[Pipeline] {recording_id} — Context summary ready "
-            f"({len(context_summary.split())} words, took {_analytics['context_summary_sec']:.1f}s)"
-        )
+        if context_summary and context_summary.strip():
+            logger.info(
+                f"[Pipeline] {recording_id} — Context summary ready "
+                f"({len(context_summary.split())} words, took {_analytics['context_summary_sec']:.1f}s)"
+            )
+        else:
+            logger.warning(f"[Pipeline] {recording_id} — Context summary is empty or failed after recovery.")
 
         # Fetch recording metadata for MoM
         async with get_db() as db:
@@ -785,13 +918,48 @@ async def _run_pipeline_impl(
             "speakers_detected": speakers_detected,
         }
 
-        mom_data = await loop.run_in_executor(
-            None,
-            lambda: generate_mom(
-                filtered_for_mom, recording_meta,
-                context=context_summary or None,
+        try:
+            mom_data = await loop.run_in_executor(
+                None,
+                lambda: generate_mom(
+                    filtered_for_mom, recording_meta,
+                    context=context_summary or None,
+                )
             )
+        except Exception as mom_err:
+            logger.warning(
+                f"[Pipeline] {recording_id} — Initial MoM generation failed: {mom_err}. "
+                "Triggering VRAM recovery and retry..."
+            )
+            mom_data = None
+        # Also recover when no exception but result is missing or clearly invalid
+        _mom_invalid = (
+            not mom_data
+            or not mom_data.get("points_discussed")
         )
+        if _mom_invalid:
+            if mom_data is not None:
+                logger.warning(
+                    f"[Pipeline] {recording_id} — MoM returned empty/invalid without exception. "
+                    "Triggering VRAM recovery and retry..."
+                )
+            mom_data = await _recover_gpu_and_run_llm(
+                recording_id=recording_id,
+                task_name="Minutes of Meeting (MoM)",
+                fn_to_run=lambda: loop.run_in_executor(
+                    None,
+                    lambda: generate_mom(
+                        filtered_for_mom, recording_meta,
+                        context=context_summary or None,
+                    )
+                )
+            )
+
+        if not mom_data:
+            # Fall back to empty MoM
+            mom_data = _empty_mom(recording_meta)
+            logger.warning(f"[Pipeline] {recording_id} — MoM generation completely failed. Falling back to empty MoM template.")
+
         logger.info(f"[Pipeline] {recording_id} — MoM generated: {mom_data.get('title', '')}")
 
         # Upsert MoM into minutes_of_meeting table
@@ -885,6 +1053,13 @@ async def _run_pipeline_impl(
         )
     _analytics["mom_generation_sec"] = round(time.monotonic() - _t0_mom, 3)
 
+    # Unload Qwen LLM model immediately after MoM generation completes
+    try:
+        from services.ai_provider import QwenProvider
+        QwenProvider.unload_model()
+    except Exception as e:
+        logger.warning(f"[Pipeline] {recording_id} — Failed to unload Qwen LLM: {e}")
+
     # ── Stage 8: Mark recording done (no AI insight fields saved here) ────
     logger.info(f"[Pipeline] {recording_id} — STAGE 8: Marking recording done")
     try:
@@ -937,38 +1112,62 @@ def _post_process_whisperx_segments(
     Map WhisperX speaker IDs (SPEAKER_00, SPEAKER_01…) from assign_word_speakers
     back to human-readable labels from our voice-profile identification.
     """
+    def _fallback_label(raw_id: str, index: int | None = None) -> str:
+        if raw_id:
+            return raw_id
+        if index is not None:
+            return f"Speaker {index + 1}"
+        return "Speaker"
+
     id_to_label: Dict[str, str] = {}
     id_to_profile: Dict[str, str | None] = {}
-    for seg in identified_segs:
+    for idx, seg in enumerate(identified_segs):
         raw_id = seg.get("speaker", "")
         if raw_id and raw_id not in id_to_label:
-            id_to_label[raw_id] = seg.get("speaker_label", "Unknown")
+            id_to_label[raw_id] = seg.get("speaker_label") or _fallback_label(raw_id, idx)
             id_to_profile[raw_id] = seg.get("speaker_profile_id")
 
     out = []
-    for seg in wx_result.get("segments", []):
+    for seg_idx, seg in enumerate(wx_result.get("segments", [])):
         raw_id = seg.get("speaker", "")
-        label = id_to_label.get(raw_id, seg.get("speaker", "Unknown"))
+        label = id_to_label.get(raw_id) or seg.get("speaker") or _fallback_label(raw_id, seg_idx)
         profile_id = id_to_profile.get(raw_id)
 
         enriched_words = []
         for w in seg.get("words", []):
             w_raw = w.get("speaker", raw_id)
+            # Prefer "probability" (set by our transcription normalizer),
+            # fall back to "score" (native WhisperX field),
+            # then default to 1.0 only when neither is present.
+            word_conf = w.get("probability")
+            if word_conf is None:
+                word_conf = w.get("score", 1.0)
             enriched_words.append({
                 "word": w.get("word", "").strip(),
                 "start": round(float(w.get("start", seg["start"])), 3),
                 "end": round(float(w.get("end", seg["end"])), 3),
-                "probability": round(float(w.get("score", 1.0)), 4),
-                "speaker_label": id_to_label.get(w_raw, label),
+                "probability": round(float(word_conf), 4),
+                "speaker_label": id_to_label.get(w_raw) or w_raw or label,
             })
 
         seg_start = seg["start"]
         seg_end = seg["end"]
-        is_overlap = any(
-            s.get("is_overlap", False)
-            and max(seg_start, s["start"]) < min(seg_end, s["end"])
-            for s in identified_segs
-        )
+
+        # Collect is_overlap flag and all overlap_regions from identified segs
+        # that temporally intersect this WhisperX segment.
+        is_overlap = False
+        merged_regions: List[Dict[str, Any]] = []
+        seen_region_keys: set = set()
+        for s in identified_segs:
+            if max(seg_start, s["start"]) < min(seg_end, s["end"]):
+                if s.get("is_overlap"):
+                    is_overlap = True
+                for region in s.get("overlap_regions", []):
+                    key = (region["start"], region["end"], tuple(region.get("speakers", [])))
+                    if key not in seen_region_keys:
+                        seen_region_keys.add(key)
+                        merged_regions.append(region)
+
         out.append({
             "start": round(float(seg_start), 3),
             "end": round(float(seg_end), 3),
@@ -978,13 +1177,213 @@ def _post_process_whisperx_segments(
             "speaker_label": label,
             "speaker_profile_id": profile_id,
             "is_overlap": is_overlap,
+            "overlap_regions": merged_regions,
+            "speaker": raw_id or label,
         })
     return out
+
+
+def _resegment_by_word_speakers(
+    segments: List[Dict[str, Any]],
+    min_words: int = 2,
+    min_duration: float = 0.4,
+) -> List[Dict[str, Any]]:
+    """
+    Re-split transcript segments at word-level speaker boundaries.
+
+    After whisperx.assign_word_speakers() annotates every word with a
+    ``speaker_label``, a single Whisper segment can contain words from
+    multiple speakers.  This function creates one output segment per
+    contiguous speaker turn so the UI, AI, and MoM all reflect real
+    speaker changes rather than one merged block.
+
+    Noise gate
+    ----------
+    A speaker switch is only accepted when the new speaker's run satisfies
+    at least one of:
+      * ``min_words``    — the run contains ≥ N consecutive words (default 2)
+      * ``min_duration`` — the run spans ≥ D seconds (default 0.4 s)
+
+    A run that fails both criteria is merged into the preceding run to
+    avoid fragmenting the transcript on isolated mis-classified words.
+
+    Parameters
+    ----------
+    segments    : output of ``_post_process_whisperx_segments`` or
+                  ``_assign_speakers_to_words_manual``.
+    min_words   : minimum consecutive words needed to accept a speaker change.
+    min_duration: minimum span (seconds) needed to accept a speaker change.
+
+    Returns
+    -------
+    A flat list of segment dicts with the same schema as the input.
+    Chronological order and word completeness are guaranteed.
+    """
+    out: List[Dict[str, Any]] = []
+
+    for seg in segments:
+        words = seg.get("words", [])
+        if not words:
+            # Keep segments that have no word-level data unchanged.
+            out.append(seg)
+            continue
+
+        # ── Build initial runs of consecutive same-speaker words ──────────
+        # A run is a list of word dicts that share the same speaker_label.
+        runs: List[List[Dict[str, Any]]] = []
+        current_run: List[Dict[str, Any]] = [words[0]]
+        current_speaker: str = words[0].get("speaker_label", "")
+
+        for w in words[1:]:
+            w_speaker = w.get("speaker_label", "")
+            if w_speaker == current_speaker:
+                current_run.append(w)
+            else:
+                runs.append(current_run)
+                current_run = [w]
+                current_speaker = w_speaker
+        runs.append(current_run)
+
+        # ── Apply noise gate: merge short/brief runs into the previous run ─
+        # We iterate forward; a run that fails the gate is folded into the
+        # preceding accepted run (which may have a different speaker label).
+        merged_runs: List[List[Dict[str, Any]]] = []
+        for run in runs:
+            run_words = len(run)
+            run_dur = (
+                run[-1].get("end", 0.0) - run[0].get("start", 0.0)
+            ) if run else 0.0
+
+            if merged_runs and run_words < min_words and run_dur < min_duration:
+                # Noise — fold into the previous accepted run.
+                merged_runs[-1].extend(run)
+            else:
+                merged_runs.append(list(run))
+
+        # ── Emit one output segment per merged run ────────────────────────
+        base_profile_id = seg.get("speaker_profile_id")
+        base_avg_logprob = seg.get("avg_logprob", 0.0)
+        base_speaker_raw = seg.get("speaker", "")
+        base_is_overlap = seg.get("is_overlap", False)
+        base_overlap_regions = seg.get("overlap_regions", [])
+
+        for run in merged_runs:
+            if not run:
+                continue
+
+            # Speaker label comes from the first word of the accepted run;
+            # that word carries the label set by _post_process_whisperx_segments.
+            run_speaker_label = run[0].get("speaker_label") or seg.get("speaker_label", "")
+
+            run_start = round(float(run[0].get("start", seg["start"])), 3)
+            run_end   = round(float(run[-1].get("end",   seg["end"])),   3)
+            run_text  = " ".join(w.get("word", "").strip() for w in run if w.get("word", "").strip())
+
+            out.append({
+                "start":             run_start,
+                "end":               run_end,
+                "text":              run_text,
+                "words":             run,
+                "avg_logprob":       base_avg_logprob,
+                "speaker_label":     run_speaker_label,
+                "speaker_profile_id": base_profile_id,
+                "speaker":           base_speaker_raw,
+                "is_overlap":        base_is_overlap,
+                "overlap_regions":   base_overlap_regions,
+            })
+
+    return out
+
+
+def _offset_segment_timestamps(segment: Dict[str, Any], offset: float) -> Dict[str, Any]:
+    """Offset all segment-level and word-level timestamps by a given offset in seconds."""
+    new_seg = dict(segment)
+    if "start" in new_seg and new_seg["start"] is not None:
+        new_seg["start"] = round(float(new_seg["start"]) + offset, 3)
+    if "end" in new_seg and new_seg["end"] is not None:
+        new_seg["end"] = round(float(new_seg["end"]) + offset, 3)
+    if "words" in new_seg and isinstance(new_seg["words"], list):
+        new_words = []
+        for w in new_seg["words"]:
+            if isinstance(w, dict):
+                new_w = dict(w)
+                if "start" in new_w and new_w["start"] is not None:
+                    new_w["start"] = round(float(new_w["start"]) + offset, 3)
+                if "end" in new_w and new_w["end"] is not None:
+                    new_w["end"] = round(float(new_w["end"]) + offset, 3)
+                new_words.append(new_w)
+            else:
+                new_words.append(w)
+        new_seg["words"] = new_words
+    return new_seg
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FINALIZE PIPELINE — merge chunks + full-audio diarization
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _generate_all_chunk_summaries(
+    chunk_rows: list,
+    recording_id: str,
+    loop,
+) -> None:
+    """
+    Generate and persist chunk summaries for all completed chunks.
+
+    Called in parallel with diarization inside _run_finalize_pipeline_impl so
+    that LLM summarization and pyannote processing overlap in time.
+    Any per-chunk failure is non-fatal and is only logged.
+    """
+    try:
+        from services.ai_provider import get_provider, CHUNK_SUMMARY_PROMPT
+    except Exception as e:
+        logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Could not import AI provider (non-fatal): {e}")
+        return
+
+    done_chunks = [row for row in chunk_rows if row["status"] == "done" and row.get("raw_text")]
+    if not done_chunks:
+        logger.info(f"[FinalPipeline/ChunkSummary] {recording_id} — No done chunks with raw_text; skipping summary generation.")
+        return
+
+    logger.info(
+        f"[FinalPipeline/ChunkSummary] {recording_id} — "
+        f"Generating summaries for {len(done_chunks)} chunks in parallel with diarization"
+    )
+
+    for row in done_chunks:
+        chunk_id = row["id"]
+        chunk_text = (row.get("raw_text") or "").strip()
+        if not chunk_text:
+            continue
+        try:
+            summary = await loop.run_in_executor(
+                None,
+                lambda ct=chunk_text: get_provider()._infer(
+                    CHUNK_SUMMARY_PROMPT.format(chunk=ct[:2500]),
+                    max_new_tokens=200,
+                ),
+            )
+            if summary:
+                async with get_db() as db:
+                    await db.execute(
+                        text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
+                        {"s": summary, "cid": chunk_id},
+                    )
+                    await db.commit()
+                logger.info(
+                    f"[FinalPipeline/ChunkSummary] {recording_id} — "
+                    f"Chunk {chunk_id} summary saved ({len(summary.split())} words)"
+                )
+            else:
+                logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Chunk {chunk_id} summary empty (non-fatal)")
+        except Exception as e:
+            logger.warning(
+                f"[FinalPipeline/ChunkSummary] {recording_id} — "
+                f"Chunk {chunk_id} summary failed (non-fatal): {e}"
+            )
+
 
 async def run_finalize_pipeline(
     recording_id: str,
@@ -1116,6 +1515,7 @@ async def _run_finalize_pipeline_impl(
     merged_segments: List[Dict[str, Any]] = []
     merged_raw_parts: List[str] = []
     merged_aligned_segments: List[Dict[str, Any]] = []
+    chunk_rows: list = []  # populated below when chunk_ids is non-empty
 
     if chunk_ids:
         async with get_db() as db:
@@ -1136,45 +1536,20 @@ async def _run_finalize_pipeline_impl(
                 continue
             segs = from_json(row["transcript"], [])
             aligned = from_json(row["aligned_result"], {"segments": segs})
-            merged_segments.extend(segs)
+            
+            offset = float(row["chunk_start_sec"] or 0.0)
+            offset_segs = [_offset_segment_timestamps(s, offset) for s in segs]
+            offset_aligned_segs = [_offset_segment_timestamps(s, offset) for s in aligned.get("segments", segs)]
+            
+            merged_segments.extend(offset_segs)
             if row["raw_text"]:
                 merged_raw_parts.append(row["raw_text"])
-            merged_aligned_segments.extend(aligned.get("segments", segs))
+            merged_aligned_segments.extend(offset_aligned_segs)
 
         logger.info(
             f"[FinalPipeline] {recording_id} — Merged {len(merged_segments)} segments "
             f"from {len(chunk_rows)} chunks"
         )
-
-    # ── Step 3: Transcribe the final partial chunk (full_wav_path) ───────
-    # full_wav_path is the complete recording WAV. For chunked recordings this
-    # also covers the tail after the last background chunk was submitted.
-    # For simplicity we transcribe the full audio and use it to supplement
-    # the merged chunk data; for very long recordings only the tail portion
-    # is new — but re-transcribing the full audio ensures we don't miss anything.
-    # An optimisation would be to submit only the tail, but full-audio
-    # transcription is safer and Whisper caches model state.
-
-    logger.info(f"[FinalPipeline] {recording_id} — Transcribing full audio for final merge")
-    await _update_status_safe(recording_id, "processing", {"progress": "transcribing"})
-
-    # Build prompt
-    initial_prompt = ""
-    try:
-        async with get_db() as db:
-            global_prompt = await get_global_prompt(db, user_id)
-            vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
-        vocab_words = [item["word"] for item in vocab_items]
-        initial_prompt = build_whisper_prompt(
-            global_prompt=global_prompt,
-            meeting_prompt=meeting_prompt,
-            vocabulary=vocab_words,
-            use_vocabulary=use_vocabulary,
-        )
-        _analytics_fin["vocab_term_count"] = len(vocab_words)
-        _analytics_fin["initial_prompt_chars"] = len(initial_prompt)
-    except Exception as e:
-        logger.warning(f"[FinalPipeline] {recording_id} — Prompt build failed (non-fatal): {e}")
 
     # Fetch pre-detected language from DB (reused from first chunk)
     detected_language = None
@@ -1191,33 +1566,78 @@ async def _run_finalize_pipeline_impl(
     except Exception as e:
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to fetch language from DB: {e}")
 
-    _t0_transcription = time.monotonic()
-    try:
-        t_result = await loop.run_in_executor(
-            None,
-            lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language),
-        )
-        full_raw_text = t_result.get("raw_text", "")
-        language = t_result.get("language", "en")
-        # Use full-audio aligned result for speaker assignment (most accurate timestamps)
-        aligned_result = t_result.get("aligned_result", {"segments": t_result.get("segments", [])})
-        _t_segs = t_result.get("segments", [])
-        _avg_conf_f, _min_conf_f, _wc_f = _word_confidence_stats(_t_segs)
+    has_usable_chunks = len(merged_segments) > 0
+
+    if has_usable_chunks:
+        logger.info(f"[FinalPipeline] {recording_id} — Using merged chunk results (skipping full audio transcription)")
+        # Unload transcription models immediately to free VRAM before diarization
+        try:
+            from services.transcription import unload_whisperx_model, unload_align_model
+            unload_whisperx_model()
+            unload_align_model()
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
+        full_raw_text = " ".join(merged_raw_parts)
+        language = detected_language or "en"
+        aligned_result = {"segments": merged_aligned_segments}
+        
+        _avg_conf_f, _min_conf_f, _wc_f = _word_confidence_stats(merged_segments)
         _analytics_fin.update({
             "language_detected": language,
-            "transcript_segment_count": len(_t_segs),
-            "transcript_word_count": _wc_f or _count_total_words(_t_segs),
+            "transcript_segment_count": len(merged_segments),
+            "transcript_word_count": _wc_f or _count_total_words(merged_segments),
             "avg_word_confidence": _avg_conf_f,
             "min_word_confidence": _min_conf_f,
-            "alignment_used": aligned_result is not t_result,
+            "alignment_used": True,
         })
-        logger.info(
-            f"[FinalPipeline] {recording_id} — Full audio transcription OK: "
-            f"{len(t_result.get('segments', []))} segments, lang={language}"
-        )
-    except Exception as e:
-        logger.error(f"[FinalPipeline] {recording_id} — Full audio transcription FAILED: {e}", exc_info=True)
-        if not merged_segments:
+    else:
+        logger.info(f"[FinalPipeline] {recording_id} — No usable chunk results found. Transcribing full audio.")
+        await _update_status_safe(recording_id, "processing", {"progress": "transcribing"})
+
+        # Build prompt
+        initial_prompt = ""
+        try:
+            async with get_db() as db:
+                global_prompt = await get_global_prompt(db, user_id)
+                vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
+            vocab_words = [item["word"] for item in vocab_items]
+            initial_prompt = build_whisper_prompt(
+                global_prompt=global_prompt,
+                meeting_prompt=meeting_prompt,
+                vocabulary=vocab_words,
+                use_vocabulary=use_vocabulary,
+            )
+            _analytics_fin["vocab_term_count"] = len(vocab_words)
+            _analytics_fin["initial_prompt_chars"] = len(initial_prompt)
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Prompt build failed (non-fatal): {e}")
+
+        _t0_transcription = time.monotonic()
+        try:
+            t_result = await loop.run_in_executor(
+                None,
+                lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language),
+            )
+            full_raw_text = t_result.get("raw_text", "")
+            language = t_result.get("language", "en")
+            # Use full-audio aligned result for speaker assignment (most accurate timestamps)
+            aligned_result = t_result.get("aligned_result", {"segments": t_result.get("segments", [])})
+            _t_segs = t_result.get("segments", [])
+            _avg_conf_f, _min_conf_f, _wc_f = _word_confidence_stats(_t_segs)
+            _analytics_fin.update({
+                "language_detected": language,
+                "transcript_segment_count": len(_t_segs),
+                "transcript_word_count": _wc_f or _count_total_words(_t_segs),
+                "avg_word_confidence": _avg_conf_f,
+                "min_word_confidence": _min_conf_f,
+                "alignment_used": aligned_result is not t_result,
+            })
+            logger.info(
+                f"[FinalPipeline] {recording_id} — Full audio transcription OK: "
+                f"{len(t_result.get('segments', []))} segments, lang={language}"
+            )
+        except Exception as e:
+            logger.error(f"[FinalPipeline] {recording_id} — Full audio transcription FAILED: {e}", exc_info=True)
             _analytics_fin["error_stage"] = "transcription"
             _analytics_fin["error_message"] = str(e)
             _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
@@ -1225,20 +1645,32 @@ async def _run_finalize_pipeline_impl(
             await _update_status_safe(recording_id, "error", {"error_message": f"Transcription failed: {str(e)}"})
             unload_all_models()
             return
-        # Fall back to merged chunks only
-        full_raw_text = " ".join(merged_raw_parts)
-        language = "en"
-        aligned_result = {"segments": merged_aligned_segments}
-    _analytics_fin["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+        _analytics_fin["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+
+        # Unload transcription models immediately to free VRAM
+        try:
+            from services.transcription import unload_whisperx_model, unload_align_model
+            unload_whisperx_model()
+            unload_align_model()
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
 
     raw_text = full_raw_text or " ".join(merged_raw_parts)
 
-    # ── Step 4: Diarization (once on full audio) ─────────────────────────
+    # ── Step 4: Diarization (once on full audio) + Chunk summaries (parallel) ──
+    # For chunked recordings, summary generation for each chunk runs in parallel
+    # with pyannote diarization to minimise total finalize latency.  For single-
+    # file uploads (no chunk_rows), _generate_all_chunk_summaries is a no-op.
     logger.info(f"[FinalPipeline] {recording_id} — Running diarization on full audio")
     await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
     _t0_diar = time.monotonic()
     try:
-        diar_segs = await loop.run_in_executor(None, diarize, full_wav_path)
+        diar_result, _ = await asyncio.gather(
+            loop.run_in_executor(None, diarize, full_wav_path),
+            _generate_all_chunk_summaries(chunk_rows, recording_id, loop),
+            return_exceptions=False,
+        )
+        diar_segs = diar_result
         logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
     except Exception as e:
         logger.error(f"[FinalPipeline] {recording_id} — Diarization FAILED: {e}", exc_info=True)
@@ -1248,6 +1680,13 @@ async def _run_finalize_pipeline_impl(
     _analytics_fin["diar_raw_segment_count"] = len(diar_segs)
     _analytics_fin["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
     _analytics_fin["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
+
+    # Unload diarization pipeline immediately to free VRAM
+    try:
+        from services.diarization import unload_diarization_pipeline
+        unload_diarization_pipeline()
+    except Exception as e:
+        logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
 
     # ── Step 5: Load voice profiles ──────────────────────────────────────
     logger.info(f"[FinalPipeline] {recording_id} — Loading voice profiles")
@@ -1324,14 +1763,22 @@ async def _run_finalize_pipeline_impl(
             import whisperx
             diar_df = _convert_diar_to_whisperx_format(identified_segs)
             if diar_df is not None and not diar_df.empty:
-                wx_assigned = whisperx.assign_word_speakers(diar_df, aligned_result)
+                wx_assigned = whisperx.assign_word_speakers(
+                    diar_df, aligned_result, fill_nearest=True
+                )
                 speaker_segments = _post_process_whisperx_segments(wx_assigned, identified_segs)
+                speaker_segments = _resegment_by_word_speakers(speaker_segments)
+                logger.info(
+                    f"[FinalPipeline] {recording_id} — assign_word_speakers succeeded "
+                    f"→ {len(speaker_segments)} speaker-turn segments after resegmentation"
+                )
             else:
                 raise ValueError("Empty diarization dataframe")
         except Exception as e:
             logger.warning(f"[FinalPipeline] {recording_id} — assign_word_speakers failed ({e}), using manual assignment")
             _analytics_fin["speaker_assignment_method"] = "manual"
             speaker_segments = _assign_speakers_to_words_manual(aligned_result, identified_segs)
+            speaker_segments = _resegment_by_word_speakers(speaker_segments)
     else:
         # No diarization — label all segments as Speaker 1
         from services.identification import merge_transcript_with_speakers
@@ -1341,24 +1788,44 @@ async def _run_finalize_pipeline_impl(
             [{"start": 0, "end": 999999, "speaker": "SPEAKER_00",
               "speaker_label": "Speaker 1", "speaker_profile_id": None, "is_overlap": False}],
         )
+        speaker_segments = _resegment_by_word_speakers(speaker_segments)
+
+    # ── ECAPA refinement pass on final segments ──
+    logger.info(f"[FinalPipeline] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+    speaker_segments = refine_transcript_speakers_with_ecapa(
+        file_path=full_wav_path,
+        speaker_segments=speaker_segments,
+        voice_profiles=voice_profiles,
+        similarity_threshold=threshold,
+        use_model_default_threshold=True,
+    )
+
+    # Unload speaker embedding encoder immediately to free VRAM
+    try:
+        from services.embedding import unload_encoder
+        unload_encoder()
+    except Exception as e:
+        logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload speaker encoder: {e}")
 
     # ── Step 8: Build final segments ─────────────────────────────────────
     final_segments = []
     for seg in speaker_segments:
         final_segments.append({
-            "speaker_label": seg.get("speaker_label", "Unknown"),
+            "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
             "speaker_profile_id": seg.get("speaker_profile_id"),
+            "speaker": seg.get("speaker"),
             "start": seg["start"],
             "end": seg["end"],
             "text": seg["text"],
             "words": seg.get("words", []),
             "is_overlap": seg.get("is_overlap", False),
+            "overlap_regions": seg.get("overlap_regions", []),
         })
 
     speakers_detected = list({
         s["speaker_label"]
         for s in final_segments
-        if s["speaker_label"] not in ("Unknown", "[Multiple Speakers]")
+        if not s.get("is_overlap") and s["speaker_label"] not in ("Unknown",)
     })
     _analytics_fin["final_segment_count"] = len(final_segments)
     _analytics_fin["speakers_detected_count"] = len(speakers_detected)
@@ -1394,6 +1861,61 @@ async def _run_finalize_pipeline_impl(
         await _update_status_safe(recording_id, "error", {"error_message": f"Transcript save failed: {str(e)}"})
         unload_all_models()
         return
+
+    # ── Check for missing chunk summaries and recover if needed ──────────
+    if chunk_ids:
+        missing_chunks = []
+        try:
+            async with get_db() as db:
+                cs_rows = await db.execute(
+                    text(
+                        "SELECT id, chunk_index, raw_text FROM recording_chunks "
+                        "WHERE recording_id = :rid AND status = 'done' "
+                        "AND (chunk_summary IS NULL OR chunk_summary = '')"
+                    ),
+                    {"rid": recording_id},
+                )
+                missing_chunks = cs_rows.mappings().fetchall()
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Failed to query missing chunk summaries: {e}")
+
+        if missing_chunks:
+            logger.warning(
+                f"[FinalPipeline] {recording_id} — Found {len(missing_chunks)} chunks missing summaries. "
+                "Triggering VRAM recovery and retry sequence..."
+            )
+            
+            async def run_missing_chunk_summaries():
+                from services.ai_provider import get_provider, CHUNK_SUMMARY_PROMPT
+                for row in missing_chunks:
+                    cid = row["id"]
+                    cidx = row.get("chunk_index", 0)
+                    ctext = (row.get("raw_text") or "").strip()
+                    if not ctext:
+                        continue
+                    logger.info(f"[FinalPipeline/Recovery] {recording_id} — Regenerating summary for chunk {cidx + 1}")
+                    summary = await loop.run_in_executor(
+                        None,
+                        lambda ct=ctext: get_provider()._infer(
+                            CHUNK_SUMMARY_PROMPT.format(chunk=ct[:2500]),
+                            max_new_tokens=200,
+                        ),
+                    )
+                    if summary:
+                        async with get_db() as db:
+                            await db.execute(
+                                text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
+                                {"s": summary, "cid": cid},
+                            )
+                            await db.commit()
+                        logger.info(f"[FinalPipeline/Recovery] Chunk {cid} summary saved ✓")
+            
+            # Execute recovery
+            await _recover_gpu_and_run_llm(
+                recording_id=recording_id,
+                task_name=f"{len(missing_chunks)} chunk summaries",
+                fn_to_run=run_missing_chunk_summaries,
+            )
 
     # ── Phase 2: Build context_summary from chunk summaries (incremental) ───
     # For chunked recordings, each chunk already has a chunk_summary stored in DB.
@@ -1444,8 +1966,8 @@ async def _run_finalize_pipeline_impl(
                     context_summary = await loop.run_in_executor(
                         None,
                         lambda: get_provider()._infer(
-                            CHUNK_SUMMARY_PROMPT.format(chunk=merged_chunks[:3000]),
-                            max_new_tokens=350,
+                            CHUNK_SUMMARY_PROMPT.format(chunk=merged_chunks),
+                            max_new_tokens=500,
                         ),
                     )
                     logger.info(
@@ -1455,15 +1977,52 @@ async def _run_finalize_pipeline_impl(
                 else:
                     context_summary = merged_chunks
             except Exception as e:
-                logger.warning(f"[FinalPipeline] {recording_id} — Final-pass merge failed, using concatenated chunks: {e}")
-                context_summary = merged_chunks
+                logger.warning(
+                    f"[FinalPipeline] {recording_id} — Final-pass merge failed: {e}. "
+                    "Triggering VRAM recovery and retry..."
+                )
+                context_summary = await _recover_gpu_and_run_llm(
+                    recording_id=recording_id,
+                    task_name="final-pass context summary merge",
+                    fn_to_run=lambda: loop.run_in_executor(
+                        None,
+                        lambda: get_provider()._infer(
+                            CHUNK_SUMMARY_PROMPT.format(chunk=merged_chunks),
+                            max_new_tokens=500,
+                        )
+                    )
+                )
+                if not context_summary:
+                    logger.warning(f"[FinalPipeline] {recording_id} — Final-pass merge recovery failed, using concatenated chunks.")
+                    context_summary = merged_chunks
         else:
             logger.info(
                 f"[FinalPipeline] {recording_id} — No chunk summaries found, building context from final segments"
             )
-            context_summary = await _build_and_store_context_summary(
-                recording_id, filtered_for_mom, raw_text, loop
-            )
+            try:
+                context_summary = await _build_and_store_context_summary(
+                    recording_id, filtered_for_mom, raw_text, loop
+                )
+            except Exception as ctx_err:
+                logger.warning(
+                    f"[FinalPipeline] {recording_id} — Initial context summary generation failed: {ctx_err}. "
+                    "Triggering VRAM recovery and retry..."
+                )
+                context_summary = None
+            # Also recover when no exception but result is empty
+            if not (context_summary and context_summary.strip()):
+                if context_summary is not None:
+                    logger.warning(
+                        f"[FinalPipeline] {recording_id} — Context summary returned empty without exception. "
+                        "Triggering VRAM recovery and retry..."
+                    )
+                context_summary = await _recover_gpu_and_run_llm(
+                    recording_id=recording_id,
+                    task_name="context_summary",
+                    fn_to_run=lambda: _build_and_store_context_summary(
+                        recording_id, filtered_for_mom, raw_text, loop
+                    )
+                )
 
         # Store context_summary if built via incremental path
         if chunk_summaries and context_summary:
@@ -1500,13 +2059,48 @@ async def _run_finalize_pipeline_impl(
             "speakers_detected": speakers_detected,
         }
 
-        mom_data = await loop.run_in_executor(
-            None,
-            lambda: generate_mom(
-                filtered_for_mom, recording_meta,
-                context=context_summary or None,
+        try:
+            mom_data = await loop.run_in_executor(
+                None,
+                lambda: generate_mom(
+                    filtered_for_mom, recording_meta,
+                    context=context_summary or None,
+                )
             )
+        except Exception as mom_err:
+            logger.warning(
+                f"[FinalPipeline] {recording_id} — Initial MoM generation failed: {mom_err}. "
+                "Triggering VRAM recovery and retry..."
+            )
+            mom_data = None
+        # Also recover when no exception but result is missing or clearly invalid
+        _mom_fin_invalid = (
+            not mom_data
+            or not mom_data.get("points_discussed")
         )
+        if _mom_fin_invalid:
+            if mom_data is not None:
+                logger.warning(
+                    f"[FinalPipeline] {recording_id} — MoM returned empty/invalid without exception. "
+                    "Triggering VRAM recovery and retry..."
+                )
+            mom_data = await _recover_gpu_and_run_llm(
+                recording_id=recording_id,
+                task_name="Minutes of Meeting (MoM)",
+                fn_to_run=lambda: loop.run_in_executor(
+                    None,
+                    lambda: generate_mom(
+                        filtered_for_mom, recording_meta,
+                        context=context_summary or None,
+                    )
+                )
+            )
+
+        if not mom_data:
+            # Fall back to empty MoM
+            mom_data = _empty_mom(recording_meta)
+            logger.warning(f"[FinalPipeline] {recording_id} — MoM generation completely failed. Falling back to empty MoM template.")
+
         logger.info(f"[FinalPipeline] {recording_id} — MoM generated: {mom_data.get('title', '')}")
 
         now_mom = datetime.now(timezone.utc)
@@ -1596,6 +2190,13 @@ async def _run_finalize_pipeline_impl(
         logger.warning(f"[FinalPipeline] {recording_id} — MoM generation failed (non-fatal): {e}", exc_info=True)
     _analytics_fin["mom_generation_sec"] = round(time.monotonic() - _t0_mom_f, 3)
 
+    # Unload Qwen LLM model immediately after MoM generation completes
+    try:
+        from services.ai_provider import QwenProvider
+        QwenProvider.unload_model()
+    except Exception as e:
+        logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload Qwen LLM: {e}")
+
     # ── Save final result (no AI insight fields) ─────────────────────────
     now = datetime.now(timezone.utc)
     try:
@@ -1637,4 +2238,3 @@ async def _run_finalize_pipeline_impl(
         pass
     await _emit_analytics(_analytics_fin)
     unload_all_models()
-

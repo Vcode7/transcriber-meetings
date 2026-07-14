@@ -46,14 +46,12 @@ Application/
 │   ├── AI Meeting Transcriber.exe
 │   └── resources/app.asar
 ├── runtime/                  ← Created by installer; models placed separately
-│   ├── models/               ← Encrypted .dat model blobs (NOT in installer)
-│   │   ├── speech_engine.dat    (faster-whisper/medium)
-│   │   ├── audio_context.dat    (pyannote speaker-diarization-3.1)
-│   │   ├── voice_segment.dat    (pyannote segmentation-3.0)
-│   │   ├── voice_context.dat    (speechbrain spkrec-ecapa-voxceleb)
-│   │   ├── align_engine.dat     (wav2vec2-base alignment)
-│   │   ├── wespeaker.dat        (wespeaker-voxceleb-resnet34)
-│   │   └── model_manifest.dat   (encrypted checksums)
+│   ├── models/               ← Packaged model folders (NOT in installer)
+│   │   ├── speech_engine/       (faster-whisper/medium)
+│   │   ├── audio_context/       (pyannote/speaker-diarization-community-1 snapshot)
+│   │   ├── ecapa_tdnn/          (SpeechBrain ECAPA-TDNN speaker embedding)
+│   │   ├── align_engine/        (wav2vec2-base alignment)
+│   │   └── model_manifest.json  (manifest mapping and checksums)
 │   ├── nlp-engine/           ← Qwen3-4B plain folder (NOT in installer)
 │   │   ├── config.json
 │   │   ├── tokenizer.json
@@ -262,13 +260,11 @@ loaded directly by `transformers` with `local_files_only=True`.
 
 | Generic Name | Original Model | Type |
 |---|---|---|
-| `speech_engine.dat` | Systran/faster-whisper-medium | Encrypted |
-| `audio_context.dat` | pyannote/speaker-diarization-3.1 | Encrypted |
-| `voice_segment.dat` | pyannote/segmentation-3.0 | Encrypted |
-| `voice_context.dat` | speechbrain/spkrec-ecapa-voxceleb | Encrypted |
-| `align_engine.dat` | facebook/wav2vec2-base | Encrypted |
-| `wespeaker.dat` | pyannote/wespeaker-voxceleb-resnet34-LM | Encrypted |
-| `nlp-engine/` | Qwen/Qwen3-4B | **Plain directory** |
+| `speech_engine/` | Systran/faster-whisper-medium | Plain directory |
+| `audio_context/` | pyannote/speaker-diarization-community-1 (complete snapshot) | Plain directory |
+| `ecapa_tdnn/` | speechbrain/spkrec-ecapa-voxceleb (ECAPA-TDNN) | Plain directory |
+| `align_engine/` | facebook/wav2vec2-base | Plain directory |
+| `nlp-engine/` | Qwen/Qwen3-4B | Plain directory |
 
 ---
 
@@ -278,9 +274,9 @@ loaded directly by `transformers` with `local_files_only=True`.
 
 | Feature | Provider |
 |---|---|
-| Transcription | WhisperX (speech_engine.dat) |
-| Speaker Diarization | pyannote (audio_context.dat) |
-| Speaker Identification | resemblyzer + speechbrain |
+| Transcription | WhisperX (speech_engine/) |
+| Speaker Diarization | pyannote (audio_context/) |
+| Speaker Identification | SpeechBrain ECAPA-TDNN (ecapa_tdnn/) |
 | Meeting Summary | QwenProvider (runtime/nlp-engine/) |
 | Key Points | QwenProvider |
 | Action Items | QwenProvider |

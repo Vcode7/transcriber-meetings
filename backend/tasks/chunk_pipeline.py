@@ -1,18 +1,20 @@
 """
-Chunk pipeline — transcription-only (no diarization) for a single audio chunk.
+Chunk pipeline — transcription-only for a single audio chunk.
 
 During a long recording every completed 10-minute segment is passed here.
-Diarization, speaker identification and AI insights run ONCE after recording
-stops on the full merged transcript (see run_finalize_pipeline in pipeline.py).
+This function ONLY performs:
+  1. Whisper transcription + forced word alignment
+  2. Language detection (cached on first chunk)
+  3. Persisting the result to recording_chunks
 
-Incremental summarization
---------------------------
-After transcription, a short LLM summary of the chunk text is generated
-immediately and stored as ``chunk_summary`` in the recording_chunks row.
-At finalize time, the pipeline merges all chunk_summary values and runs a
-single final summarization pass instead of re-reading the full transcript.
-This distributes the LLM work across the recording session and minimises
-end-of-recording latency.
+All of the following are intentionally deferred to run_finalize_pipeline:
+  - Speaker diarization (runs once on the full audio)
+  - Speaker identification
+  - Chunk/context summary generation (runs in parallel with diarization)
+  - Minutes of Meeting generation
+
+This keeps VRAM usage bounded during live recording sessions: only one
+Whisper inference runs at a time and no LLM is loaded until finalize.
 """
 import json
 import logging
@@ -158,41 +160,15 @@ async def run_chunk_pipeline(
         except Exception as db_err:
             logger.warning(f"[ChunkPipeline] {recording_id} — Failed to cache language to DB: {db_err}")
 
-    # ── Generate incremental chunk summary ───────────────────────────────
-    # This distributes LLM work across the recording session so the finalize
-    # pipeline can merge pre-built chunk summaries in a single pass instead of
-    # re-reading the entire transcript from scratch.
-    chunk_summary: Optional[str] = None
-    chunk_text = raw_text.strip() or " ".join(
-        seg.get("text", "").strip() for seg in segments if seg.get("text", "").strip()
-    )
-    if chunk_text:
-        try:
-            from services.ai_provider import get_provider, CHUNK_SUMMARY_PROMPT
-            logger.info(f"[ChunkPipeline] {chunk_id} — Generating incremental chunk summary…")
-            chunk_summary = await loop.run_in_executor(
-                None,
-                lambda: get_provider()._infer(
-                    CHUNK_SUMMARY_PROMPT.format(chunk=chunk_text[:2500]),
-                    max_new_tokens=200,
-                ),
-            )
-            if chunk_summary:
-                logger.info(f"[ChunkPipeline] {chunk_id} — Chunk summary generated ✓ ({len(chunk_summary.split())} words)")
-            else:
-                logger.warning(f"[ChunkPipeline] {chunk_id} — Chunk summary returned empty (non-fatal)")
-        except Exception as e:
-            logger.warning(f"[ChunkPipeline] {chunk_id} — Chunk summary failed (non-fatal): {e}")
-            chunk_summary = None
-
     # ── Persist chunk result ─────────────────────────────────────────────
+    # Note: chunk_summary is intentionally NOT generated here.
+    # It will be generated later in run_finalize_pipeline, in parallel
+    # with diarization, so no LLM is loaded during the recording session.
     extra: dict = {
         "transcript": json.dumps(segments, default=str),
         "raw_text": raw_text,
         "aligned_result": json.dumps(aligned_result, default=str),
     }
-    if chunk_summary:
-        extra["chunk_summary"] = chunk_summary
 
     await _update_chunk_status(chunk_id, "done", extra)
 

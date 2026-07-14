@@ -5,6 +5,12 @@ export interface TranscriptWord {
   probability: number
 }
 
+export interface OverlapRegion {
+  start: number
+  end: number
+  speakers: string[]   // resolved names after speaker identification
+}
+
 export interface TranscriptSegment {
   speaker_label: string
   start: number
@@ -12,6 +18,7 @@ export interface TranscriptSegment {
   text: string
   words: TranscriptWord[]
   is_overlap: boolean
+  overlap_regions?: OverlapRegion[]
 }
 
 export interface SpeakerSummaryData {

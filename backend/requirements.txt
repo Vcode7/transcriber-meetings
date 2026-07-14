@@ -20,8 +20,8 @@ pydantic[email]==2.13.4
 # Optional: install pyannote only when HF_TOKEN is set
 pyannote.audio
 bcrypt==3.2.2
-# Speaker embedding - install separately if needed
-resemblyzer==0.1.1.dev0
+# Speaker embedding - SpeechBrain ECAPA-TDNN
+speechbrain>=1.0.0
 # PDF generation
 reportlab>=4.0.0
 # PDF attachment support (DOCX parsing + PDF merging)
