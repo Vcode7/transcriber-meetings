@@ -93,6 +93,28 @@ def _l2_normalize(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
+def _is_multi_speaker_label(label: str) -> bool:
+    """
+    Return True if the speaker label represents multiple speakers and should
+    be excluded from ECAPA embedding / centroid computation.
+
+    Patterns detected:
+    - Contains '+' separator (e.g. 'SPEAKER_00+SPEAKER_01')
+    - Contains 'Multiple Speaker' (case-insensitive)
+    - Starts with '[' and ends with ']' (e.g. '[Multiple Speaker]')
+    """
+    if not label:
+        return False
+    if '+' in label:
+        return True
+    if 'multiple speaker' in label.lower():
+        return True
+    if label.startswith('[') and label.endswith(']'):
+        return True
+    return False
+
+
+
 def _average_embeddings(embeddings: List[np.ndarray]) -> Optional[np.ndarray]:
     """
     Compute the L2-normalised mean of a list of embeddings.
@@ -103,6 +125,7 @@ def _average_embeddings(embeddings: List[np.ndarray]) -> Optional[np.ndarray]:
     stacked = np.stack(embeddings, axis=0)          # (N, dim)
     mean_emb = np.mean(stacked, axis=0)             # (dim,)
     return _l2_normalize(mean_emb)
+
 
 
 def _compute_profile_centroid(
@@ -525,6 +548,10 @@ def refine_transcript_speakers_with_ecapa(
     for i, seg in enumerate(speaker_segments):
         if seg.get("is_overlap"):
             continue
+        spk_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
+        if _is_multi_speaker_label(spk_label):
+            logger.debug(f"[Refine] Skipping multi-speaker segment for centroid: '{spk_label}'")
+            continue
         start = seg["start"]
         end = seg["end"]
         s_idx = int(start * sr)
@@ -558,9 +585,17 @@ def refine_transcript_speakers_with_ecapa(
         if seg.get("is_overlap"):
             continue
 
+        original_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
+        if _is_multi_speaker_label(original_label):
+            logger.debug(f"[Refine] Skipping multi-speaker segment for override: '{original_label}'")
+            continue
+
         segment_emb = segment_embeddings.get(i)
         if segment_emb is None:
             continue
+
+        start = seg["start"]
+        end = seg["end"]
 
         # Compare against all enrolled profiles and conversation centroids
         best_profile_sim = -1.0
@@ -568,7 +603,6 @@ def refine_transcript_speakers_with_ecapa(
         best_profile_id = None
         match_source = "none"
 
-        original_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
         original_profile_id = seg.get("speaker_profile_id")
         original_spk_key = original_profile_id if original_profile_id else original_label
 
@@ -641,16 +675,7 @@ def refine_transcript_speakers_with_ecapa(
             continue
 
         is_different = (original_profile_id != best_profile_id) or (original_label != best_profile_label)
-        logger.info(
-            f"[Identify] Segment index = {i}\n\n"
-            f"Time: {start:.2f} - {end:.2f}\n"
-            f"Original Label: {original_label}\n"
-            f"Segment Match: {best_profile_label} (Source: {match_source})\n"
-            f"Similarity: {best_profile_sim:.4f}\n"
-            f"is_different: {is_different}\n"
-            f"original_label_sim : {original_label_sim}\n"
-            f"full_text: {seg.get('text')}\n\n"
-        )
+       
         if is_different:
             if (
                 best_profile_sim >= 0.82
@@ -665,11 +690,11 @@ def refine_transcript_speakers_with_ecapa(
                 seg["similarity"] = round(best_profile_sim, 4)
 
                 logger.info(
-                    f"Override Applied"
+                    f"[Identify] Override Applied: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | Similarity: {best_profile_sim:.4f}"
                 )
             else:
                 logger.info(
-                    f"Rejected (similarity < 0.82 and margin check <= {speaker_refinement_margin:.2f})"
+                    f"[Identify] Rejected: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | Similarity: {best_profile_sim:.4f} (similarity < 0.82 and margin check <= {speaker_refinement_margin:.2f})"
                 )
 
     return speaker_segments

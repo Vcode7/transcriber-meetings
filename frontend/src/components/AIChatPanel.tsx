@@ -1,11 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Bot, Sparkles, FileText, ListChecks, ChevronRight, ChevronLeft,
   Copy, Check, Loader, Users, ClipboardList, Zap, CheckCircle,
+  Trash2, Upload, Brain, ChevronDown, ChevronUp, AlertTriangle
 } from 'lucide-react'
 import api from '../api/client'
 import { renderMarkdown } from '../lib/markdown'
+import { getApiErrorDetail } from '../lib/errors'
+import { isAxiosError } from 'axios'
 
 // ── Types ─────────────────────────────────────────────────────
 interface MomData {
@@ -158,9 +161,121 @@ function AIGeneratingSkeleton({ messages = GENERATING_MESSAGES }: { messages?: s
 }
 
 // ── MoM Section renderer ──────────────────────────────────────
+interface AttachmentFile {
+  id: string
+  filename: string
+  type: 'agenda' | 'context'
+}
+
+type ProcessState = 'idle' | 'processing' | 'done' | 'error'
+
+// ── MoM Section renderer ──────────────────────────────────────
 function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string }) {
   const navigate = useNavigate()
   const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+
+  // ── Attachment state ──────────────────────────────────────────
+  const [contextPanelOpen, setContextPanelOpen] = useState(false)
+  const [agendaFiles, setAgendaFiles] = useState<AttachmentFile[]>([])
+  const [contextFiles, setContextFiles] = useState<AttachmentFile[]>([])
+  const [agendaSummary, setAgendaSummary] = useState<string | null>(null)
+  const [referenceSummary, setReferenceSummary] = useState<string | null>(null)
+  const [agendaProcessState, setAgendaProcessState] = useState<ProcessState>('idle')
+  const [contextProcessState, setContextProcessState] = useState<ProcessState>('idle')
+  const agendaInputRef = useRef<HTMLInputElement>(null)
+  const contextInputRef = useRef<HTMLInputElement>(null)
+
+  // Fetch attachment files + summaries
+  const fetchAttachments = useCallback(async () => {
+    if (!recordingId) return
+    try {
+      const [attRes, sumRes] = await Promise.all([
+        api.get(`/attachments/${recordingId}`),
+        api.get(`/attachments/${recordingId}/summaries`),
+      ])
+      const allFiles: AttachmentFile[] = attRes.data.files || []
+      setAgendaFiles(allFiles.filter(f => f.type === 'agenda'))
+      setContextFiles(allFiles.filter(f => f.type === 'context'))
+      setAgendaSummary(sumRes.data.agenda_summary || null)
+      setReferenceSummary(sumRes.data.reference_summary || null)
+    } catch (err) {
+      console.error('[MomDisplay] Failed to fetch attachments:', err)
+    }
+  }, [recordingId])
+
+  useEffect(() => {
+    fetchAttachments()
+  }, [fetchAttachments])
+
+  const handleProcessFiles = async (type: 'agenda' | 'context') => {
+    if (!recordingId) return
+    const setState = type === 'agenda' ? setAgendaProcessState : setContextProcessState
+    setState('processing')
+    try {
+      const formData = new FormData()
+      formData.append('type', type)
+      const res = await api.post(`/attachments/${recordingId}/process`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      if (type === 'agenda') setAgendaSummary(res.data.summary)
+      else setReferenceSummary(res.data.summary)
+      setState('done')
+    } catch (e) {
+      console.error(`[MomDisplay] Processing failed for ${type}:`, e)
+      setState('error')
+    }
+  }
+
+  const handleUploadFiles = async (files: FileList | null, type: 'agenda' | 'context') => {
+    if (!files || files.length === 0 || !recordingId) return
+    const formData = new FormData()
+    formData.append('type', type)
+    Array.from(files).forEach(f => formData.append('files', f))
+    try {
+      await api.post(`/attachments/${recordingId}/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      // Refresh list
+      const res = await api.get(`/attachments/${recordingId}`)
+      const all: AttachmentFile[] = res.data.files || []
+      const filtered = all.filter(f => f.type === type)
+      if (type === 'agenda') setAgendaFiles(filtered)
+      else setContextFiles(filtered)
+
+      // Automatically generate/update summary in background
+      if (filtered.length > 0) {
+        await handleProcessFiles(type)
+      }
+    } catch (e) {
+      alert(`Upload failed: ${getApiErrorDetail(e)}`)
+    }
+  }
+
+  const handleDeleteFile = async (fileId: string, type: 'agenda' | 'context') => {
+    if (!recordingId) return
+    try {
+      await api.delete(`/attachments/${recordingId}/${fileId}`)
+      let remainingCount = 0
+      if (type === 'agenda') {
+        const remaining = agendaFiles.filter(f => f.id !== fileId)
+        setAgendaFiles(remaining)
+        remainingCount = remaining.length
+        if (remainingCount === 0) setAgendaSummary(null)
+      } else {
+        const remaining = contextFiles.filter(f => f.id !== fileId)
+        setContextFiles(remaining)
+        remainingCount = remaining.length
+        if (remainingCount === 0) setReferenceSummary(null)
+      }
+
+      // Automatically regenerate/update summary in background if files still exist
+      if (remainingCount > 0) {
+        await handleProcessFiles(type)
+      }
+    } catch (e) {
+      alert(`Delete failed: ${getApiErrorDetail(e)}`)
+    }
+  }
 
   const handlePdf = async () => {
     setPdfStatus('loading')
@@ -183,10 +298,10 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
       setTimeout(() => setPdfStatus('idle'), 3000)
     }
   }
-  
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '.9rem 1rem' }}>
- 
+
       {/* View & Download buttons */}
       <div style={{
         display: 'flex',
@@ -229,7 +344,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
           <FileText size={13} />
           <span>View MoM Page</span>
         </button>
- 
+
         <button
           onClick={handlePdf}
           disabled={pdfStatus === 'loading'}
@@ -279,6 +394,135 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
               : 'Download PDF'}
           </span>
         </button>
+      </div>
+
+      {/* ── Collapsible AI Context Files Section (Sidebar Version) ── */}
+      <div style={{
+        borderRadius: '10px',
+        border: '1.5px solid hsl(var(--border) / .15)',
+        background: 'hsl(var(--card))',
+        overflow: 'hidden',
+      }}>
+        <button
+          onClick={() => setContextPanelOpen(v => !v)}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '0.65rem 0.85rem', background: 'transparent', border: 'none',
+            cursor: 'pointer', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif',
+            fontSize: '0.78rem', fontWeight: 600,
+          }}
+        >
+          <Brain size={13} style={{ color: 'hsl(var(--accent))' }} />
+          <span style={{ flex: 1, textAlign: 'left' }}>AI Context Files</span>
+          {(agendaSummary || referenceSummary) && (
+            <span style={{
+              fontSize: '0.6rem', padding: '0.08rem 0.4rem', borderRadius: '99px',
+              background: 'hsl(var(--accent) / .12)', color: 'hsl(var(--accent))',
+              fontWeight: 700, marginRight: 4,
+            }}>Active</span>
+          )}
+          <span style={{ color: 'hsl(var(--pencil))' }}>
+            {contextPanelOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </span>
+        </button>
+
+        {contextPanelOpen && (
+          <div style={{ padding: '0 0.85rem 0.85rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', borderTop: '1px solid hsl(var(--border) / .1)' }}>
+            
+            {/* Hidden file inputs */}
+            <input ref={agendaInputRef} type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp" style={{ display: 'none' }}
+              onChange={e => handleUploadFiles(e.target.files, 'agenda')} />
+            <input ref={contextInputRef} type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp" style={{ display: 'none' }}
+              onChange={e => handleUploadFiles(e.target.files, 'context')} />
+
+            {/* Agenda section */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif' }}>
+                <FileText size={11} style={{ color: 'hsl(var(--accent))' }} />
+                <span>Agenda Files</span>
+                {agendaProcessState === 'processing' && <Loader size={10} className="spin" style={{ marginLeft: 'auto', color: 'hsl(var(--accent))' }} />}
+              </div>
+
+              {agendaFiles.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginTop: '2px' }}>
+                  {agendaFiles.map(f => (
+                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '3px 6px', borderRadius: '5px', background: 'hsl(var(--muted) / .4)', fontSize: '0.72rem', fontFamily: 'Inter, sans-serif' }}>
+                      <FileText size={10} style={{ flexShrink: 0, color: 'hsl(var(--pencil))' }} />
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'hsl(var(--ink))' }}>{f.filename}</span>
+                      <button onClick={() => handleDeleteFile(f.id, 'agenda')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', color: 'hsl(var(--destructive))', flexShrink: 0 }}>
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div
+                onClick={() => agendaInputRef.current?.click()}
+                style={{
+                  border: '1.2px dashed hsl(var(--border) / .6)', borderRadius: '6px',
+                  padding: '0.45rem', textAlign: 'center', cursor: 'pointer',
+                  fontSize: '0.72rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+                  background: 'hsl(var(--paper) / .3)',
+                }}
+              >
+                <Upload size={10} /> Upload Agenda
+              </div>
+
+              {agendaSummary && (
+                <div style={{ padding: '0.45rem 0.55rem', borderRadius: '6px', background: 'hsl(var(--accent) / .07)', border: '1px solid hsl(var(--accent) / .2)', marginTop: '2px' }}>
+                  <p style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(var(--accent))', fontFamily: 'Inter, sans-serif', marginBottom: '2px' }}>Agenda Summary ✓</p>
+                  <p style={{ fontSize: '0.68rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5, whiteSpace: 'pre-wrap', maxHeight: '60px', overflowY: 'auto' }}>{agendaSummary}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Context section */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif' }}>
+                <FileText size={11} style={{ color: '#8b5cf6' }} />
+                <span>Context Files</span>
+                {contextProcessState === 'processing' && <Loader size={10} className="spin" style={{ marginLeft: 'auto', color: '#8b5cf6' }} />}
+              </div>
+
+              {contextFiles.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginTop: '2px' }}>
+                  {contextFiles.map(f => (
+                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '3px 6px', borderRadius: '5px', background: 'hsl(var(--muted) / .4)', fontSize: '0.72rem', fontFamily: 'Inter, sans-serif' }}>
+                      <FileText size={10} style={{ flexShrink: 0, color: 'hsl(var(--pencil))' }} />
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'hsl(var(--ink))' }}>{f.filename}</span>
+                      <button onClick={() => handleDeleteFile(f.id, 'context')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', color: 'hsl(var(--destructive))', flexShrink: 0 }}>
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div
+                onClick={() => contextInputRef.current?.click()}
+                style={{
+                  border: '1.2px dashed hsl(var(--border) / .6)', borderRadius: '6px',
+                  padding: '0.45rem', textAlign: 'center', cursor: 'pointer',
+                  fontSize: '0.72rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+                  background: 'hsl(var(--paper) / .3)',
+                }}
+              >
+                <Upload size={10} /> Upload Context
+              </div>
+
+              {referenceSummary && (
+                <div style={{ padding: '0.45rem 0.55rem', borderRadius: '6px', background: 'hsl(#8b5cf6 / .07)', border: '1px solid hsl(#8b5cf6 / .2)', borderColor: '#8b5cf620', marginTop: '2px' }}>
+                  <p style={{ fontSize: '0.65rem', fontWeight: 700, color: '#8b5cf6', fontFamily: 'Inter, sans-serif', marginBottom: '2px' }}>Context Summary ✓</p>
+                  <p style={{ fontSize: '0.68rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5, whiteSpace: 'pre-wrap', maxHeight: '60px', overflowY: 'auto' }}>{referenceSummary}</p>
+                </div>
+              )}
+            </div>
+
+          </div>
+        )}
       </div>
 
       {/* Title */}

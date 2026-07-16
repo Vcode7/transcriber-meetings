@@ -24,6 +24,8 @@ from database import get_db, dt_to_str, to_json, from_json
 from services.transcription import transcribe
 from services.diarization import diarize, is_pyannote_available
 from services.identification import identify_speakers, refine_transcript_speakers_with_ecapa
+from services.device_utils import log_gpu_memory
+
 from services.llm import (
     generate_summary, generate_key_points, generate_action_items,
     generate_short_summary, generate_detailed_summary,
@@ -102,6 +104,13 @@ def unload_all_models():
         unload_overlap_model()
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload overlap model: {e}")
+        
+    # 6. Unload Text Embedder (Qwen3-Embedding-0.6B)
+    try:
+        from services.text_embedding_service import unload_text_embedder
+        unload_text_embedder()
+    except Exception as e:
+        logger.warning(f"[Pipeline] Failed to unload text embedder: {e}")
         
     # Force garbage collection and CUDA cache empty
     import gc
@@ -1332,8 +1341,9 @@ async def _generate_all_chunk_summaries(
     """
     Generate and persist chunk summaries for all completed chunks.
 
-    Called in parallel with diarization inside _run_finalize_pipeline_impl so
-    that LLM summarization and pyannote processing overlap in time.
+    DEPRECATED: This function used raw text before speaker identification.
+    It is kept as a fallback/reference but is no longer called in the main pipeline.
+    Use _generate_speaker_aware_chunk_summaries() instead (called post-ECAPA refinement).
     Any per-chunk failure is non-fatal and is only logged.
     """
     try:
@@ -1375,6 +1385,109 @@ async def _generate_all_chunk_summaries(
                 logger.info(
                     f"[FinalPipeline/ChunkSummary] {recording_id} — "
                     f"Chunk {chunk_id} summary saved ({len(summary.split())} words)"
+                )
+            else:
+                logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Chunk {chunk_id} summary empty (non-fatal)")
+        except Exception as e:
+            logger.warning(
+                f"[FinalPipeline/ChunkSummary] {recording_id} — "
+                f"Chunk {chunk_id} summary failed (non-fatal): {e}"
+            )
+
+
+def _build_speaker_attributed_chunk_text(
+    chunk_row: dict,
+    final_segments: List[Dict[str, Any]],
+) -> str:
+    """
+    Build a speaker-attributed transcript for a single chunk by filtering
+    final_segments that fall within the chunk's time window.
+
+    Each line is formatted as "SpeakerLabel: transcript text".
+    Falls back to raw_text if no segments overlap with the chunk window.
+    """
+    chunk_start = float(chunk_row.get("chunk_start_sec") or 0.0)
+    chunk_end = float(chunk_row.get("chunk_end_sec") or 0.0)
+    # Allow a small boundary tolerance (1 second) to catch edge-adjacent segments
+    tolerance = 1.0
+
+    attributed_lines = []
+    for seg in final_segments:
+        seg_start = seg.get("start", 0.0)
+        seg_end = seg.get("end", 0.0)
+        # Include segment if it overlaps with the chunk window
+        if seg_end >= (chunk_start - tolerance) and seg_start <= (chunk_end + tolerance):
+            label = seg.get("speaker_label") or seg.get("speaker") or "Speaker"
+            text = (seg.get("text") or "").strip()
+            if text:
+                attributed_lines.append(f"{label}: {text}")
+
+    if attributed_lines:
+        return "\n".join(attributed_lines)
+
+    # Fallback to raw_text if no segments matched
+    return (chunk_row.get("raw_text") or "").strip()
+
+
+async def _generate_speaker_aware_chunk_summaries(
+    chunk_rows: list,
+    final_segments: List[Dict[str, Any]],
+    recording_id: str,
+    loop,
+) -> None:
+    """
+    Generate and persist chunk summaries using speaker-attributed transcript text.
+
+    Called AFTER speaker identification + ECAPA refinement so that each summary
+    includes real speaker names (e.g. "John: discussed the budget...") rather than
+    raw undifferentiated text.
+
+    Any per-chunk failure is non-fatal and only logged.
+    """
+    try:
+        from services.ai_provider import get_provider, CHUNK_SUMMARY_PROMPT
+    except Exception as e:
+        logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Could not import AI provider (non-fatal): {e}")
+        return
+
+    done_chunks = [row for row in chunk_rows if row["status"] == "done"]
+    if not done_chunks:
+        logger.info(f"[FinalPipeline/ChunkSummary] {recording_id} — No done chunks; skipping speaker-aware summary generation.")
+        return
+
+    logger.info(
+        f"[FinalPipeline/ChunkSummary] {recording_id} — "
+        f"Generating speaker-aware summaries for {len(done_chunks)} chunks (post speaker-ID)"
+    )
+
+    for row in done_chunks:
+        chunk_id = row["id"]
+        chunk_idx = row.get("chunk_index", 0)
+
+        # Build speaker-attributed text for this chunk
+        attributed_text = _build_speaker_attributed_chunk_text(dict(row), final_segments)
+        if not attributed_text:
+            logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Chunk {chunk_idx} has no text; skipping.")
+            continue
+
+        try:
+            summary = await loop.run_in_executor(
+                None,
+                lambda ct=attributed_text: get_provider()._infer(
+                    CHUNK_SUMMARY_PROMPT.format(chunk=ct[:3000]),
+                    max_new_tokens=200,
+                ),
+            )
+            if summary:
+                async with get_db() as db:
+                    await db.execute(
+                        text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
+                        {"s": summary, "cid": chunk_id},
+                    )
+                    await db.commit()
+                logger.info(
+                    f"[FinalPipeline/ChunkSummary] {recording_id} — "
+                    f"Chunk {chunk_id} (index {chunk_idx}) speaker-aware summary saved ({len(summary.split())} words)"
                 )
             else:
                 logger.warning(f"[FinalPipeline/ChunkSummary] {recording_id} — Chunk {chunk_id} summary empty (non-fatal)")
@@ -1654,23 +1767,22 @@ async def _run_finalize_pipeline_impl(
             unload_align_model()
         except Exception as e:
             logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
+        log_gpu_memory("Post-transcription Unload")
 
     raw_text = full_raw_text or " ".join(merged_raw_parts)
 
-    # ── Step 4: Diarization (once on full audio) + Chunk summaries (parallel) ──
-    # For chunked recordings, summary generation for each chunk runs in parallel
-    # with pyannote diarization to minimise total finalize latency.  For single-
-    # file uploads (no chunk_rows), _generate_all_chunk_summaries is a no-op.
+    # ── Step 4: Diarization (once on full audio) ─────────────────────────
+    # Chunk summaries are generated AFTER speaker identification (Step 7c)
+    # so they can include speaker names in the LLM input.
     logger.info(f"[FinalPipeline] {recording_id} — Running diarization on full audio")
     await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
     _t0_diar = time.monotonic()
     try:
-        diar_result, _ = await asyncio.gather(
-            loop.run_in_executor(None, diarize, full_wav_path),
-            _generate_all_chunk_summaries(chunk_rows, recording_id, loop),
-            return_exceptions=False,
-        )
-        diar_segs = diar_result
+        # Note: chunk summary generation now runs AFTER speaker identification
+        # so it can use speaker-attributed text instead of raw transcript.
+        log_gpu_memory("Pre-diarization")
+        diar_segs = await loop.run_in_executor(None, diarize, full_wav_path)
+
         logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
     except Exception as e:
         logger.error(f"[FinalPipeline] {recording_id} — Diarization FAILED: {e}", exc_info=True)
@@ -1687,6 +1799,7 @@ async def _run_finalize_pipeline_impl(
         unload_diarization_pipeline()
     except Exception as e:
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
+    log_gpu_memory("Post-diarization Unload")
 
     # ── Step 5: Load voice profiles ──────────────────────────────────────
     logger.info(f"[FinalPipeline] {recording_id} — Loading voice profiles")
@@ -1729,9 +1842,11 @@ async def _run_finalize_pipeline_impl(
     _analytics_fin["voice_profiles_loaded"] = len(voice_profiles)
     _analytics_fin["similarity_threshold"] = threshold
     _t0_sid = time.monotonic()
+    log_gpu_memory("Pre-speaker-ID")
     if diar_segs:
         try:
             identified_segs = await loop.run_in_executor(
+
                 None,
                 lambda: identify_speakers(
                     file_path=full_wav_path,
@@ -1792,6 +1907,7 @@ async def _run_finalize_pipeline_impl(
 
     # ── ECAPA refinement pass on final segments ──
     logger.info(f"[FinalPipeline] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+    log_gpu_memory("Pre-ECAPA Refinement")
     speaker_segments = refine_transcript_speakers_with_ecapa(
         file_path=full_wav_path,
         speaker_segments=speaker_segments,
@@ -1806,6 +1922,31 @@ async def _run_finalize_pipeline_impl(
         unload_encoder()
     except Exception as e:
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload speaker encoder: {e}")
+    log_gpu_memory("Post-ECAPA Refinement Unload")
+
+    # ── Step 7b: Build final segments early so chunk summarization can use them ──
+    # (we need speaker labels to build attributed chunk text, so resolve final_segments now)
+    pre_final_segments = []
+    for seg in speaker_segments:
+        pre_final_segments.append({
+            "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
+            "speaker_profile_id": seg.get("speaker_profile_id"),
+            "speaker": seg.get("speaker"),
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": seg["text"],
+            "words": seg.get("words", []),
+            "is_overlap": seg.get("is_overlap", False),
+            "overlap_regions": seg.get("overlap_regions", []),
+        })
+
+    # ── Step 7c: Speaker-aware chunk summary generation (post speaker-ID) ────
+    if chunk_ids and chunk_rows:
+        logger.info(f"[FinalPipeline] {recording_id} — Generating speaker-aware chunk summaries")
+        await _update_status_safe(recording_id, "processing", {"progress": "summarizing_chunks"})
+        log_gpu_memory("Pre-chunk-summaries")
+        await _generate_speaker_aware_chunk_summaries(chunk_rows, pre_final_segments, recording_id, loop)
+
 
     # ── Step 8: Build final segments ─────────────────────────────────────
     final_segments = []

@@ -48,6 +48,8 @@ def unload_align_model():
     """Unload all cached WhisperX alignment models to free RAM/VRAM."""
     global _align_model_cache
     if _align_model_cache:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload Alignment Model")
         logger.info(f"[Transcription] Unloading {len(_align_model_cache)} cached WhisperX alignment models...")
         for key, val in list(_align_model_cache.items()):
             try:
@@ -66,6 +68,8 @@ def unload_align_model():
         except Exception:
             pass
         logger.info("[Transcription] Cached alignment models unloaded.")
+        log_gpu_memory("Post-unload Alignment Model")
+
 
 
 def _resolve_device() -> tuple[str, str]:
@@ -89,6 +93,8 @@ def get_whisperx_model():
     """Lazy-load the WhisperX model (done once per process)."""
     global _whisperx_model, _whisperx_device, _whisperx_compute_type
     if _whisperx_model is None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-load WhisperX")
         # Ensure SpeechBrain k2/flair mocks and torchaudio patches are in place
         # before WhisperX imports its bundled Pyannote VAD (which triggers
         # SpeechBrain lazy-import machinery).
@@ -107,6 +113,7 @@ def get_whisperx_model():
             compute_type=_whisperx_compute_type,
         )
         logger.info("[Transcription] WhisperX model ready ✓")
+        log_gpu_memory("Post-load WhisperX")
     return _whisperx_model
 
 
@@ -114,6 +121,8 @@ def unload_whisperx_model():
     """Unload the WhisperX model to free RAM/VRAM."""
     global _whisperx_model
     if _whisperx_model is not None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload WhisperX")
         logger.info("[Transcription] Unloading WhisperX model...")
         # PyTorch model unloading
         del _whisperx_model
@@ -127,6 +136,8 @@ def unload_whisperx_model():
         except Exception:
             pass
         logger.info("[Transcription] WhisperX model unloaded.")
+        log_gpu_memory("Post-unload WhisperX")
+
 
 
 
@@ -485,6 +496,8 @@ def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -
             model_a, metadata = _align_model_cache[cache_key]
             logger.info(f"[Transcription] Reusing cached alignment model for key {cache_key}")
         else:
+            from services.device_utils import log_gpu_memory
+            log_gpu_memory("Pre-load Alignment Model")
             model_a, metadata = whisperx.load_align_model(
                 language_code=language,
                 device=device,
@@ -497,6 +510,8 @@ def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -
                 f"[Transcription] Alignment model loaded and cached: {model_name} "
                 f"(dir={align_model_dir}, cache_only={model_cache_only})"
             )
+            log_gpu_memory("Post-load Alignment Model")
+
 
         # ── Step 2a: Detect speech regions for chunked alignment ──────────
    

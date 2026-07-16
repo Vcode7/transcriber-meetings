@@ -7,6 +7,9 @@ import os
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
+# Enable PyTorch expandable segments to avoid VRAM fragmentation and prevent CUDA OOM on long audio files.
+# if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+#     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # ─────────────────────────────────────────────────────────────────────────────
 # ── Apply SpeechBrain / torchaudio compatibility patches ──────────────────────
 # Must run BEFORE any import of whisperx, pyannote, speechbrain, or ECAPA so
@@ -46,6 +49,10 @@ from routers.mom_router import router as mom_router
 from routers.prompt_router import router as prompt_router
 from routers.dictionary_router import router as dictionary_router
 from routers.analytics_router import router as analytics_router
+from routers.attachments_router import router as attachments_router
+from routers.global_context_router import router as global_context_router
+from routers.raw_mom_router import router as raw_mom_router
+
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
 
@@ -109,10 +116,13 @@ def get_overlap_model() -> OverlapModel | None:
     """Lazy-load overlap model when first required."""
     global _overlap_model, _overlap_device
     if _overlap_model is None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-load Overlap Classifier")
         logger.info("[OverlapModel] Lazy loading overlap classifier...")
         _overlap_model = _load_overlap_model()
         if _overlap_model is not None:
             _overlap_model.to(_overlap_device)
+        log_gpu_memory("Post-load Overlap Classifier")
     return _overlap_model
 
 
@@ -120,6 +130,8 @@ def unload_overlap_model():
     """Unload overlap model from memory."""
     global _overlap_model
     if _overlap_model is not None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload Overlap Classifier")
         logger.info("[OverlapModel] Unloading overlap classifier...")
         del _overlap_model
         _overlap_model = None
@@ -132,6 +144,8 @@ def unload_overlap_model():
         except Exception:
             pass
         logger.info("[OverlapModel] Overlap classifier unloaded.")
+        log_gpu_memory("Post-unload Overlap Classifier")
+
 
 
 @asynccontextmanager
@@ -249,6 +263,9 @@ app.include_router(mom_router)
 app.include_router(prompt_router)
 app.include_router(dictionary_router)
 app.include_router(analytics_router)
+app.include_router(attachments_router)
+app.include_router(global_context_router)
+app.include_router(raw_mom_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 attachments_router.py — Upload, list, delete, and process Agenda/Context files for MoM generation.
 
 Endpoints:
@@ -30,6 +30,7 @@ MAX_FILE_SIZE_MB = 30
 ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".pptx", ".txt", ".md",
     ".png", ".jpg", ".jpeg", ".webp",
+    ".xlsx", ".xls", ".csv",
 }
 
 
@@ -237,6 +238,14 @@ async def delete_attachment(
             await db.commit()
             logger.info(f"[Attachments] Cleared {summary_col} for {recording_id} (no files remain)")
 
+        if att_type == "agenda":
+            await db.execute(
+                text("UPDATE recordings SET parsed_agenda_json = NULL WHERE id = :id AND user_id = :uid"),
+                {"id": recording_id, "uid": user_id},
+            )
+            await db.commit()
+            logger.info(f"[Attachments] Invalidated parsed_agenda_json for {recording_id}")
+
     return {"status": "deleted"}
 
 
@@ -292,9 +301,9 @@ async def process_attachments(
         )
         rec = r.mappings().fetchone()
 
-    if rec and rec[summary_col] and rec[hash_col] == combined_hash:
-        logger.info(f"[Attachments] Reusing cached {type} summary for {recording_id}")
-        return {"summary": rec[summary_col], "cached": True}
+    # if rec and rec[summary_col] and rec[hash_col] == combined_hash:
+    #     logger.info(f"[Attachments] Reusing cached {type} summary for {recording_id}")
+    #     return {"summary": rec[summary_col], "cached": True}
 
     # Extract text from each file
     from services.doc_extractor import extract_text_from_file
@@ -328,36 +337,61 @@ async def process_attachments(
 
     if type == "agenda":
         from services.llm import compress_agenda as _compress
+        try:
+            summary = await _loop.run_in_executor(None, _compress, combined_text)
+        except Exception as e:
+            logger.error(f"[Attachments] Agenda compression failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Agenda compression failed: {e}")
+        finally:
+            from services.ai_provider import QwenProvider
+            QwenProvider.unload_model()
+
+        if not summary or not summary.strip():
+            raise HTTPException(
+                status_code=500,
+                detail="LLM returned an empty summary. Please try again.",
+            )
     else:
-        from services.llm import compress_reference as _compress
+        # Embed context directly into the vector database instead of summarizing
+        try:
+            from services.rag_pipeline import embed_meeting_context, _mark_meeting_context_embedded
+            chunks_added = await _loop.run_in_executor(
+                None,
+                lambda: embed_meeting_context(recording_id, user_id),
+            )
+            await _loop.run_in_executor(
+                None,
+                lambda: _mark_meeting_context_embedded(recording_id, user_id),
+            )
+            summary = f"Successfully indexed {chunks_added} reference text chunks into local vector database."
+        except Exception as e:
+            logger.error(f"[Attachments] Context embedding failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Context embedding failed: {e}")
+        finally:
+            from services.text_embedding_service import unload_text_embedder
+            unload_text_embedder()
 
-    try:
-        summary = await _loop.run_in_executor(None, _compress, combined_text)
-    except Exception as e:
-        logger.error(f"[Attachments] LLM compression failed for {type}: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM compression failed: {e}")
-    finally:
-        from services.ai_provider import QwenProvider
-        QwenProvider.unload_model()
-
-    if not summary or not summary.strip():
-        raise HTTPException(
-            status_code=500,
-            detail="LLM returned an empty summary. Please try again.",
-        )
-
-    # Store summary in DB
+    # Store summary/index confirmation in DB
     async with get_db() as db:
-        await db.execute(
-            text(
-                f"UPDATE recordings SET {summary_col} = :summary, {hash_col} = :hash "
-                "WHERE id = :id AND user_id = :uid"
-            ),
-            {"summary": summary, "hash": combined_hash, "id": recording_id, "uid": user_id},
-        )
+        if type == "agenda":
+            await db.execute(
+                text(
+                    f"UPDATE recordings SET {summary_col} = :summary, {hash_col} = :hash, parsed_agenda_json = NULL "
+                    "WHERE id = :id AND user_id = :uid"
+                ),
+                {"summary": summary, "hash": combined_hash, "id": recording_id, "uid": user_id},
+            )
+        else:
+            await db.execute(
+                text(
+                    f"UPDATE recordings SET {summary_col} = :summary, {hash_col} = :hash "
+                    "WHERE id = :id AND user_id = :uid"
+                ),
+                {"summary": summary, "hash": combined_hash, "id": recording_id, "uid": user_id},
+            )
         await db.commit()
 
-    logger.info(f"[Attachments] Stored {type} summary ({len(summary)} chars) for {recording_id}")
+    logger.info(f"[Attachments] Processed {type} for {recording_id}: {summary}")
     return {"summary": summary, "cached": False}
 
 

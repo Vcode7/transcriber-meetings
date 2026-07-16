@@ -4,18 +4,18 @@ setlocal enabledelayedexpansion
 set PROJECT_ROOT=%~dp0..
 set TOOLS_DIR=%~dp0
 set NEW_APP_DIR=%PROJECT_ROOT%\Application
-set OLD_INSTALLER=%PROJECT_ROOT%\installer\dist\Setup_AIMeetingTranscriber_v3.0.exe
-set OLD_APP_DIR=%PROJECT_ROOT%\build\old_v3.0_temp
+set OLD_INSTALLER=%PROJECT_ROOT%\installer\dist\Setup_AIMeetingTranscriber_v3.2.0.exe
+set OLD_APP_DIR=%PROJECT_ROOT%\build\old_v3.2.0_temp
 
 echo ============================================================
 echo  AI Meeting Transcriber -- Automated Release Builder
 echo ============================================================
 echo.
 
-REM ── 1. Silently extract old v3.0 installer ─────────────────
-echo [1/3] Silently installing old v3.0 to temp folder...
+REM ── 1. Silently extract old v3.2.0 installer ─────────────────
+echo [1/3] Silently installing old v3.2.0 to temp folder...
 if not exist "!OLD_INSTALLER!" (
-    echo ERROR: Old v3.0 installer not found at: !OLD_INSTALLER!
+    echo ERROR: Old v3.2.0 installer not found at: !OLD_INSTALLER!
     exit /b 1
 )
 
@@ -26,10 +26,10 @@ echo Running silent installation...
 start /wait "" "%OLD_INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /DIR="%OLD_APP_DIR%"
 
 if !ERRORLEVEL! neq 0 (
-    echo ERROR: Silent installation of v3.0 failed.
+    echo ERROR: Silent installation of v3.2.0 failed.
     exit /b 1
 )
-echo [OK] Old v3.0 extracted to temporary directory.
+echo [OK] Old v3.2.0 extracted to temporary directory.
 echo.
 
 REM ── 2. Compile Inno Setup installer ──────────────────────────
@@ -41,7 +41,7 @@ if exist "!ISCC_PATH!" (
         echo ERROR: Inno Setup compilation failed.
         exit /b 1
     )
-    echo [OK] Setup_v3.0.1.exe created in installer\dist\
+    echo [OK] Setup_AIMeetingTranscriber_v3.2.1.exe created in installer\dist\
 ) else (
     echo WARNING: Inno Setup compiler not found at: !ISCC_PATH!
     echo          Skipping installer compilation.
@@ -50,9 +50,9 @@ echo.
 
 REM ── 3. Create Incremental Update Patch ───────────────────────
 echo [3/3] Creating Incremental Update Patch...
-set PATCH_OUT_ZIP=%PROJECT_ROOT%\patch_v3.0_to_v3.0.1.zip
+set PATCH_OUT_ZIP=%PROJECT_ROOT%\patch_v3.2.0_to_v3.2.1.zip
 echo Creating patch from "%OLD_APP_DIR%" to "%NEW_APP_DIR%"...
-"%PROJECT_ROOT%\backend\venv\Scripts\python.exe" "%TOOLS_DIR%\create_patch.py" --old "%OLD_APP_DIR%" --new "%NEW_APP_DIR%" --out "%PATCH_OUT_ZIP%" --version-from 3.0 --version-to 3.0.1
+"%PROJECT_ROOT%\backend\venv\Scripts\python.exe" "%TOOLS_DIR%\create_patch.py" --old "%OLD_APP_DIR%" --new "%NEW_APP_DIR%" --out "%PATCH_OUT_ZIP%" --version-from 3.2.0 --version-to 3.2.1
 
 if !ERRORLEVEL! neq 0 (
     echo ERROR: Patch creation failed.
@@ -68,7 +68,7 @@ echo.
 
 echo ============================================================
 echo  RELEASE PACKAGING COMPLETE
-echo  1. Setup Installer : installer\dist\Setup_AIMeetingTranscriber_v3.0.1.exe
+echo  1. Setup Installer : installer\dist\Setup_AIMeetingTranscriber_v3.2.1.exe
 echo  2. Update Patch    : %PATCH_OUT_ZIP%
 echo ============================================================
 pause

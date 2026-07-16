@@ -49,6 +49,34 @@ class Settings(BaseSettings):
     # SQLite database — relative to runtime/
     DATABASE_URL: str = f"sqlite+aiosqlite:///{(RUNTIME_DIR / 'data' / 'voicesum.db').as_posix()}"
 
+    # ── RAG / Text Embedding (Qwen3-Embedding-0.6B) ───────────────────────────
+    # Model name — change to "Qwen3-Embedding-8B" to upgrade; all embeddings
+    # must be regenerated after changing this value.
+    QWEN_EMBEDDING_MODEL_NAME: str = "Qwen3-Embedding-0.6B"
+
+    # Resolved path to the embedding model directory.
+    # Development: checks Application/runtime/embeddings/<model_name>/ first.
+    # Production:  <runtime_dir>/embeddings/<model_name>/
+    # Override in .env with an absolute path if needed.
+    QWEN_EMBEDDING_MODEL_DIR: str = str(
+        (BASE_DIR.parent / "Application" / "runtime" / "embeddings" / "Qwen3-Embedding-0.6B")
+        if (BASE_DIR.parent / "Application" / "runtime" / "embeddings" / "Qwen3-Embedding-0.6B").is_dir()
+        else (RUNTIME_DIR / "embeddings" / "Qwen3-Embedding-0.6B")
+    )
+
+    # FAISS vector store base directory
+    VECTOR_STORE_DIR: str = str(RUNTIME_DIR / "vector_store")
+
+    # RAG chunking parameters
+    RAG_CHUNK_SIZE: int = 200        # target words per chunk
+    RAG_CHUNK_OVERLAP: int = 20      # words of overlap between chunks
+
+    # RAG retrieval — top-K per source
+    RAG_RETRIEVAL_K_GLOBAL: int = 0      # global context docs
+    RAG_RETRIEVAL_K_MEETING: int = 1     # meeting context attachments
+    RAG_RETRIEVAL_K_TRANSCRIPT: int = 8  # transcript chunks
+    RAG_RELATIVE_SCORE_CUTOFF: float = 0.01  # similarity score window
+
     # JWT — Access token (short-lived, in-memory on client)
     JWT_SECRET: str = "change-me-in-production-use-long-random-string"
     JWT_ALGORITHM: str = "HS256"
@@ -65,6 +93,9 @@ class Settings(BaseSettings):
     QWEN_MODEL_ID: str = "Qwen/Qwen3-4B"
     QWEN_MAX_NEW_TOKENS: int = 1024
     QWEN_LOAD_IN_4BIT: bool = True  # Requires bitsandbytes; saves ~50% VRAM
+
+    # Configurable token threshold for switching to Section-wise MoM Generation
+    MOM_CONTEXT_TOKEN_THRESHOLD: int = 3000
 
     # HuggingFace (optional — enables pyannote diarization + Qwen3 download)
     HF_TOKEN: Optional[str] = ""
@@ -126,6 +157,10 @@ settings = Settings()
 # Ensure critical runtime directories exist at import time
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")).parent, exist_ok=True)
+os.makedirs(settings.VECTOR_STORE_DIR, exist_ok=True)
 
 # Print resolved paths to standard output
 print(f"[Config] Resolved MODELS_DIR to: {settings.MODELS_DIR}")
+print(f"[Config] Resolved VECTOR_STORE_DIR to: {settings.VECTOR_STORE_DIR}")
+print(f"[Config] Resolved QWEN_EMBEDDING_MODEL_DIR to: {settings.QWEN_EMBEDDING_MODEL_DIR}")
+

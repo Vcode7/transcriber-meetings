@@ -49,6 +49,8 @@ metadata_packages = [
     "onnxruntime", "psutil", "pygments", "rich", "optree",
     "optimum_quanto", "gammatone", "pesq", "piq", "pystoi",
     "torchmetrics", "pyannote-audio",
+    # Additional packages
+    "python-pptx", "pptx", "pytesseract", "pypdf",
 ]
 
 collected_metadata = []
@@ -62,6 +64,7 @@ data_packages = [
     "whisperx",
     "onnxruntime",
     "speechbrain",
+    "pptx",
 ]
 collected_datas = []
 for pkg in data_packages:
@@ -85,6 +88,32 @@ for pkg in submodule_packages:
     except Exception as e:
         print(f"WARNING: Failed to collect submodules for {pkg}: {e}")
 
+# Helper to bundle the entire package source and resources
+def collect_full_package(pkg_name):
+    """Return a list of (source_path, dest_dir) to copy the entire package directory."""
+    try:
+        import importlib
+        pkg = importlib.import_module(pkg_name)
+        pkg_path = Path(pkg.__path__[0])
+        return [(str(pkg_path), pkg_name)]
+    except Exception as e:
+        print(f"WARNING: Failed to collect full package {pkg_name}: {e}")
+        return []
+
+full_copy_packages = [
+    "speechbrain",
+    "pptx",
+    "docx",
+    "pypdf",
+    "pytesseract",
+    "reportlab",
+    "fitz",
+    "pymupdf",
+]
+collected_full_packages = []
+for pkg in full_copy_packages:
+    collected_full_packages += collect_full_package(pkg)
+
 a = Analysis(
     [str(BACKEND_DIR / "main.py")],
     pathex=[str(BACKEND_DIR)],
@@ -96,6 +125,8 @@ a = Analysis(
         *collected_metadata,
         # Bundle automatically collected data files
         *collected_datas,
+        # Bundle full directories of packages that do dynamic import scanning or resource lookups
+        *collected_full_packages,
     ],
     hiddenimports=[
         # Automatically collected submodules
@@ -179,13 +210,16 @@ a = Analysis(
         # Crypto
         "cryptography",
         "cryptography.fernet",
-        # PDF
+        # PDF / Word / PPTX / OCR / Agenda extraction
         "reportlab",
         "reportlab.pdfgen",
         "reportlab.lib",
         "reportlab.platypus",
         "docx",
         "fitz",
+        "pptx",
+        "pytesseract",
+        "pypdf",
         # Extra utils from requirements.txt
         "multipart",
         "dotenv",
@@ -201,6 +235,8 @@ a = Analysis(
         "routers.mom_router",
         "routers.prompt_router",
         "routers.dictionary_router",
+        "routers.analytics_router",
+        "routers.attachments_router",
         # App modules — services
         "services.diarization",
         "services.embedding",
@@ -215,11 +251,21 @@ a = Analysis(
         "services.prompt_builder",
         "services.vocab_extractor",
         "services.dictionary_service",
+        "services.doc_extractor",
+        "services.analytics",
+        "services.audio_preprocessing",
+        "services.compat",
         # App modules — tasks & core
         "tasks.pipeline",
+        "tasks.chunk_pipeline",
+        "tasks.rereid_pipeline",
+        "tasks.upload_chunk_pipeline",
         "database",
         "config",
         "models.user",
+        "models.dictionary",
+        "models.recording",
+        "models.settings",
     ],
     hookspath=[],
     hooksconfig={},

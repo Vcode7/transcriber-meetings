@@ -297,7 +297,71 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
-        # ── Migration: extend ALL existing sessions to year 2125 ─────────────
+        # ── Migration: Add Agenda/Context summary columns to recordings table ─
+        for col_def in (
+            "agenda_summary TEXT DEFAULT NULL",
+            "agenda_summary_hash TEXT DEFAULT NULL",
+            "reference_summary TEXT DEFAULT NULL",
+            "reference_summary_hash TEXT DEFAULT NULL",
+            "parsed_agenda_json TEXT DEFAULT NULL",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+        # ── Migration: Create recording_attachments table ─────────────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS recording_attachments (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                type TEXT NOT NULL, -- 'agenda' or 'context'
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_attachments_recording ON recording_attachments(recording_id)"
+        ))
+
+        # ── Global Context Documents — org-wide knowledge base ──────────────────
+        # Uploaded once by the user; chunks are embedded into a per-user FAISS index
+        # and retrieved during Raw MoM generation for any meeting.
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS global_context_documents (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                embedded INTEGER NOT NULL DEFAULT 0,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_global_ctx_user ON global_context_documents(user_id)"
+        ))
+
+        # ── RAG pipeline columns on recordings (idempotent migrations) ───────────
+        # raw_mom                   — JSON output of the Raw MoM pipeline
+        # transcript_embedded       — 1 if transcript chunks have been embedded into FAISS
+        # meeting_context_embedded  — 1 if meeting context attachments have been embedded
+        for col_def in (
+            "raw_mom TEXT DEFAULT NULL",
+            "transcript_embedded INTEGER NOT NULL DEFAULT 0",
+            "meeting_context_embedded INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.
         try:
@@ -308,6 +372,7 @@ async def connect_db():
             logger.info("[DB] Extended all active sessions to year 2125.")
         except Exception as ext_err:
             logger.warning(f"[DB] Could not extend sessions (non-fatal): {ext_err}")
+
 
     logger.info(f"[DB] SQLite database ready: {settings.DATABASE_URL}")
 

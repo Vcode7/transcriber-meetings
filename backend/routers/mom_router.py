@@ -109,7 +109,8 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
             r = await db.execute(
                 text("""
                     SELECT transcript, raw_text, filename, created_at, duration,
-                           speakers_detected, context_summary, context_summary_hash
+                           speakers_detected, context_summary, context_summary_hash,
+                           agenda_summary, reference_summary
                     FROM recordings WHERE id = :id AND user_id = :uid
                 """),
                 {"id": recording_id, "uid": user_id},
@@ -147,9 +148,9 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
         ctx: str | None = None
         if rec.get("context_summary") and rec.get("context_summary_hash") == current_hash:
             ctx = rec["context_summary"]
-            logger.info(f"[MoM] Reusing cached context_summary for {recording_id}")
+            logger.info(f"[MoM] Reusing cached context_summary for {recording_id} ({len(ctx.split()):,} words)")
         else:
-            logger.info(f"[MoM] Building fresh context_summary for {recording_id}")
+            logger.info(f"[MoM] Building fresh context_summary for {recording_id} ({len(raw_text)} chars)")
             try:
                 ctx = await _loop.run_in_executor(None, _build_ctx, filtered_transcript)
                 if ctx:
@@ -164,8 +165,23 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                 logger.warning(f"[MoM] context_summary build failed (non-fatal): {ctx_err}")
                 ctx = None
 
+        # Retrieve stored agenda / reference summaries (uploaded via /attachments)
+        agenda_summary: str | None = rec.get("agenda_summary") or None
+        reference_summary: str | None = rec.get("reference_summary") or None
+        if agenda_summary:
+            logger.info(f"[MoM] Injecting agenda_summary ({len(agenda_summary)} chars) for {recording_id}")
+        if reference_summary:
+            logger.info(f"[MoM] Injecting reference_summary ({len(reference_summary)} chars) for {recording_id}")
+
         mom_data = await _loop.run_in_executor(
-            None, lambda: generate_mom(filtered_transcript, meta, context=ctx or None)
+            None,
+            lambda: generate_mom(
+                filtered_transcript,
+                meta,
+                context=ctx or None,
+                agenda_summary=agenda_summary,
+                reference_summary=reference_summary,
+            ),
         )
 
         now = datetime.now(timezone.utc)
@@ -358,19 +374,24 @@ async def get_mom_versions(recording_id: str, current_user: dict = Depends(get_c
 
 
 @router.post("/{recording_id}/pdf")
-async def export_mom_pdf(recording_id: str, current_user: dict = Depends(get_current_user)):
+async def export_mom_pdf(recording_id: str, data: MoMData, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
+
+    # Lightweight ownership check — verify this recording belongs to the user.
+    # We don't read MoM data from DB; the caller supplies the latest editor state directly.
     async with get_db() as db:
         r = await db.execute(
-            text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+            text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
             {"rid": recording_id, "uid": user_id},
         )
-        mom_row = r.mappings().fetchone()
+        exists = r.fetchone()
 
-    if not mom_row:
+    if not exists:
         raise HTTPException(status_code=404, detail="MoM not found")
 
-    mom = _mom_row_to_dict(mom_row)
+    # Use the caller-supplied data (live editor state) instead of stale DB content.
+    mom = data.dict()
+    mom["action_items"] = _normalize_action_items(mom.get("action_items", []))
 
     # Build PDF in memory to avoid disk accumulation
     buffer = io.BytesIO()

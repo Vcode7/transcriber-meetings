@@ -17,6 +17,8 @@ import Settings from "./pages/Settings";
 import Dictionary from "./pages/Dictionary";
 import Landing from "./pages/Landing";
 import LicenseExpired from "./pages/LicenseExpired";
+import GlobalContext from "./pages/GlobalContext";
+import RawMomLab from "./pages/RawMomLab";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -252,6 +254,8 @@ export default function App() {
               <Route path="add-voice" element={<AddVoice />} />
               <Route path="settings" element={<Settings />} />
               <Route path="dictionary" element={<Dictionary />} />
+              <Route path="global-context" element={<GlobalContext />} />
+              <Route path="history/:id/raw-mom" element={<RawMomLab />} />
             </Route>
 
             {/* Catch-all → landing */}

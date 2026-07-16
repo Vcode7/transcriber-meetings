@@ -107,12 +107,17 @@ class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
     @patch("tasks.pipeline.refine_transcript_speakers_with_ecapa")
     @patch("tasks.pipeline.generate_mom")
     @patch("tasks.pipeline._emit_analytics")
+    @patch("tasks.pipeline._generate_speaker_aware_chunk_summaries")
+    @patch("tasks.pipeline.build_context_summary")
+    @patch("services.ai_provider.get_provider")
     async def test_run_finalize_pipeline_merges_chunks(
-        self, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
+        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
     ):
+
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
         mock_get_db.return_value = AsyncContextManagerMock(mock_db)
+
         
         chunk_rows = [
             {
@@ -200,12 +205,19 @@ class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
     @patch("tasks.pipeline.refine_transcript_speakers_with_ecapa")
     @patch("tasks.pipeline.generate_mom")
     @patch("tasks.pipeline._emit_analytics")
+    @patch("tasks.pipeline._generate_speaker_aware_chunk_summaries")
+    @patch("tasks.pipeline.build_context_summary")
+    @patch("services.ai_provider.get_provider")
     async def test_run_finalize_pipeline_fallback_to_full_audio(
-        self, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
+        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
     ):
         mock_db = MagicMock()
+
+
+
         mock_db.commit = AsyncMock()
         mock_get_db.return_value = AsyncContextManagerMock(mock_db)
+
         
         # SQL-specific database execution mocking
         async def mock_execute(sql, params=None):

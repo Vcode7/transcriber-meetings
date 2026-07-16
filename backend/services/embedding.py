@@ -160,6 +160,8 @@ def get_encoder():
     run_device = "cuda" if _DEVICE == "cuda" else "cpu"
 
     try:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-load ECAPA-TDNN")
         from speechbrain.utils.fetching import LocalStrategy, FetchConfig
 
         model_dir_str = str(model_dir)
@@ -177,10 +179,12 @@ def get_encoder():
             f"[Embedding] SpeechBrain ECAPA-TDNN loaded from {model_dir} "
             f"(device={run_device})"
         )
+        log_gpu_memory("Post-load ECAPA-TDNN")
     except Exception as e:
         raise RuntimeError(
             f"[Embedding] Failed to load ECAPA-TDNN model: {e}"
         ) from e
+
 
     return _ecapa_classifier
 
@@ -189,6 +193,8 @@ def unload_encoder():
     """Unload the ECAPA-TDNN classifier to free RAM/VRAM."""
     global _ecapa_classifier
     if _ecapa_classifier is not None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload ECAPA-TDNN")
         logger.info("[Embedding] Unloading SpeechBrain ECAPA-TDNN classifier...")
         del _ecapa_classifier
         _ecapa_classifier = None
@@ -201,6 +207,8 @@ def unload_encoder():
         except Exception:
             pass
         logger.info("[Embedding] ECAPA-TDNN classifier unloaded.")
+        log_gpu_memory("Post-unload ECAPA-TDNN")
+
 
 
 def get_embedding_dim() -> int:

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, FlaskConical } from 'lucide-react'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
 import PDFButton from '../components/PDFButton'
@@ -375,6 +375,17 @@ export default function HistoryDetail() {
                   >
                     <FileText size={14} />
                     Minutes of Meeting
+                  </button>
+
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      navigate(`/dashboard/history/${id}/raw-mom`);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <FlaskConical size={14} style={{ color: 'hsl(280,75%,65%)' }} />
+                    Generate Raw MoM (Lab)
                   </button>
 
                   <div className="dropdown-item">

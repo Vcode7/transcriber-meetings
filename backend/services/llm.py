@@ -41,6 +41,16 @@ def build_context_summary(transcript: List[Dict]) -> str:
     return get_provider().build_context_summary(transcript)
 
 
+def compress_agenda(text: str) -> str:
+    """Compress raw agenda/objectives document text into a structured numbered list (offline, Qwen3 4B)."""
+    return get_provider().compress_agenda(text)
+
+
+def compress_reference(text: str) -> str:
+    """Compress reference/context document text into a concise knowledge summary (offline, Qwen3 4B)."""
+    return get_provider().compress_reference(text)
+
+
 # ── Public API (used by pipeline.py + routers) ────────────────
 
 def generate_summary(transcript: List[Dict], context: Optional[str] = None) -> str:
@@ -63,9 +73,21 @@ def generate_key_decisions(transcript: List[Dict], context: Optional[str] = None
     return get_provider().generate_key_decisions(transcript, context=context)
 
 
-def generate_mom(transcript: List[Dict], recording_meta: dict, context: Optional[str] = None) -> dict:
+def generate_mom(
+    transcript: List[Dict],
+    recording_meta: dict,
+    context: Optional[str] = None,
+    agenda_summary: Optional[str] = None,
+    reference_summary: Optional[str] = None,
+) -> dict:
     """Generate Minutes of Meeting (offline, Qwen3 4B)."""
-    return get_provider().generate_mom(transcript, recording_meta, context=context)
+    return get_provider().generate_mom(
+        transcript,
+        recording_meta,
+        context=context,
+        agenda_summary=agenda_summary,
+        reference_summary=reference_summary,
+    )
 
 
 def generate_executive_summary(transcript: List[Dict], context: Optional[str] = None) -> dict:

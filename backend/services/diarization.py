@@ -100,6 +100,8 @@ def _try_load_pyannote():
         return
 
     try:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-load Pyannote")
         from services.model_loader import ModelLoader
         audio_context_path = ModelLoader.get_model_path("audio_context")
 
@@ -121,6 +123,8 @@ def _try_load_pyannote():
         logger.info(
             f"[Diarization] pyannote/speaker-diarization-community-1 ready on {_DEVICE} ✓"
         )
+        log_gpu_memory("Post-load Pyannote")
+
 
     except Exception as e:
         logger.error(
@@ -145,6 +149,8 @@ def unload_diarization_pipeline():
     """Unload the Pyannote pipeline to free RAM/VRAM."""
     global _diarization_pipeline, _pyannote_available
     if _diarization_pipeline is not None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload Pyannote")
         logger.info("[Diarization] Unloading pyannote pipeline...")
         del _diarization_pipeline
         _diarization_pipeline = None
@@ -158,6 +164,8 @@ def unload_diarization_pipeline():
         except Exception:
             pass
         logger.info("[Diarization] pyannote pipeline unloaded.")
+        log_gpu_memory("Post-unload Pyannote")
+
 
 
 def init_diarization():

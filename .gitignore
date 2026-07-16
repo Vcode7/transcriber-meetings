@@ -99,3 +99,7 @@ Application
 *.zip
 *.pt
 *.pth
+
+/docs
+docs/*
+docs
