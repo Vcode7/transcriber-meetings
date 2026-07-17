@@ -136,9 +136,25 @@ def embed_global_context_doc(
     # Remove any previous chunks for this doc (re-embedding on file change)
     store.delete_by_filter("doc_id", doc_id)
 
+    # Term expansion preprocessing before embedding
+    async def _fetch_shortcuts():
+        from services.dictionary_service import list_shortcuts
+        from database import get_db
+        async with get_db() as db:
+            return await list_shortcuts(db, user_id)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        shortcuts = loop.run_until_complete(_fetch_shortcuts())
+    except RuntimeError:
+        shortcuts = asyncio.run(_fetch_shortcuts())
+
+    from services.dictionary_service import expand_terms_in_chunks
+    expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
+
     texts = [c["text"] for c in chunks]
     import numpy as np
-    embeddings = embedder.encode_batch(texts)
+    embeddings = embedder.encode_batch(expanded_texts)
 
     metadatas = [
         {
@@ -233,8 +249,24 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         if not chunks:
             continue
 
+        # Term expansion preprocessing before embedding
+        async def _fetch_shortcuts():
+            from services.dictionary_service import list_shortcuts
+            from database import get_db
+            async with get_db() as db:
+                return await list_shortcuts(db, user_id)
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            shortcuts = loop.run_until_complete(_fetch_shortcuts())
+        except RuntimeError:
+            shortcuts = asyncio.run(_fetch_shortcuts())
+
+        from services.dictionary_service import expand_terms_in_chunks
+        expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
+
         texts = [c["text"] for c in chunks]
-        embeddings = embedder.encode_batch(texts)
+        embeddings = embedder.encode_batch(expanded_texts)
 
         metadatas = [
             {
@@ -257,7 +289,7 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
 
 # ── 3. Transcript Embedding ───────────────────────────────────────────────────
 
-def embed_transcript(recording_id: str, transcript: List[Dict]) -> int:
+def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) -> int:
     """
     Chunk and embed a meeting transcript into the per-recording transcript FAISS index.
 
@@ -289,8 +321,24 @@ def embed_transcript(recording_id: str, transcript: List[Dict]) -> int:
     store = get_transcript_store(recording_id, dim)
     store.clear()  # start fresh
 
+    # Term expansion preprocessing before embedding
+    async def _fetch_shortcuts():
+        from services.dictionary_service import list_shortcuts
+        from database import get_db
+        async with get_db() as db:
+            return await list_shortcuts(db, user_id)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        shortcuts = loop.run_until_complete(_fetch_shortcuts())
+    except RuntimeError:
+        shortcuts = asyncio.run(_fetch_shortcuts())
+
+    from services.dictionary_service import expand_terms_in_chunks
+    expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
+
     texts = [c["text"] for c in chunks]
-    embeddings = embedder.encode_batch(texts)
+    embeddings = embedder.encode_batch(expanded_texts)
 
     metadatas = [
         {
@@ -685,31 +733,13 @@ def generate_raw_mom(
     logger.info(f"[RAG] Starting Raw MoM generation for recording {recording_id}")
 
     try:
-        # ── Step 1: Parse agenda ───────────────────────────────────────────────────
-        agenda_items: List[Dict] = []
-        
-        # Try loading cached parsed agenda list first
-        cached_agenda = _load_parsed_agenda(recording_id)
-        if cached_agenda:
-            agenda_items = cached_agenda
-            logger.info(f"[RAG] Reusing parsed agenda from database ({len(agenda_items)} items)")
-        else:
-            if agenda_text and agenda_text.strip():
-                logger.info(f"[RAG] Parsing agenda ({len(agenda_text)} chars)")
-                # Use the LLM to parse the agenda
-                provider = get_provider()
-                try:
-                    agenda_items = provider.parse_agenda_items(agenda_text)
-                    if agenda_items:
-                        _save_parsed_agenda(recording_id, user_id, agenda_items)
-                except Exception as e:
-                    logger.warning(f"[RAG] Agenda parsing failed: {e}")
-                # Note: Do NOT unload LLM here because we will use it in Step 4 for extraction.
-
-        if not agenda_items:
-            # Fallback: create a single "General Meeting" agenda item
-            logger.warning("[RAG] No agenda items found; using generic fallback topic")
-            agenda_items = [{"topic": "General Meeting Discussion", "speaker": None}]
+        # ── Step 1: Get/create agenda items ────────────────────────────────────────
+        agenda_items = get_or_create_agenda_items(
+            recording_id=recording_id,
+            user_id=user_id,
+            transcript=transcript,
+            agenda_text=agenda_text,
+        )
 
         logger.info(f"[RAG] Processing {len(agenda_items)} agenda items")
 
@@ -717,7 +747,7 @@ def generate_raw_mom(
         if transcript and (force_reembed_transcript or not _transcript_embedded(recording_id)):
             logger.info(f"[RAG] Embedding transcript for {recording_id}")
             try:
-                count = embed_transcript(recording_id, transcript)
+                count = embed_transcript(recording_id, transcript, user_id)
                 if count > 0:
                     _mark_transcript_embedded(recording_id, user_id)
             except Exception as e:
@@ -956,3 +986,86 @@ def _save_parsed_agenda(recording_id: str, user_id: str, agenda_items: List[Dict
             asyncio.run(_save())
     except Exception as e:
         logger.warning(f"[RAG] Failed to save parsed agenda: {e}")
+
+
+def _load_context_summary(recording_id: str) -> Optional[str]:
+    """Load cached context_summary from the DB (sync wrapper)."""
+    import asyncio
+    async def _load():
+        from database import get_db
+        from sqlalchemy import text
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT context_summary FROM recordings WHERE id = :id"),
+                {"id": recording_id},
+            )
+            row = r.fetchone()
+            if row and row[0]:
+                return row[0].strip()
+            return None
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                return None
+            return loop.run_until_complete(_load())
+        except RuntimeError:
+            return asyncio.run(_load())
+    except Exception as e:
+        logger.warning(f"[RAG] Failed to load context_summary: {e}")
+        return None
+
+
+def get_or_create_agenda_items(
+    recording_id: str,
+    user_id: str,
+    transcript: List[Dict],
+    agenda_text: Optional[str],
+) -> List[Dict]:
+    """
+    Acquire agenda items for a recording:
+    1. Load cached parsed agenda from DB.
+    2. If not found and raw agenda text exists, parse it using LLM.
+    3. If still not found, generate agenda from the recording's context_summary (if it exists).
+    4. Fallback to generic general meeting topic if all else fails.
+    """
+    from services.ai_provider import get_provider
+
+    # 1. Try loading cached parsed agenda list first
+    agenda_items = _load_parsed_agenda(recording_id)
+    if agenda_items:
+        logger.info(f"[RAG] Reusing parsed agenda from database ({len(agenda_items)} items)")
+        return agenda_items
+
+    # 2. Parse raw agenda text if provided
+    if agenda_text and agenda_text.strip():
+        logger.info(f"[RAG] Parsing agenda document ({len(agenda_text)} chars)")
+        provider = get_provider()
+        try:
+            agenda_items = provider.parse_agenda_items(agenda_text)
+            if agenda_items:
+                _save_parsed_agenda(recording_id, user_id, agenda_items)
+                return agenda_items
+        except Exception as e:
+            logger.warning(f"[RAG] Agenda parsing failed: {e}")
+
+    # 3. No agenda document. Try generating agenda from context_summary
+    logger.info("[RAG] No agenda document found; trying to generate agenda from transcription summary")
+    provider = get_provider()
+    context_summary = _load_context_summary(recording_id)
+
+    # 4. Generate agenda from summary
+    if context_summary:
+        try:
+            agenda_items = provider.generate_agenda_from_summary(context_summary)
+            if agenda_items:
+                _save_parsed_agenda(recording_id, user_id, agenda_items)
+                logger.info(f"[RAG] Reconstructed {len(agenda_items)} agenda items from transcription summary")
+                return agenda_items
+        except Exception as e:
+            logger.warning(f"[RAG] Failed to generate agenda from summary: {e}")
+
+    # 5. Fallback
+    logger.warning("[RAG] No agenda could be parsed or generated; using generic fallback topic")
+    return [{"topic": "General Meeting Discussion", "speaker": None}]
+

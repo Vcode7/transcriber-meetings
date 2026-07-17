@@ -127,6 +127,16 @@ a = Analysis(
         *collected_datas,
         # Bundle full directories of packages that do dynamic import scanning or resource lookups
         *collected_full_packages,
+        # Fallback raw copy of all local backend modules to guarantee import availability
+        (str(BACKEND_DIR / "routers"), "routers"),
+        (str(BACKEND_DIR / "services"), "services"),
+        (str(BACKEND_DIR / "tasks"), "tasks"),
+        (str(BACKEND_DIR / "models"), "models"),
+        (str(BACKEND_DIR / "utils"), "utils"),
+        (str(BACKEND_DIR / "config.py"), "."),
+        (str(BACKEND_DIR / "database.py"), "."),
+        (str(BACKEND_DIR / "license.py"), "."),
+        (str(BACKEND_DIR / "main.py"), "."),
     ],
     hiddenimports=[
         # Automatically collected submodules
@@ -237,6 +247,10 @@ a = Analysis(
         "routers.dictionary_router",
         "routers.analytics_router",
         "routers.attachments_router",
+        "routers.global_context_router",
+        "routers.raw_mom_router",
+        "routers.dashboard_router",
+        "routers.prompt_templates_router",
         # App modules — services
         "services.diarization",
         "services.embedding",
@@ -255,6 +269,15 @@ a = Analysis(
         "services.analytics",
         "services.audio_preprocessing",
         "services.compat",
+        "services.prompt_service",
+        "services.rag_pipeline",
+        "services.text_chunker",
+        "services.text_embedding_service",
+        "services.vector_store",
+        # App modules — utils & core
+        "utils.audio_utils",
+        "utils.storage",
+        "license",
         # App modules — tasks & core
         "tasks.pipeline",
         "tasks.chunk_pipeline",

@@ -14,8 +14,6 @@ Removed:
   - AIProviderFactory with cloud routing
   - LlamaProvider (replaced by QwenProvider)
 """
-from fastapi import datastructures
-from dns import entropy
 from __future__ import annotations
 
 import json
@@ -31,126 +29,6 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 # Prompt Templates — one per task, purpose-built for Qwen3
 # ══════════════════════════════════════════════════════════════
-from dateparser.search import search_dates
-import re
-
-
-def extract_dates_from_text(text: str):
-    """
-    Extract dates from free text and return:
-    [
-        {
-            "value": "...",
-            "purpose": ""
-        }
-    ]
-    """
-    if not text:
-        return []
-
-    try:
-        matches = search_dates(
-            text,
-            settings={
-                "PREFER_DATES_FROM": "past",
-                "RETURN_AS_TIMEZONE_AWARE": False,
-            },
-        )
-    except Exception:
-        matches = None
-
-    if not matches:
-        return []
-
-    seen = set()
-    dates = []
-
-    for original, parsed in matches:
-        value = parsed.strftime("%B %d, %Y")
-
-        key = value.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-
-        purpose = ""
-
-        lower = text.lower()
-
-        if re.search(r"\bdue\b", lower):
-            purpose = "Due date"
-        elif re.search(r"\bdeadline\b", lower):
-            purpose = "Deadline"
-        elif re.search(r"\bexpire", lower):
-            purpose = "Expiration date"
-        elif re.search(r"\bapproval\b", lower):
-            purpose = "Approval date"
-        elif re.search(r"\bmeeting\b", lower):
-            purpose = "Meeting date"
-        elif re.search(r"\bacquired\b", lower):
-            purpose = "Acquisition date"
-        elif re.search(r"\bentered\b", lower):
-            purpose = "Agreement date"
-        elif re.search(r"\bamend", lower):
-            purpose = "Amendment date"
-        elif re.search(r"\bmilestone\b|\bphase\b", lower):
-            purpose = "Project milestone"
-        elif re.search(r"\bdesign review\b|\bpdr\b", lower):
-            purpose = "Preliminary Design Review"
-        elif re.search(r"\bcdr\b|\bcritical design review\b", lower):
-            purpose = "Critical Design Review"
-        elif re.search(r"\btest\b|\btesting\b|\bqualification\b", lower):
-            purpose = "Test schedule"
-        elif re.search(r"\bvalidation\b|\bverification\b", lower):
-            purpose = "Verification milestone"
-        elif re.search(r"\bintegration\b", lower):
-            purpose = "Integration milestone"
-        elif re.search(r"\brelease\b|\bdeployment\b", lower):
-            purpose = "Release date"
-        elif re.search(r"\bprototype\b", lower):
-            purpose = "Prototype milestone"
-        elif re.search(r"\bmanufactur", lower):
-            purpose = "Manufacturing milestone"
-        elif re.search(r"\bflight\b", lower):
-            purpose = "Flight schedule"
-
-        elif re.search(r"\btrial\b", lower):
-            purpose = "Trial schedule"
-
-        elif re.search(r"\bground test\b", lower):
-            purpose = "Ground test schedule"
-
-        elif re.search(r"\bacceptance\b", lower):
-            purpose = "Acceptance milestone"
-
-        elif re.search(r"\bdelivery\b|\bdeliverable\b", lower):
-            purpose = "Delivery milestone"
-
-        elif re.search(r"\bdemo\b|\bdemonstration\b", lower):
-            purpose = "Demonstration date"
-
-        elif re.search(r"\bcertification\b|\bclearance\b", lower):
-            purpose = "Certification milestone"
-
-        elif re.search(r"\binspection\b", lower):
-            purpose = "Inspection date"
-
-        elif re.search(r"\bproduction\b", lower):
-            purpose = "Production milestone"
-
-        elif re.search(r"\bcommission\b", lower):
-            purpose = "Commissioning date"
-
-        else:
-            purpose = "Referenced date"
-        dates.append(
-            {
-                "value": value,
-                "purpose": purpose,
-            }
-        )
-
-    return dates
 
 EXECUTIVE_SUMMARY_PROMPT = """\
 You are an expert enterprise meeting analyst. Analyze the following meeting transcript and write a professional Executive Summary.
@@ -669,6 +547,31 @@ REFERENCE DOCUMENT:
 Knowledge summary:"""
 
 
+AGENDA_FROM_SUMMARY_PROMPT = """\
+You are an expert meeting agenda reconstructor.
+
+Given the meeting's transcription summary below, identify the main topics or agenda items that were discussed in the meeting.
+For each topic, extract or identify the main speaker/presenter associated with that topic if it is clear from the summary. If no specific speaker is associated, use null.
+First understand complete meeting then identify the agenda item.
+
+Output ONLY a valid JSON array of objects, where each object has:
+- "topic": a concise title of the agenda topic discussed.
+- "speaker": the name of the speaker lead (or null if not specified/clear).
+
+Return ONLY the JSON array. Do not include markdown formatting or wrapping.
+
+Example:
+[
+  {{"topic": "Q3 Financial Review", "speaker": "Alice"}},
+  {{"topic": "Product Roadmap Discussion", "speaker": null}}
+]
+
+TRANSCRIPTION SUMMARY:
+{summary}
+
+JSON:"""
+
+
 # ══════════════════════════════════════════════════════════════
 # RAG Pipeline Prompts — used by Raw MoM pipeline ONLY
 # These prompts are completely independent of the MoM pipeline above.
@@ -739,6 +642,82 @@ RETRIEVED EVIDENCE:
 JSON:"""
 
 
+# ══════════════════════════════════════════════════════════════
+# Raw MoM → Final MoM Conversion Prompt
+# Completely independent of the transcript-based MOM_PROMPT above.
+# ══════════════════════════════════════════════════════════════
+
+RAW_MOM_TO_MOM_PROMPT = """\
+You are an experienced Executive Assistant responsible for producing professional, comprehensive, and factual Minutes of Meeting (MoM).
+
+You will receive a structured Raw MoM — a collection of agenda items, each with extracted discussion entries including decisions, actions, risks, milestones, and clarifications.
+
+Your task is to convert this structured data into a polished, professional Final Minutes of Meeting.
+
+Return ONLY a valid JSON object.
+Do NOT wrap the response in markdown.
+Do NOT include ```json.
+Do NOT include explanations or any text outside the JSON.
+
+The output MUST strictly follow this schema:
+
+{{
+  "title": "Professional meeting title derived from the agenda topics",
+  "introduction": "A professional executive overview describing the meeting purpose, major agenda topics covered, and overall context.",
+  "points_discussed": [
+    "Each item describes one meaningful discussion topic, decision, or outcome. One entry per distinct discussion point."
+  ],
+  "action_items": [
+    {{
+      "task": "Task description",
+      "owner": "Speaker name or Unassigned",
+      "deadline": "Deadline if present, otherwise ASAP or null"
+    }}
+  ],
+  "conclusion": "Professional conclusion summarizing the key decisions made, agreements reached, actions assigned, risks noted, and next steps.",
+  "actual_start_time": null
+}}
+
+Conversion Rules:
+
+TITLE
+- Derive a concise, professional title from the meeting agenda topics.
+- Reflect the primary objectives of the meeting.
+
+INTRODUCTION
+- Write a well-structured executive introduction (3–5 sentences).
+- Summarize what was discussed across all agenda items.
+- Do NOT copy raw entries verbatim. Synthesize them professionally.
+
+POINTS DISCUSSED
+- Convert every discussion entry (type: discussion, decision, clarification, risk, milestone, dependency) into a clean discussion point.
+- One point per distinct fact or decision.
+- Write each point as a complete, professional sentence.
+- Preserve ALL technical terms, project names, system names, acronyms, and numeric values exactly.
+- Do NOT omit any meaningful discussion entry.
+- Do NOT hallucinate additional facts.
+
+ACTION ITEMS
+- Extract every entry with type "action" or that has a non-null action.description from the discussion entries.
+- For each: set task = action.description (or point if description is null), owner = action.owner (or "Unassigned"), deadline = action.deadline (or "ASAP") or date related to it.
+- Do NOT duplicate action items.
+- Do NOT invent owners or deadlines not present in the data.
+
+CONCLUSION
+- Write a professional executive summary.
+- Cover key outcomes, decisions made, agreements reached, unresolved items, risks, and next steps.
+- Base ONLY on the provided Raw MoM data. Do NOT add information not present.
+
+STRICT RULES
+- Never hallucinate facts not present in the Raw MoM input.
+- Preserve all technical terminology exactly and also extract all important dates.
+- If a field has no relevant information: arrays → [], string fields → null.
+- The output must be valid JSON and nothing else.
+
+RAW MOM DATA:
+{raw_mom_text}
+
+JSON:"""
 
 
 KEY_POINTS_PROMPT = """\
@@ -852,6 +831,47 @@ TRANSCRIPT (only {speaker}'s lines):
 # ══════════════════════════════════════════════════════════════
 # Shared utilities
 # ══════════════════════════════════════════════════════════════
+
+def _get_prompt(key: str) -> str:
+    """
+    Return the active AI prompt template for the given key.
+
+    Lookup order:
+    1. In-process cache in services.prompt_service (populated from DB on first request).
+    2. Hardcoded module-level constant string (always available — never removed).
+
+    This function is synchronous and safe to call from worker threads.
+    It NEVER hits the database directly.
+    """
+    try:
+        from services.prompt_service import get_prompt_sync
+        result = get_prompt_sync(key)
+        if result and result.strip():
+            return result
+    except Exception:
+        pass
+    # Final fallback: return the module-level constant
+    _CONSTANT_MAP = {
+        "mom": MOM_PROMPT,
+        "mom_merge": MOM_MERGE_PROMPT,
+        "raw_mom_to_mom": RAW_MOM_TO_MOM_PROMPT,
+        "raw_mom_extraction": RAW_MOM_EXTRACTION_PROMPT,
+        "agenda_compress": AGENDA_COMPRESS_PROMPT,
+        "reference_compress": REFERENCE_COMPRESS_PROMPT,
+        "agenda_from_summary": AGENDA_FROM_SUMMARY_PROMPT,
+        "executive_summary": EXECUTIVE_SUMMARY_PROMPT,
+        "short_summary": SHORT_SUMMARY_PROMPT,
+        "detailed_summary": DETAILED_SUMMARY_PROMPT,
+        "chunk_summary": CHUNK_SUMMARY_PROMPT,
+        "key_points": KEY_POINTS_PROMPT,
+        "action_items": ACTION_ITEMS_PROMPT,
+        "key_decisions": KEY_DECISIONS_PROMPT,
+        "speaker_summary": SPEAKER_SUMMARY_PROMPT,
+        "speaker_key_points": SPEAKER_KEY_POINTS_PROMPT,
+        "speaker_action_items": SPEAKER_ACTION_ITEMS_PROMPT,
+    }
+    return _CONSTANT_MAP.get(key, "")
+
 
 def _format_transcript(transcript: List[Dict]) -> str:
     """Convert transcript segments into readable dialogue string (Speaker: text)."""
@@ -978,6 +998,9 @@ class AIProvider(ABC):
 
     @abstractmethod
     def generate_speaker_summaries(self, transcript: List[Dict]) -> Dict[str, Dict]: ...
+
+    @abstractmethod
+    def generate_agenda_from_summary(self, summary: str) -> List[Dict]: ...
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1273,7 +1296,7 @@ class QwenProvider(AIProvider):
         for i, chunk in enumerate(chunks):
             logger.info(f"[QwenAI] Summarizing chunk {i+1}/{len(chunks)}")
             summary = self._infer(
-                CHUNK_SUMMARY_PROMPT.format(chunk=chunk),
+                _get_prompt("chunk_summary").format(chunk=chunk),
                 max_new_tokens=256,
             )
             if summary:
@@ -1310,11 +1333,11 @@ class QwenProvider(AIProvider):
             chunks = _chunk_text(text, max_words=1200)
             summaries = []
             for chunk in chunks:
-                out = self._infer(AGENDA_COMPRESS_PROMPT.format(text=chunk), max_new_tokens=2000)
+                out = self._infer(_get_prompt("agenda_compress").format(text=chunk), max_new_tokens=2000)
                 if out:
                     summaries.append(out.strip())
             text = "\n".join(summaries)
-        result = self._infer(AGENDA_COMPRESS_PROMPT.format(text=text), max_new_tokens=2000)
+        result = self._infer(_get_prompt("agenda_compress").format(text=text), max_new_tokens=2000)
         return result.strip() if result else ""
 
     def compress_reference(self, text: str) -> str:
@@ -1326,11 +1349,11 @@ class QwenProvider(AIProvider):
             chunks = _chunk_text(text, max_words=1200)
             summaries = []
             for chunk in chunks:
-                out = self._infer(REFERENCE_COMPRESS_PROMPT.format(text=chunk), max_new_tokens=2000)
+                out = self._infer(_get_prompt("reference_compress").format(text=chunk), max_new_tokens=2000)
                 if out:
                     summaries.append(out.strip())
             text = "\n".join(summaries)
-        result = self._infer(REFERENCE_COMPRESS_PROMPT.format(text=text), max_new_tokens=2000)
+        result = self._infer(_get_prompt("reference_compress").format(text=text), max_new_tokens=2000)
         return result.strip() if result else ""
 
     # ── AIProvider interface ──────────────────────────────────
@@ -1349,7 +1372,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return "No transcript available to summarize."
         result = self._infer(
-            SHORT_SUMMARY_PROMPT.format(transcript=context),
+            _get_prompt("short_summary").format(transcript=context),
             max_new_tokens=120,
         )
         return result or "Unable to generate summary."
@@ -1364,7 +1387,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return "No transcript available to summarize."
         result = self._infer(
-            DETAILED_SUMMARY_PROMPT.format(transcript=context),
+            _get_prompt("detailed_summary").format(transcript=context),
             max_new_tokens=3000,
         )
         return result or "Unable to generate detailed summary."
@@ -1379,7 +1402,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            KEY_POINTS_PROMPT.format(transcript=context),
+            _get_prompt("key_points").format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw:
@@ -1412,7 +1435,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            ACTION_ITEMS_PROMPT.format(transcript=context),
+            _get_prompt("action_items").format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw or "none identified" in raw.lower():
@@ -1439,7 +1462,7 @@ class QwenProvider(AIProvider):
         elif not context.strip():
             return []
         raw = self._infer(
-            KEY_DECISIONS_PROMPT.format(transcript=context),
+            _get_prompt("key_decisions").format(transcript=context),
             max_new_tokens=1028,
         )
         if not raw or "none identified" in raw.lower():
@@ -1462,7 +1485,7 @@ class QwenProvider(AIProvider):
                 "discussion_points": [], "outcomes": [], "next_steps": [],
             }
         raw = self._infer(
-            EXECUTIVE_SUMMARY_PROMPT.format(transcript=context),
+            _get_prompt("executive_summary").format(transcript=context),
             max_new_tokens=700,
         )
 
@@ -1561,13 +1584,13 @@ class QwenProvider(AIProvider):
 
             # Summary
             summary_raw = self._infer(
-                SPEAKER_SUMMARY_PROMPT.format(speaker=speaker, transcript=speaker_text),
+                _get_prompt("speaker_summary").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=200,
             )
 
             # Key points
             kp_raw = self._infer(
-                SPEAKER_KEY_POINTS_PROMPT.format(speaker=speaker, transcript=speaker_text),
+                _get_prompt("speaker_key_points").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=350,
             )
             key_points = []
@@ -1589,7 +1612,7 @@ class QwenProvider(AIProvider):
 
             # Action items
             ai_raw = self._infer(
-                SPEAKER_ACTION_ITEMS_PROMPT.format(speaker=speaker, transcript=speaker_text),
+                _get_prompt("speaker_action_items").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=250,
             )
             action_items = [] if (not ai_raw or "none identified" in ai_raw.lower()) else _clean_list(ai_raw)
@@ -1607,6 +1630,63 @@ class QwenProvider(AIProvider):
     # These methods are ONLY used by the Raw MoM pipeline.
     # They do NOT affect the existing generate_mom() method.
 
+    def generate_agenda_from_summary(self, summary: str) -> List[Dict]:
+        """
+        Generate structured agenda items from a transcription summary.
+        """
+        if not summary or not summary.strip():
+            return []
+
+        raw = self._infer(
+            _get_prompt("agenda_from_summary").format(summary=summary.strip()),
+            max_new_tokens=1024,
+        )
+        if not raw:
+            return []
+
+        # Strip markdown fences
+        raw = raw.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        elif raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        try:
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                raise ValueError("Expected JSON array")
+            result = []
+            for item in items:
+                if isinstance(item, dict) and item.get("topic"):
+                    result.append({
+                        "topic": str(item["topic"]).strip(),
+                        "speaker": str(item["speaker"]).strip() if item.get("speaker") else None,
+                    })
+            logger.info(f"[QwenAI] Generated {len(result)} agenda items from summary")
+            return result
+        except Exception as e:
+            # Attempt regex extraction
+            import re
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                try:
+                    items = json.loads(match.group())
+                    if isinstance(items, list):
+                        return [
+                            {
+                                "topic": str(i.get("topic", "")).strip(),
+                                "speaker": str(i.get("speaker", "")).strip() or None,
+                            }
+                            for i in items if isinstance(i, dict) and i.get("topic")
+                        ]
+                except Exception:
+                    pass
+            logger.warning(f"[QwenAI] Failed to parse generated agenda JSON: {e}. Raw: {raw}")
+            return []
+
     def parse_agenda_items(self, agenda_text: str) -> List[Dict]:
         """
         Parse an agenda document into a list of {topic, speaker} dicts.
@@ -1623,7 +1703,7 @@ class QwenProvider(AIProvider):
             return []
 
         raw = self._infer(
-            AGENDA_COMPRESS_PROMPT.format(text=agenda_text.strip()),
+            _get_prompt("agenda_compress").format(text=agenda_text.strip()),
             max_new_tokens=1024,
         )
         if not raw:
@@ -1708,7 +1788,7 @@ class QwenProvider(AIProvider):
             }
 
         raw = self._infer(
-            RAW_MOM_EXTRACTION_PROMPT.format(
+            _get_prompt("raw_mom_extraction").format(
                 agenda_topic=agenda_topic,
                 agenda_speaker=agenda_speaker or "Not specified",
                 evidence=evidence.strip(),
@@ -1724,7 +1804,6 @@ class QwenProvider(AIProvider):
             }
 
         # Strip markdown fences
-        logger.info("raw_mom", raw)
         raw = raw.strip()
         if raw.startswith("```json"):
             raw = raw[7:]
@@ -1736,7 +1815,6 @@ class QwenProvider(AIProvider):
 
         try:
             data = json.loads(raw)
-            print(data)
             if not isinstance(data, dict):
                 raise ValueError("Expected JSON object")
 
@@ -1752,48 +1830,18 @@ class QwenProvider(AIProvider):
                 dates = entry.get("dates", [])
                 if not isinstance(dates, list):
                     dates = []
-
-                # Preserve LLM extracted dates
-                normalized_dates = []
-                seen = set()
-
-                for d in dates:
-                    if not isinstance(d, dict):
-                        continue
-
-                    value = str(d.get("value", "")).strip()
-                    purpose = str(d.get("purpose", "")).strip()
-
-                    if value:
-                        normalized_dates.append(
-                            {
-                                "value": value,
-                                "purpose": purpose,
-                            }
-                        )
-                        seen.add(value.lower())
-
-                # Deterministically extract any missing dates
-                text_to_scan = f"{entry.get('point', '')}"
-
-                action = entry.get("action", {})
-                if isinstance(action, dict):
-                    text_to_scan += " " + str(action.get("description") or "")
-
-                for d in extract_dates_from_text(text_to_scan):
-                    if d["value"].lower() not in seen:
-                        normalized_dates.append(d)
-                        seen.add(d["value"].lower())
-
                 action = entry.get("action", {})
                 if not isinstance(action, dict):
                     action = {}
-
                 normalized.append({
                     "type": str(entry.get("type", "discussion")),
                     "speaker": entry.get("speaker") or None,
                     "point": str(entry.get("point", "")).strip(),
-                    "dates": normalized_dates,
+                    "dates": [
+                        {"value": str(d.get("value", "")), "purpose": str(d.get("purpose", ""))}
+                        for d in dates
+                        if isinstance(d, dict)
+                    ],
                     "action": {
                         "owner": action.get("owner") or None,
                         "description": action.get("description") or None,
@@ -1827,7 +1875,7 @@ class QwenProvider(AIProvider):
             return {
                 "agenda_topic": agenda_topic,
                 "agenda_speaker": agenda_speaker,
-                "discussion": [],
+                "discussion": raw,
             }
 
     def _parse_mom_json(self, raw: str, recording_meta: dict) -> Optional[dict]:
@@ -1944,7 +1992,7 @@ class QwenProvider(AIProvider):
             logger.info(f"[QwenAI] Generating partial MoM for section {idx+1}/{len(sections)}...")
             try:
                 raw_sec = self._infer(
-                    MOM_PROMPT.format(
+                    _get_prompt("mom").format(
                         transcript=section,
                         agenda_section=agenda_section,
                         reference_section=reference_section,
@@ -1978,7 +2026,7 @@ class QwenProvider(AIProvider):
         partial_moms_json = json.dumps(partial_moms, indent=2)
         try:
             raw_merge = self._infer(
-                MOM_MERGE_PROMPT.format(partial_moms_json=partial_moms_json),
+                _get_prompt("mom_merge").format(partial_moms_json=partial_moms_json),
                 max_new_tokens=3072,
             )
             final_data = self._parse_mom_json(raw_merge, recording_meta)
@@ -2021,6 +2069,93 @@ class QwenProvider(AIProvider):
             "action_items": merged_action_items,
             "conclusion": " ".join(conclusions)[:1000],
         }
+
+    def generate_mom_from_raw_mom(self, raw_mom: dict, recording_meta: dict) -> dict:
+        """
+        Generate a final MoM from a structured Raw MoM JSON.
+
+        This pipeline is COMPLETELY INDEPENDENT of generate_mom() — it does NOT
+        use the transcript at all. Instead, it consumes the pre-extracted
+        structured Raw MoM (agendas → discussion entries) produced by the
+        RAG-based Raw MoM Lab pipeline and converts it into a polished final
+        MoM matching the standard minutes_of_meeting schema.
+
+        Parameters
+        ----------
+        raw_mom        : The Raw MoM dict ({"meeting": {"agendas": [...]}}).
+        recording_meta : Recording metadata (filename, created_at, duration,
+                         speakers_detected) for fallback population.
+
+        Returns
+        -------
+        dict — A final MoM dict with keys: title, date, duration,
+               planned_start_time, actual_start_time, participants,
+               introduction, points_discussed, action_items, conclusion.
+        """
+        agendas = raw_mom.get("meeting", {}).get("agendas", [])
+        if not agendas:
+            logger.warning("[QwenAI] generate_mom_from_raw_mom: no agendas in raw_mom — returning empty MoM")
+            return _empty_mom(recording_meta)
+
+        # ── Build human-readable text representation of the Raw MoM ──
+        lines: list[str] = []
+        for idx, agenda in enumerate(agendas, start=1):
+            topic = agenda.get("agenda_topic", "")
+            speaker = agenda.get("agenda_speaker") or "Not specified"
+            discussion = agenda.get("discussion", [])
+            lines.append(f"AGENDA {idx}: {topic}")
+            lines.append(f"  Speaker/Owner: {speaker}")
+            if not discussion:
+                lines.append("  (No discussion entries extracted)")
+            elif isinstance(discussion, str):
+                lines.append(f"  Raw Discussion: {discussion}")
+            else:
+                for entry in discussion:
+                    entry_type = str(entry.get("type", "discussion")).upper()
+                    entry_speaker = entry.get("speaker") or "Unknown"
+                    point = str(entry.get("point", "")).strip()
+                    lines.append(f"  [{entry_type}] {entry_speaker}: {point}")
+                    action = entry.get("action") or {}
+                    if action.get("description"):
+                        owner = action.get("owner") or "Unassigned"
+                        deadline = action.get("deadline") or "ASAP"
+                        status = action.get("status") or "open"
+                        lines.append(
+                            f"    → ACTION: {action['description']} | Owner: {owner} | "
+                            f"Deadline: {deadline} | Status: {status}"
+                        )
+                    for date_entry in (entry.get("dates") or []):
+                        lines.append(
+                            f"    → DATE ({date_entry.get('purpose', '')}): {date_entry.get('value', '')}"
+                        )
+            lines.append("")  # blank line between agendas
+
+        raw_mom_text = "\n".join(lines).strip()
+        if not raw_mom_text:
+            logger.warning("[QwenAI] generate_mom_from_raw_mom: raw_mom_text is empty — returning empty MoM")
+            return _empty_mom(recording_meta)
+
+        logger.info(
+            f"[QwenAI] generate_mom_from_raw_mom: {len(agendas)} agendas, "
+            f"{len(raw_mom_text)} chars of formatted input"
+        )
+
+        try:
+            raw_output = self._infer(
+                _get_prompt("raw_mom_to_mom").format(raw_mom_text=raw_mom_text),
+                max_new_tokens=3000,
+            )
+            data = self._parse_mom_json(raw_output, recording_meta)
+            if data and data.get("points_discussed"):
+                logger.info("[QwenAI] generate_mom_from_raw_mom: generation succeeded")
+                return data
+            logger.warning("[QwenAI] generate_mom_from_raw_mom: LLM returned empty points — returning empty MoM")
+            return _empty_mom(recording_meta)
+        except Exception as e:
+            logger.error(
+                f"[QwenAI] generate_mom_from_raw_mom failed: {e}", exc_info=True
+            )
+            return _empty_mom(recording_meta)
 
     def generate_mom(
         self,
@@ -2085,7 +2220,7 @@ class QwenProvider(AIProvider):
         # Try single-pass generation first
         try:
             raw = self._infer(
-                MOM_PROMPT.format(
+                _get_prompt("mom").format(
                     transcript=context,
                     agenda_section=agenda_section,
                     reference_section=reference_section,

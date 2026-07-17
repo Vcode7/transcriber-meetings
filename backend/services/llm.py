@@ -90,6 +90,17 @@ def generate_mom(
     )
 
 
+def generate_mom_from_raw_mom(raw_mom: dict, recording_meta: dict) -> dict:
+    """
+    Generate final MoM from structured Raw MoM JSON (offline, Qwen3 4B).
+
+    This is a COMPLETELY INDEPENDENT pipeline from generate_mom().
+    Input is the raw_mom dict produced by the Raw MoM Lab pipeline.
+    Output matches the standard minutes_of_meeting schema.
+    """
+    return get_provider().generate_mom_from_raw_mom(raw_mom, recording_meta)
+
+
 def generate_executive_summary(transcript: List[Dict], context: Optional[str] = None) -> dict:
     """Generate executive summary for PDF report (offline, Qwen3 4B)."""
     return get_provider().generate_executive_summary(transcript, context=context)
@@ -108,3 +119,9 @@ def generate_detailed_summary(transcript: List[Dict], context: Optional[str] = N
 def generate_speaker_summaries(transcript: List[Dict]) -> dict:
     """Generate per-speaker summaries, key points, and action items (offline, Qwen3 4B)."""
     return get_provider().generate_speaker_summaries(transcript)
+
+
+def generate_agenda_from_summary(summary: str) -> List[Dict]:
+    """Reconstruct structured agenda items from a transcription summary (offline, Qwen3 4B)."""
+    return get_provider().generate_agenda_from_summary(summary)
+

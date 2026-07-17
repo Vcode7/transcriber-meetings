@@ -361,6 +361,17 @@ async def connect_db():
             except Exception:
                 pass  # column already exists
 
+        # ── Prompt Templates — system-wide, shared by all users ─────────────────
+        # Stores custom overrides for every AI prompt used in the application.
+        # When a key is absent the backend falls back to the hardcoded default.
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS prompt_templates (
+                key        TEXT PRIMARY KEY,
+                template   TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+
 
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.

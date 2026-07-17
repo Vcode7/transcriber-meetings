@@ -52,15 +52,48 @@ from routers.analytics_router import router as analytics_router
 from routers.attachments_router import router as attachments_router
 from routers.global_context_router import router as global_context_router
 from routers.raw_mom_router import router as raw_mom_router
+from routers.dashboard_router import router as dashboard_router
+from routers.prompt_templates_router import router as prompt_templates_router
 
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
+
+import time
+from collections import deque
+from datetime import datetime
+
+STARTUP_TIME = time.time()
+
+class InMemoryLogHandler(logging.Handler):
+    def __init__(self, max_records=2000, log_file_path="voicesum.log"):
+        super().__init__()
+        self.records = deque(maxlen=max_records)
+        self.log_file_path = log_file_path
+        
+    def emit(self, record):
+        try:
+            log_entry = {
+                "timestamp": datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3],
+                "name": record.name,
+                "level": record.levelname,
+                "message": self.format(record),
+            }
+            self.records.append(log_entry)
+            
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"{log_entry['timestamp']} [{log_entry['level']}] {log_entry['name']} — {log_entry['message']}\n")
+        except Exception:
+            pass
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+in_memory_log_handler = InMemoryLogHandler()
+in_memory_log_handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(in_memory_log_handler)
 
 # ── Overlap model — loaded once at startup, may be None ──────
 _overlap_model: OverlapModel | None = None
@@ -266,6 +299,8 @@ app.include_router(analytics_router)
 app.include_router(attachments_router)
 app.include_router(global_context_router)
 app.include_router(raw_mom_router)
+app.include_router(dashboard_router)
+app.include_router(prompt_templates_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):

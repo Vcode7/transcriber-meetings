@@ -66,7 +66,7 @@ async def _get_recording_or_404(recording_id: str, user_id: str) -> dict:
             text("""
                 SELECT id, filename, created_at, duration, speakers_detected,
                        transcript, raw_mom, transcript_embedded, meeting_context_embedded,
-                       agenda_summary
+                       agenda_summary, context_summary
                 FROM recordings
                 WHERE id = :id AND user_id = :uid
             """),
@@ -261,7 +261,180 @@ async def generate_from_evidence_endpoint(
     return raw_mom
 
 
+# ── POST generate-final-mom (Raw MoM → Final MoM, independent pipeline) ──────
+
+@router.post("/{recording_id}/generate-final-mom")
+async def generate_final_mom_from_raw_mom_endpoint(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Generate a final MoM from the stored Raw MoM JSON.
+
+    This is a COMPLETELY INDEPENDENT pipeline from POST /mom/{id}/generate.
+    It does NOT use the transcript. It reads the raw_mom stored by the
+    Raw MoM Lab and converts it into a polished final Minutes of Meeting
+    using a dedicated AI prompt.
+
+    The result is saved to (or updates) the minutes_of_meeting table and
+    returned in the standard MoM schema — immediately viewable in the
+    MoM Editor.
+    """
+    user_id = current_user["id"]
+
+    # Fetch recording with all needed columns
+    async with get_db() as db:
+        r = await db.execute(
+            text("""
+                SELECT id, filename, created_at, duration, speakers_detected, raw_mom
+                FROM recordings
+                WHERE id = :id AND user_id = :uid
+            """),
+            {"id": recording_id, "uid": user_id},
+        )
+        rec = r.mappings().fetchone()
+
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    if not rec.get("raw_mom"):
+        raise HTTPException(
+            status_code=400,
+            detail="Raw MoM has not been generated for this recording. "
+                   "Use the Raw MoM Lab to generate it first.",
+        )
+
+    try:
+        raw_mom_data = json.loads(rec["raw_mom"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Raw MoM data is corrupted")
+
+    recording_meta = {
+        "filename": rec.get("filename", "Meeting Notes"),
+        "created_at": rec.get("created_at", ""),
+        "duration": rec.get("duration", 0),
+        "speakers_detected": from_json(rec.get("speakers_detected"), []),
+    }
+
+    import asyncio as _asyncio
+    _loop = _asyncio.get_running_loop()
+
+    try:
+        mom_data = await _loop.run_in_executor(
+            None,
+            lambda: _run_generate_mom_from_raw_mom(raw_mom_data, recording_meta),
+        )
+    except Exception as e:
+        logger.error(
+            f"[RawMoM] generate-final-mom failed for {recording_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Final MoM generation failed: {str(e)}",
+        )
+
+    # Upsert into minutes_of_meeting (same pattern as mom_router.py)
+    from database import to_json, dt_to_str
+    from datetime import datetime, timezone
+    import uuid as _uuid
+
+    now = datetime.now(timezone.utc)
+    mom_id = str(_uuid.uuid4())
+    initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now)}]
+
+    async with get_db() as db:
+        r2 = await db.execute(
+            text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        existing = r2.fetchone()
+
+        if existing:
+            await db.execute(
+                text("""
+                    UPDATE minutes_of_meeting SET
+                        title = :title, date = :date, duration = :duration,
+                        planned_start_time = :planned_start_time,
+                        actual_start_time = :actual_start_time,
+                        participants = :participants,
+                        introduction = :introduction,
+                        points_discussed = :points_discussed,
+                        action_items = :action_items,
+                        conclusion = :conclusion,
+                        versions = :versions, is_draft = 0, updated_at = :updated_at
+                    WHERE recording_id = :rid AND user_id = :uid
+                """),
+                {
+                    "title": mom_data.get("title", ""),
+                    "date": mom_data.get("date", ""),
+                    "duration": mom_data.get("duration", 0),
+                    "planned_start_time": mom_data.get("planned_start_time", ""),
+                    "actual_start_time": mom_data.get("actual_start_time", ""),
+                    "participants": to_json(mom_data.get("participants", [])),
+                    "introduction": mom_data.get("introduction", ""),
+                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
+                    "action_items": to_json(mom_data.get("action_items", [])),
+                    "conclusion": mom_data.get("conclusion", ""),
+                    "versions": to_json(initial_version),
+                    "updated_at": dt_to_str(now),
+                    "rid": recording_id,
+                    "uid": user_id,
+                },
+            )
+        else:
+            await db.execute(
+                text("""
+                    INSERT INTO minutes_of_meeting (
+                        id, recording_id, user_id, title, date, duration,
+                        planned_start_time, actual_start_time,
+                        participants, introduction, points_discussed,
+                        action_items, conclusion,
+                        versions, is_draft, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :rid, :uid, :title, :date, :duration,
+                        :planned_start_time, :actual_start_time,
+                        :participants, :introduction, :points_discussed,
+                        :action_items, :conclusion,
+                        :versions, 0, :created_at, :updated_at
+                    )
+                """),
+                {
+                    "id": mom_id,
+                    "rid": recording_id,
+                    "uid": user_id,
+                    "title": mom_data.get("title", ""),
+                    "date": mom_data.get("date", ""),
+                    "duration": mom_data.get("duration", 0),
+                    "planned_start_time": mom_data.get("planned_start_time", ""),
+                    "actual_start_time": mom_data.get("actual_start_time", ""),
+                    "participants": to_json(mom_data.get("participants", [])),
+                    "introduction": mom_data.get("introduction", ""),
+                    "points_discussed": to_json(mom_data.get("points_discussed", [])),
+                    "action_items": to_json(mom_data.get("action_items", [])),
+                    "conclusion": mom_data.get("conclusion", ""),
+                    "versions": to_json(initial_version),
+                    "created_at": dt_to_str(now),
+                    "updated_at": dt_to_str(now),
+                },
+            )
+        await db.commit()
+
+        # Fetch and return the saved record
+        r3 = await db.execute(
+            text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        saved = r3.mappings().fetchone()
+
+    # Re-use the mom_router helper to serialize the row
+    from routers.mom_router import _mom_row_to_dict
+    return _mom_row_to_dict(saved)
+
+
 # ── POST generate-full (legacy full pipeline) ─────────────────────────────────
+
 
 @router.post("/{recording_id}/generate-full")
 async def generate_raw_mom_endpoint(
@@ -488,17 +661,17 @@ def _run_retrieve_pipeline(
 ) -> dict:
     """Synchronous retrieval-only pipeline (no LLM)."""
     from services.rag_pipeline import (
-        embed_transcript, embed_meeting_context, parse_agenda_items,
+        embed_transcript, embed_meeting_context,
         retrieve_evidence_raw, _transcript_embedded, _meeting_context_embedded,
         _mark_transcript_embedded, _mark_meeting_context_embedded,
-        _load_parsed_agenda, _save_parsed_agenda,
+        get_or_create_agenda_items,
     )
     from services.text_embedding_service import unload_text_embedder
 
     try:
         # Step 1: Ensure transcript is embedded
         if transcript and (force_reembed or not _transcript_embedded(recording_id)):
-            count = embed_transcript(recording_id, transcript)
+            count = embed_transcript(recording_id, transcript, user_id)
             if count > 0:
                 _mark_transcript_embedded(recording_id, user_id)
 
@@ -508,17 +681,13 @@ def _run_retrieve_pipeline(
             if count > 0:
                 _mark_meeting_context_embedded(recording_id, user_id)
 
-        # Step 3: Parse agenda (from cache or LLM)
-        agenda_items = _load_parsed_agenda(recording_id)
-        if not agenda_items:
-            if agenda_text and agenda_text.strip():
-                from services.ai_provider import get_provider
-                provider = get_provider()
-                agenda_items = provider.parse_agenda_items(agenda_text)
-                if agenda_items:
-                    _save_parsed_agenda(recording_id, user_id, agenda_items)
-        if not agenda_items:
-            agenda_items = [{"topic": "General Meeting Discussion", "speaker": None}]
+        # Step 3: Get or generate agenda items (unified logic)
+        agenda_items = get_or_create_agenda_items(
+            recording_id=recording_id,
+            user_id=user_id,
+            transcript=transcript,
+            agenda_text=agenda_text,
+        )
 
         # Step 4: Retrieve raw chunks per agenda item
         agendas_with_chunks = []
@@ -610,6 +779,19 @@ def _run_generate_from_evidence(agendas: list) -> dict:
             QwenProvider.unload_model()
         except Exception as e:
             logger.warning(f"[RawMoM] Failed to unload LLM: {e}")
+
+
+def _run_generate_mom_from_raw_mom(raw_mom_data: dict, recording_meta: dict) -> dict:
+    """Synchronous wrapper for the Raw MoM → Final MoM conversion pipeline."""
+    from services.ai_provider import QwenProvider
+    from services.llm import generate_mom_from_raw_mom
+    try:
+        return generate_mom_from_raw_mom(raw_mom_data, recording_meta)
+    finally:
+        try:
+            QwenProvider.unload_model()
+        except Exception as e:
+            logger.warning(f"[RawMoM] Failed to unload LLM after generate-final-mom: {e}")
 
 
 def _build_docx(raw_mom_data: dict, recording_name: str) -> bytes:

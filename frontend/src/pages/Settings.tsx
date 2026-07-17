@@ -1,6 +1,10 @@
 import { useEffect, useState, useRef } from 'react'
-import { Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle, MessageSquare } from 'lucide-react'
+import {
+  Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
+  MessageSquare, RotateCcw, Upload, Download, FileText, Code
+} from 'lucide-react'
 import api from '../api/client'
+import { toast } from 'sonner'
 
 interface Profile {
   id: string
@@ -15,6 +19,18 @@ interface UserSettings {
   word_conf_low: number
   word_conf_mid: number
   min_segment_duration: number
+}
+
+interface PromptTemplate {
+  key: string
+  name: string
+  category: string
+  description: string
+  variables: string[]
+  template: string
+  default_template: string
+  is_modified: boolean
+  updated_at: string | null
 }
 
 export default function SettingsPage() {
@@ -34,16 +50,33 @@ export default function SettingsPage() {
   const [promptSaved, setPromptSaved] = useState(false)
   const promptDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Prompt Templates state
+  const [prompts, setPrompts] = useState<PromptTemplate[]>([])
+  const [loadingPrompts, setLoadingPrompts] = useState(true)
+  const [activeCategory, setActiveCategory] = useState('MoM')
+  const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
+  const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set())
+  const [importing, setImporting] = useState(false)
+  const [editingTemplates, setEditingTemplates] = useState<Record<string, string>>({})
+
   const loadData = async () => {
-    const [pRes, sRes, prRes] = await Promise.all([
-      api.get('/voice/profiles'),
-      api.get('/settings'),
-      api.get('/prompt/global'),
-    ])
-    setProfiles(pRes.data)
-    setSettings(sRes.data)
-    setGlobalPrompt(prRes.data?.prompt || '')
-    setLoadingProfiles(false)
+    try {
+      const [pRes, sRes, prRes, ptRes] = await Promise.all([
+        api.get('/voice/profiles'),
+        api.get('/settings'),
+        api.get('/prompt/global'),
+        api.get('/prompt-templates'),
+      ])
+      setProfiles(pRes.data)
+      setSettings(sRes.data)
+      setGlobalPrompt(prRes.data?.prompt || '')
+      setPrompts(ptRes.data)
+    } catch (err) {
+      toast.error('Failed to load settings data')
+    } finally {
+      setLoadingProfiles(false)
+      setLoadingPrompts(false)
+    }
   }
   useEffect(() => { loadData() }, [])
 
@@ -89,6 +122,103 @@ export default function SettingsPage() {
 
   const upd = (key: keyof UserSettings, val: number) =>
     setSettings((prev) => prev ? { ...prev, [key]: val } : prev)
+
+  const handleSavePromptTemplate = async (key: string, template: string) => {
+    setSavingKeys(prev => {
+      const next = new Set(prev)
+      next.add(key)
+      return next
+    })
+    try {
+      await api.put(`/prompt-templates/${key}`, { template })
+      setPrompts(prev => prev.map(p => p.key === key ? { ...p, template, is_modified: true } : p))
+      setSavedKeys(prev => {
+        const next = new Set(prev)
+        next.add(key)
+        return next
+      })
+      setTimeout(() => {
+        setSavedKeys(prev => {
+          const next = new Set(prev)
+          next.delete(key)
+          return next
+        })
+      }, 2000)
+      toast.success('Prompt template saved successfully')
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail ?? 'Failed to save prompt template')
+    } finally {
+      setSavingKeys(prev => {
+        const next = new Set(prev)
+        next.delete(key)
+        return next
+      })
+    }
+  }
+
+  const handleResetPromptTemplate = async (key: string) => {
+    if (!confirm('Are you sure you want to reset this prompt template to its default?')) return
+    try {
+      await api.delete(`/prompt-templates/${key}`)
+      const res = await api.get(`/prompt-templates/${key}`)
+      setPrompts(prev => prev.map(p => p.key === key ? {
+        ...p,
+        template: res.data.template,
+        is_modified: false,
+        updated_at: null
+      } : p))
+      toast.success('Prompt template reset to default')
+    } catch (err: any) {
+      toast.error('Failed to reset prompt template')
+    }
+  }
+
+  const handleResetAllPrompts = async () => {
+    if (!confirm('Are you sure you want to reset ALL prompt templates to their defaults? This cannot be undone.')) return
+    try {
+      await api.delete('/prompt-templates')
+      const ptRes = await api.get('/prompt-templates')
+      setPrompts(ptRes.data)
+      toast.success('All prompt templates reset to defaults')
+    } catch (err) {
+      toast.error('Failed to reset all prompt templates')
+    }
+  }
+
+  const handleExportPrompts = async () => {
+    try {
+      const res = await api.get('/prompt-templates/export')
+      const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `prompt_templates_export_${new Date().toISOString().split('T')[0]}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('Prompt templates exported successfully')
+    } catch (err) {
+      toast.error('Failed to export prompt templates')
+    }
+  }
+
+  const handleImportPrompts = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setImporting(true)
+    try {
+      const text = await file.text()
+      const data = JSON.parse(text)
+      const res = await api.post('/prompt-templates/import', data)
+      const ptRes = await api.get('/prompt-templates')
+      setPrompts(ptRes.data)
+      toast.success(res.data.message || 'Prompt templates imported successfully')
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail ?? 'Failed to import prompt templates. Check file format.')
+    } finally {
+      setImporting(false)
+      e.target.value = ''
+    }
+  }
 
   const PROFILE_COLORS = [
     'hsl(14, 90%, 56%)',
@@ -463,6 +593,241 @@ export default function SettingsPage() {
           </button>
         </section>
       )}
+
+      {/* ─── Prompt Templates Section ─── */}
+      <section className="animate-slide-up" style={{ marginTop: '2.5rem', marginBottom: '2.5rem', animationDelay: '0.25s', animationFillMode: 'both' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(260,70%,60% / .12)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(260,70%,60% / .25)',
+            }}>
+              <Code size={18} style={{ color: 'hsl(260,70%,60%)' }} />
+            </div>
+            <div>
+              <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', margin: 0 }}>
+                Prompt Templates
+              </h2>
+              <p style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', margin: 0, fontFamily: 'Inter, sans-serif' }}>
+                Customize and manage AI prompt templates used throughout the application.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={handleExportPrompts}
+              className="btn btn-secondary"
+              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', height: '36px' }}
+              title="Export all custom and default templates to a JSON file"
+            >
+              <Download size={14} /> Export
+            </button>
+            <label
+              className="btn btn-secondary"
+              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', height: '36px', margin: 0 }}
+              title="Import templates from a JSON export file"
+            >
+              <Upload size={14} /> {importing ? 'Importing…' : 'Import'}
+              <input type="file" accept=".json" onChange={handleImportPrompts} style={{ display: 'none' }} disabled={importing} />
+            </label>
+            <button
+              onClick={handleResetAllPrompts}
+              className="btn btn-secondary"
+              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'hsl(var(--destructive))', borderColor: 'hsl(var(--destructive) / .3)', height: '36px' }}
+              title="Reset all prompt templates to defaults"
+            >
+              <RotateCcw size={14} /> Reset All
+            </button>
+          </div>
+        </div>
+
+        {loadingPrompts ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '4rem', flexDirection: 'column', gap: '1rem' }}>
+            <Loader size={28} className="spin" style={{ color: 'hsl(var(--accent))' }} />
+            <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.9rem', color: 'hsl(var(--pencil))' }}>Loading prompt templates…</p>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {/* Category tabs */}
+            <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid hsl(var(--border) / .3)', paddingBottom: '.5rem', overflowX: 'auto' }}>
+              {['MoM', 'Raw MoM', 'Summaries', 'Analysis', 'Speaker'].map(cat => {
+                const isActive = activeCategory === cat
+                const count = prompts.filter(p => p.category === cat).length
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setActiveCategory(cat)}
+                    style={{
+                      padding: '.5rem 1rem', borderRadius: '8px', border: 'none',
+                      background: isActive ? 'hsl(var(--accent) / .12)' : 'transparent',
+                      color: isActive ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                      fontWeight: isActive ? 700 : 500, fontSize: '.85rem',
+                      cursor: 'pointer', transition: 'all .15s', fontFamily: 'Inter',
+                      display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {cat}
+                    <span style={{
+                      fontSize: '.72rem', fontWeight: isActive ? 700 : 500,
+                      background: isActive ? 'hsl(var(--accent) / .15)' : 'hsl(var(--muted))',
+                      color: isActive ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                      padding: '1px 6px', borderRadius: '999px',
+                    }}>
+                      {count}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Prompt Cards */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {prompts.filter(p => p.category === activeCategory).map(p => {
+                const currentVal = editingTemplates[p.key] !== undefined ? editingTemplates[p.key] : p.template
+                const hasChanges = currentVal !== p.template
+                const isModified = p.is_modified
+                const isSaving = savingKeys.has(p.key)
+                const isSaved = savedKeys.has(p.key)
+
+                return (
+                  <div key={p.key} style={{
+                    padding: '1.5rem', background: 'hsl(var(--card))',
+                    border: '1.5px solid hsl(var(--border) / .4)', borderRadius: '12px',
+                    display: 'flex', flexDirection: 'column', gap: '1rem',
+                    transition: 'box-shadow .2s',
+                  }}
+                  className="sketch-border"
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: '.98rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter' }}>
+                          {p.name}
+                        </h3>
+                        <p style={{ margin: '4px 0 0', fontSize: '.8rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, fontFamily: 'Inter, sans-serif' }}>
+                          {p.description}
+                        </p>
+                      </div>
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {isModified && (
+                          <span style={{
+                            fontSize: '.7rem', fontWeight: 600, color: 'hsl(220,80%,60%)',
+                            background: 'hsl(220,80%,60% / .1)', border: '1px solid hsl(220,80%,60% / .25)',
+                            padding: '1px 6px', borderRadius: '4px', fontFamily: 'Inter, sans-serif'
+                          }}>
+                            Customized
+                          </span>
+                        )}
+                        {hasChanges && (
+                          <span style={{
+                            fontSize: '.7rem', fontWeight: 600, color: 'hsl(35,90%,50%)',
+                            background: 'hsl(35,90%,50% / .1)', border: '1px solid hsl(35,90%,50% / .25)',
+                            padding: '1px 6px', borderRadius: '4px', fontFamily: 'Inter, sans-serif'
+                          }}>
+                            Unsaved Changes
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Fills variables badges */}
+                    {p.variables?.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.03em', fontFamily: 'Inter, sans-serif' }}>Required variables:</span>
+                        {p.variables.map(v => (
+                          <code key={v} style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.72rem',
+                            color: 'hsl(var(--accent))', background: 'hsl(var(--accent) / .08)',
+                            padding: '2px 6px', borderRadius: '4px', border: '1px solid hsl(var(--accent) / .15)'
+                          }}>
+                            {v}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Textarea */}
+                    <div style={{ position: 'relative' }}>
+                      <textarea
+                        value={currentVal}
+                        onChange={e => setEditingTemplates(prev => ({ ...prev, [p.key]: e.target.value }))}
+                        rows={10}
+                        style={{
+                          width: '100%', padding: '.75rem', borderRadius: '8px',
+                          background: 'hsl(var(--muted) / .3)', border: '1.5px solid hsl(var(--border) / .6)',
+                          color: 'hsl(var(--ink))', fontFamily: 'JetBrains Mono, monospace',
+                          fontSize: '.8rem', lineHeight: 1.6, resize: 'vertical',
+                          outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s',
+                        }}
+                        onFocus={e => (e.currentTarget.style.borderColor = 'hsl(var(--accent) / .5)')}
+                        onBlur={e => (e.currentTarget.style.borderColor = 'hsl(var(--border) / .6)')}
+                      />
+                    </div>
+
+                    {/* Card Actions */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+                        {currentVal.length} characters
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        {isModified && (
+                          <button
+                            onClick={() => {
+                              handleResetPromptTemplate(p.key)
+                              setEditingTemplates(prev => {
+                                const next = { ...prev }
+                                delete next[p.key]
+                                return next
+                              })
+                            }}
+                            className="btn btn-secondary"
+                            style={{ padding: '.4rem .85rem', fontSize: '.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+                          >
+                            <RotateCcw size={12} /> Reset to Default
+                          </button>
+                        )}
+                        {hasChanges && (
+                          <button
+                            onClick={() => {
+                              setEditingTemplates(prev => {
+                                const next = { ...prev }
+                                delete next[p.key]
+                                return next
+                              })
+                            }}
+                            className="btn btn-secondary"
+                            style={{ padding: '.4rem .85rem', fontSize: '.78rem' }}
+                          >
+                            Discard
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            handleSavePromptTemplate(p.key, currentVal)
+                            setEditingTemplates(prev => {
+                              const next = { ...prev }
+                              delete next[p.key]
+                              return next
+                            })
+                          }}
+                          disabled={!hasChanges || isSaving}
+                          className={`btn ${isSaved ? 'btn-success' : 'btn-primary'}`}
+                          style={{ padding: '.4rem 1.25rem', fontSize: '.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
+                        >
+                          {isSaving ? <Loader size={12} className="spin" /> : isSaved ? <CheckCircle size={12} /> : <Save size={12} />}
+                          {isSaved ? 'Saved!' : isSaving ? 'Saving…' : 'Save Changes'}
+                        </button>
+                      </div>
+                    </div>
+
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </section>
       </div>
     </div>
   )

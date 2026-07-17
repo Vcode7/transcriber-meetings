@@ -3,7 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   FlaskConical, ChevronDown, ChevronRight, Search, Loader,
   CheckCircle, X, Download, FileText, Clock, User,
-  Sparkles, FileDown, ArrowLeft, Trash2, Upload, Users, Calendar, Brain, AlertTriangle
+  Sparkles, FileDown, ArrowLeft, Trash2, Upload, Users, Calendar, Brain, AlertTriangle,
+  ExternalLink, ListChecks, ScrollText, Zap
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -113,6 +114,25 @@ interface RawMomResult {
   meeting: {
     agendas: AgendaMom[]
   }
+}
+
+interface FinalActionItem {
+  task: string
+  owner: string
+  deadline: string
+}
+
+interface FinalMomData {
+  title: string
+  date: string
+  duration: number
+  planned_start_time: string
+  actual_start_time: string
+  participants: string[]
+  introduction: string
+  points_discussed: string[]
+  action_items: FinalActionItem[]
+  conclusion: string
 }
 
 type ProcessState = 'idle' | 'processing' | 'done' | 'error'
@@ -330,6 +350,10 @@ export default function RawMomLab() {
   const [expandedAgendas, setExpandedAgendas] = useState<Set<number>>(new Set())
   const [expandedMomRows, setExpandedMomRows] = useState<Set<number>>(new Set())
 
+  // Final MoM from Raw MoM
+  const [generatingFinalMom, setGeneratingFinalMom] = useState(false)
+  const [finalMomResult, setFinalMomResult] = useState<FinalMomData | null>(null)
+
   // ── Fetch Recording & Attachments on Mount ─────────────────────────────
   const loadInitialData = useCallback(async () => {
     if (!id) return
@@ -485,6 +509,22 @@ export default function RawMomLab() {
     }
   }
 
+  // ── Generate Final MoM from Raw MoM ─────────────────────────────────────
+  const handleGenerateFinalMom = async () => {
+    if (!id || !momResult) { toast.error('Generate Raw MoM first'); return }
+    setGeneratingFinalMom(true)
+    setFinalMomResult(null)
+    try {
+      const res = await api.post(`/raw-mom/${id}/generate-final-mom`)
+      setFinalMomResult(res.data)
+      toast.success('Final MoM generated from Raw MoM')
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Final MoM generation failed')
+    } finally {
+      setGeneratingFinalMom(false)
+    }
+  }
+
   const downloadJson = () => {
     if (!momResult) return
     const blob = new Blob([JSON.stringify(momResult, null, 2)], { type: 'application/json' })
@@ -592,7 +632,7 @@ export default function RawMomLab() {
 
           {/* Agenda & Context Uploaders (identical to MomPage.tsx) */}
           <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border) / .5)', background: 'hsl(var(--card))', padding: '.9rem', display: 'flex', flexDirection: 'column', gap: '.75rem' }}>
-            
+
             <input ref={agendaInputRef} type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv" style={{ display: 'none' }}
               onChange={e => handleUploadFiles(e.target.files, 'agenda')} />
             <input ref={contextInputRef} type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv" style={{ display: 'none' }}
@@ -894,6 +934,150 @@ export default function RawMomLab() {
             </div>
           )}
 
+          {/* Generate Final MoM button — appears after Raw MoM is generated */}
+
+          {/* Inline Final MoM viewer */}
+          {finalMomResult && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '.65rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Generated Final MoM</div>
+                  <span style={{
+                    fontSize: '.7rem', fontWeight: 600, color: 'hsl(220,80%,60%)',
+                    background: 'hsl(220,80%,60% / .1)', border: '1px solid hsl(220,80%,60% / .3)',
+                    padding: '2px 8px', borderRadius: 999,
+                  }}>
+                    <CheckCircle size={10} style={{ display: 'inline', marginRight: 3 }} />Saved to MoM Editor
+                  </span>
+                </div>
+                <button
+                  onClick={() => navigate(`/mom/${id}`)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5, padding: '.38rem .75rem',
+                    borderRadius: 8, border: '1.5px solid hsl(220,80%,60% / .4)',
+                    background: 'hsl(220,80%,60% / .08)', color: 'hsl(220,80%,65%)',
+                    fontSize: '.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter',
+                  }}
+                >
+                  <ExternalLink size={12} /> View in MoM Editor
+                </button>
+              </div>
+
+              <div style={{
+                borderRadius: 14, border: '1.5px solid hsl(220,80%,60% / .3)',
+                background: 'hsl(var(--card))', overflow: 'hidden',
+              }}>
+                {/* MoM Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, hsl(220,80%,55% / .12), hsl(260,70%,60% / .08))',
+                  borderBottom: '1px solid hsl(220,80%,60% / .2)',
+                  padding: '1rem 1.25rem',
+                }}>
+                  <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter' }}>
+                    {finalMomResult.title || 'Minutes of Meeting'}
+                  </h2>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 20px', marginTop: '.45rem', fontSize: '.73rem', color: 'hsl(var(--pencil))' }}>
+                    {finalMomResult.date && (
+                      <span><Calendar size={11} style={{ display: 'inline', marginRight: 3 }} />{new Date(finalMomResult.date).toLocaleDateString()}</span>
+                    )}
+                    {finalMomResult.duration > 0 && (
+                      <span><Clock size={11} style={{ display: 'inline', marginRight: 3 }} />{fmtTime(finalMomResult.duration)}</span>
+                    )}
+                    {finalMomResult.participants?.length > 0 && (
+                      <span><Users size={11} style={{ display: 'inline', marginRight: 3 }} />{finalMomResult.participants.join(', ')}</span>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ padding: '1rem 1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+
+                  {/* Introduction */}
+                  {finalMomResult.introduction && (
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '.45rem' }}>
+                        <Brain size={13} style={{ color: 'hsl(220,80%,60%)' }} />
+                        <span style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Introduction</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: '.81rem', color: 'hsl(var(--ink))', fontFamily: 'Inter', lineHeight: 1.65 }}>
+                        {finalMomResult.introduction}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Points Discussed */}
+                  {finalMomResult.points_discussed?.length > 0 && (
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '.45rem' }}>
+                        <ScrollText size={13} style={{ color: 'hsl(140,70%,45%)' }} />
+                        <span style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Points Discussed</span>
+                        <span style={{ fontSize: '.68rem', color: 'hsl(140,70%,45%)', background: 'hsl(140,70%,45% / .1)', border: '1px solid hsl(140,70%,45% / .3)', padding: '1px 7px', borderRadius: 999 }}>
+                          {finalMomResult.points_discussed.length}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {finalMomResult.points_discussed.map((point, pi) => (
+                          <div key={pi} style={{ display: 'flex', gap: 8, fontSize: '.8rem', color: 'hsl(var(--ink))', fontFamily: 'Inter', lineHeight: 1.6 }}>
+                            <span style={{ flexShrink: 0, marginTop: '.15rem', width: 6, height: 6, borderRadius: '50%', background: 'hsl(140,70%,45%)', display: 'inline-block' }} />
+                            <span>{point}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Items */}
+                  {finalMomResult.action_items?.length > 0 && (
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '.55rem' }}>
+                        <ListChecks size={13} style={{ color: 'hsl(30,90%,55%)' }} />
+                        <span style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Action Items</span>
+                        <span style={{ fontSize: '.68rem', color: 'hsl(30,90%,55%)', background: 'hsl(30,90%,55% / .1)', border: '1px solid hsl(30,90%,55% / .3)', padding: '1px 7px', borderRadius: 999 }}>
+                          {finalMomResult.action_items.length}
+                        </span>
+                      </div>
+                      <div style={{ borderRadius: 10, border: '1px solid hsl(var(--border) / .4)', overflow: 'hidden' }}>
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: '2fr 1fr 1fr',
+                          background: 'hsl(var(--muted) / .5)', padding: '.4rem .75rem',
+                          borderBottom: '1px solid hsl(var(--border) / .3)',
+                        }}>
+                          {['Task', 'Owner', 'Deadline'].map(h => (
+                            <span key={h} style={{ fontSize: '.67rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>{h}</span>
+                          ))}
+                        </div>
+                        {finalMomResult.action_items.map((item, ai) => (
+                          <div key={ai} style={{
+                            display: 'grid', gridTemplateColumns: '2fr 1fr 1fr',
+                            padding: '.42rem .75rem', borderBottom: '1px solid hsl(var(--border) / .2)',
+                            fontSize: '.77rem', color: 'hsl(var(--ink))', fontFamily: 'Inter',
+                          }}>
+                            <span style={{ lineHeight: 1.5 }}>{item.task}</span>
+                            <span style={{ color: item.owner === 'Unassigned' ? 'hsl(var(--pencil))' : 'hsl(var(--ink))' }}>{item.owner}</span>
+                            <span style={{ color: 'hsl(var(--pencil))' }}>{item.deadline}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Conclusion */}
+                  {finalMomResult.conclusion && (
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '.45rem' }}>
+                        <CheckCircle size={13} style={{ color: 'hsl(var(--accent))' }} />
+                        <span style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Conclusion</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: '.81rem', color: 'hsl(var(--ink))', fontFamily: 'Inter', lineHeight: 1.65 }}>
+                        {finalMomResult.conclusion}
+                      </p>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Generated Raw MoM results table */}
           {momResult && (
             <div>
@@ -919,9 +1103,45 @@ export default function RawMomLab() {
                     <span key={h} style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>{h}</span>
                   ))}
                 </div>
-
-                {momResult.meeting.agendas.flatMap((agenda, ai) =>
-                  agenda.discussion.length === 0
+                
+                {
+                typeof momResult.meeting === "string" ? (
+                  <textarea
+                    readOnly
+                    value={momResult.meeting}
+                    style={{
+                      width: "100%",
+                      minHeight: "500px",
+                      fontFamily: "JetBrains Mono, monospace",
+                    }}
+                  />
+                ) : (
+                momResult.meeting.agendas.flatMap((agenda, ai) => {
+                  if (typeof agenda.discussion === 'string') {
+                    return [(
+                      <div key={`${ai}-raw`} style={{
+                        display: 'grid', gridTemplateColumns: '40px 1fr 2fr 180px',
+                        padding: '.6rem .9rem', gap: '.9rem', borderBottom: '1px solid hsl(var(--border) / .2)',
+                      }}>
+                        <span style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono' }}>{ai + 1}</span>
+                        <span style={{ fontSize: '.76rem', color: 'hsl(var(--ink))', fontWeight: 600 }}>{agenda.agenda_topic}</span>
+                        <div style={{ gridColumn: 'span 2', fontSize: '.76rem', color: 'hsl(var(--ink))', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <span style={{ fontWeight: 600, color: 'hsl(var(--danger) / .8)' }}>Raw LLM Extraction (JSON Parsing Failed):</span>
+                          <pre style={{
+                            margin: 0,
+                            padding: '.6rem',
+                            background: 'hsl(var(--muted) / .2)',
+                            borderRadius: '4px',
+                            whiteSpace: 'pre-wrap',
+                            fontFamily: 'JetBrains Mono, monospace',
+                            fontSize: '.72rem',
+                            border: '1px solid hsl(var(--border) / .3)'
+                          }}>{agenda.discussion}</pre>
+                        </div>
+                      </div>
+                    )]
+                  }
+                  return !agenda.discussion || agenda.discussion.length === 0
                     ? [(
                       <div key={`${ai}-empty`} style={{
                         display: 'grid', gridTemplateColumns: '40px 1fr 2fr 180px',
@@ -976,10 +1196,37 @@ export default function RawMomLab() {
                         </div>
                       )
                     })
+                })
                 )}
               </div>
             </div>
           )}
+          {momResult && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '.65rem' }}>
+                <div style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>Generate Final MoM</div>
+              </div>
+              <button
+                onClick={handleGenerateFinalMom}
+                disabled={generatingFinalMom}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  width: '100%', padding: '.8rem 1rem', borderRadius: 12, border: 'none',
+                  background: generatingFinalMom
+                    ? 'hsl(220,80%,58% / .5)'
+                    : 'linear-gradient(135deg, hsl(220,80%,55%), hsl(260,70%,60%))',
+                  color: '#fff', fontSize: '.88rem', fontWeight: 700,
+                  cursor: generatingFinalMom ? 'not-allowed' : 'pointer',
+                  fontFamily: 'Inter', boxShadow: generatingFinalMom ? 'none' : '0 4px 16px hsl(220,80%,55% / .3)',
+                  transition: 'all .2s',
+                }}
+              >
+                {generatingFinalMom ? <Loader size={16} className="spin" /> : <Zap size={16} />}
+                {generatingFinalMom ? 'Generating Final MoM…' : 'Generate MoM from Raw MoM'}
+              </button>
+            </div>
+          )}
+
         </div>
       </div>
     </div>

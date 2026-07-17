@@ -42,6 +42,7 @@ def _ocr_image_bytes(image_bytes: bytes) -> str:
         return ""
     try:
         from PIL import Image
+        import pytesseract
         img = Image.open(io.BytesIO(image_bytes))
         text = pytesseract.image_to_string(img)
         return text.strip()

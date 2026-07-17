@@ -210,3 +210,90 @@ async def save_global_prompt(db: AsyncSession, user_id: str, prompt: str) -> Non
             {"uid": user_id, "p": prompt, "now": now},
         )
     await db.commit()
+
+
+# ── Term Expansion Before Chunking and Embedding ──────────────────────────────
+
+import re
+from typing import Dict, Any, Set
+
+def make_pattern(shortcut: str) -> re.Pattern:
+    """
+    Build a case-insensitive regex pattern matching the shortcut as a word.
+    Uses positive/negative lookarounds to correctly enforce boundaries for both
+    alphanumeric and special character shortcuts (e.g. '.NET', 'C++').
+    """
+    escaped = re.escape(shortcut)
+    start_boundary = r'(?<!\w)' if shortcut[0].isalnum() or shortcut[0] == '_' else ''
+    end_boundary = r'(?!\w)' if shortcut[-1].isalnum() or shortcut[-1] == '_' else ''
+    return re.compile(start_boundary + escaped + end_boundary, re.IGNORECASE)
+
+
+def expand_terms_in_chunks(
+    chunks: List[Dict[str, Any]],
+    shortcuts: List[Dict[str, Any]]
+) -> List[str]:
+    """
+    Perform case-insensitive dictionary expansion on a list of chunks.
+    Keeps track of expanded shortcuts globally across all chunks to ensure
+    each shortcut is expanded at most once per document or transcript.
+    Does not expand if the full form is already present within a 120-character
+    window around the match (checking across adjacent chunks).
+    """
+    if not shortcuts or not chunks:
+        return [c.get("text", "") for c in chunks]
+
+    # Sort shortcuts by length descending to match longer strings first
+    sorted_shortcuts = sorted(shortcuts, key=lambda x: len(x.get("shortcut", "")), reverse=True)
+    expanded_shortcuts: Set[str] = set()
+    expanded_texts: List[str] = []
+
+    # Pre-build chunk texts list to facilitate sliding context window checks
+    chunk_texts = [c.get("text", "") for c in chunks]
+
+    for idx, chunk in enumerate(chunks):
+        text_content = chunk_texts[idx]
+        if not text_content:
+            expanded_texts.append("")
+            continue
+
+        # Build local context of previous, current, and next chunks
+        prev_text = chunk_texts[idx - 1] if idx > 0 else ""
+        next_text = chunk_texts[idx + 1] if idx < len(chunk_texts) - 1 else ""
+        local_context = f"{prev_text}\n{text_content}\n{next_text}"
+
+        for item in sorted_shortcuts:
+            shortcut = item.get("shortcut", "").strip()
+            full_form = item.get("full_form", "").strip()
+            if not shortcut or not full_form:
+                continue
+
+            if shortcut in expanded_shortcuts:
+                continue
+
+            pattern = make_pattern(shortcut)
+            match = pattern.search(text_content)
+            if not match:
+                continue
+
+            # Calculate match position in local_context to do the nearby check
+            match_start_in_context = (len(prev_text) + 1 if prev_text else 0) + match.start()
+            match_end_in_context = (len(prev_text) + 1 if prev_text else 0) + match.end()
+
+            window_start = max(0, match_start_in_context - 120)
+            window_end = min(len(local_context), match_end_in_context + 120)
+            context_window = local_context[window_start:window_end].lower()
+
+            if full_form.lower() in context_window:
+                continue
+
+            # Expand the first occurrence of the shortcut in the document/transcript
+            matched_word = match.group(0)
+            replacement = f"{matched_word} ({full_form})"
+            text_content = text_content[:match.start()] + replacement + text_content[match.end():]
+            expanded_shortcuts.add(shortcut)
+
+        expanded_texts.append(text_content)
+
+    return expanded_texts
+
