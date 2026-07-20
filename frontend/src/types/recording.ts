@@ -49,3 +49,38 @@ export interface RecordingDetail extends ProcessingResult {
   created_at: string
 }
 
+export interface Collection {
+  id: string
+  name: string
+  description: string
+  meeting_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface CollectionDetail extends Collection {
+  meetings: CollectionMeeting[]
+}
+
+export interface CollectionMeeting {
+  id: string
+  filename: string
+  duration: number
+  status: string
+  speakers_detected: string[]
+  has_summary: boolean
+  created_at: string
+  display_order: number
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  message_type: 'chat' | 'comparison' | 'topic_growth'
+  metadata: {
+    cited_meetings?: string[]
+    meeting_names?: Record<string, string>
+  }
+  created_at: string
+}

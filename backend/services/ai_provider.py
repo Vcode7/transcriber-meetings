@@ -590,18 +590,18 @@ The retrieved evidence may contain unrelated information because semantic retrie
 
 Your task is to extract ONLY the factual information that is directly relevant to the current agenda topic.
 
-- If the agenda is procedural (for example: Call to Order, Roll Call, Introductions, Approval of Minutes, Opening Remarks, Adjournment, etc.), extract only information related to that procedure. These agenda items often contain very little discussion, so it is acceptable to return only a few discussion entries.
-- If the agenda is a discussion, project, technical, financial, planning, or decision-making topic, extract all relevant facts, discussions, decisions, action items, risks, milestones, dependencies, technical details, dates, and responsibilities related to that topic.
-- Ignore evidence that clearly belongs to another agenda item, even if it appears in the retrieved context.
-
-Your task:
-- Extract ALL factual information relevant to the current agenda topic.
-- Preserve EVERY important fact: dates, deadlines, numbers, decisions, action items, responsibilities, technical values, risks, milestones, dependencies.
-- Do NOT compress, summarize, or omit relevant information.
-- Do NOT include facts unrelated to the current agenda topic.
-- Do NOT generate an introduction, conclusion, or meeting summary.
-- Do NOT hallucinate facts not present in the evidence.
-- Do NOT rewrite or polish the content.
+Core Extraction Requirements:
+1. FOCUS ON FACTUAL DETAILS: Capture every important factual detail. Do not summarize or synthesize.
+2. MAXIMUM OF 5 DISCUSSION ENTRIES: Return a maximum of 5 discussion entries for each agenda.
+3. INFORMATION-DENSE ENTRIES: Each discussion entry must be information-dense. Combine all related facts into comprehensive points instead of splitting them into multiple small points.
+4. DO NOT OMIT IMPORTANT FACTS: Do not omit important facts simply to reduce the number of points. Merge related discussions into comprehensive points while keeping all factual details.
+5. PRESERVE SPECIFIC DETAILS: Ensure every point preserves:
+   - Dates, deadlines, effective dates, approval dates, extensions, and timelines.
+   - Decisions, amendments, motions, votes, and outcomes.
+   - Financial values, quantities, locations, ordinance numbers, property details, and technical information.
+   - Questions raised, responses provided, concerns discussed, and follow-up requests.
+   - Action items with owner, deadline, and status when available.
+6. NO SUMMARIES: Do not generate introductions, conclusions, or summaries. Perform factual extraction only.
 
 Return ONLY a valid JSON object matching this exact schema:
 
@@ -612,7 +612,7 @@ Return ONLY a valid JSON object matching this exact schema:
     {{
       "type": "decision|action|discussion|clarification|risk|milestone|dependency",
       "speaker": "Speaker name or null if unknown",
-      "point": "Exact fact or statement extracted from evidence",
+      "point": "Comprehensive information-dense fact or statement preserving all details (dates, numbers, decisions, questions/answers, etc.)",
       "dates": [
         {{"value": "date/time value", "purpose": "what this date is for"}}
       ],
@@ -627,7 +627,8 @@ Return ONLY a valid JSON object matching this exact schema:
 }}
 
 Rules for discussion entries:
-- One entry per distinct fact, decision, action item, or risk.
+- Maximum of 5 entries total in the "discussion" array.
+- Group related facts together so each entry contains a complete, cohesive subset of discussion details.
 - "dates" array: include ONLY if the entry involves a specific date/deadline/milestone.
 - "action": fill ONLY if the entry is an action item; set all fields to null otherwise.
 - "type" must be one of: decision, action, discussion, clarification, risk, milestone, dependency.
@@ -642,17 +643,59 @@ RETRIEVED EVIDENCE:
 JSON:"""
 
 
+RAW_MOM_REPAIR_PROMPT = """\
+You are an expert JSON repair utility. Your ONLY job is to take an invalid/malformed JSON string from a meeting tool and output a valid JSON object matching the required schema.
+
+Schema requirements:
+- Return ONLY a valid JSON object with the expected keys.
+- Do NOT rewrite, change, or summarize any content.
+- Do NOT add or remove discussion points.
+- Do NOT hallucinate missing information.
+- Keep all fields, speaker attributions, text statements, dates, and action items exactly as they appear in the original text.
+- Only repair JSON syntax, escaping, commas, brackets, quotes, and schema formatting.
+
+Expected Schema:
+{{
+  "agenda_topic": "Topic text",
+  "agenda_speaker": "Presenter name or null",
+  "discussion": [
+    {{
+      "type": "decision|action|discussion|clarification|risk|milestone|dependency",
+      "speaker": "Speaker name or null",
+      "point": "Text statement",
+      "dates": [
+        {{"value": "date/time", "purpose": "purpose"}}
+      ],
+      "action": {{
+        "owner": "owner name or null",
+        "description": "description or null",
+        "deadline": "deadline or null",
+        "status": "open|in_progress|completed|null"
+      }}
+    }}
+  ]
+}}
+
+Return ONLY the repaired JSON.
+Do NOT include any explanations, markdown code blocks, or formatting fences.
+
+INVALID RAW JSON TO REPAIR:
+{raw_json}
+
+REPAIRED VALID JSON:"""
+
+
 # ══════════════════════════════════════════════════════════════
 # Raw MoM → Final MoM Conversion Prompt
 # Completely independent of the transcript-based MOM_PROMPT above.
 # ══════════════════════════════════════════════════════════════
 
 RAW_MOM_TO_MOM_PROMPT = """\
-You are an experienced Executive Assistant responsible for producing professional, comprehensive, and factual Minutes of Meeting (MoM).
+You are an experienced Executive Assistant responsible for producing professional, comprehensive, and detailed Minutes of Meeting (MoM).
 
 You will receive a structured Raw MoM — a collection of agenda items, each with extracted discussion entries including decisions, actions, risks, milestones, and clarifications.
 
-Your task is to convert this structured data into a polished, professional Final Minutes of Meeting.
+Your task is to convert this structured data into a polished, professional, and detailed Final Minutes of Meeting. Do not create brief summaries or one-line summaries. Generate complete, detailed documentation suitable for official records.
 
 Return ONLY a valid JSON object.
 Do NOT wrap the response in markdown.
@@ -665,13 +708,15 @@ The output MUST strictly follow this schema:
   "title": "Professional meeting title derived from the agenda topics",
   "introduction": "A professional executive overview describing the meeting purpose, major agenda topics covered, and overall context.",
   "points_discussed": [
-    "Each item describes one meaningful discussion topic, decision, or outcome. One entry per distinct discussion point."
+    "Comprehensive detailed description explaining what was discussed, why it was discussed, background context, decisions made, and relevant details."
   ],
   "action_items": [
     {{
-      "task": "Task description",
-      "owner": "Speaker name or Unassigned",
-      "deadline": "Deadline if present, otherwise ASAP or null"
+      "task": "Detailed task description",
+      "background": "Background/context explaining why the task is needed and what supporting information is relevant",
+      "owner": "Responsible owner or Unassigned",
+      "deadline": "Deadline if present, otherwise ASAP or null",
+      "status": "Current status or expected outcome/result"
     }}
   ],
   "conclusion": "Professional conclusion summarizing the key decisions made, agreements reached, actions assigned, risks noted, and next steps.",
@@ -690,16 +735,26 @@ INTRODUCTION
 - Do NOT copy raw entries verbatim. Synthesize them professionally.
 
 POINTS DISCUSSED
-- Convert every discussion entry (type: discussion, decision, clarification, risk, milestone, dependency) into a clean discussion point.
-- One point per distinct fact or decision.
-- Write each point as a complete, professional sentence.
+- Expand each agenda topic into comprehensive discussion points rather than concise summaries.
+- Each key point should clearly explain:
+  * WHAT was discussed.
+  * WHY it was discussed.
+  * Important background or supporting information.
+  * Decisions made.
+  * Relevant dates, numbers, ordinance references, financial values, locations, and technical details.
+- Write each point as a complete, highly informative, and detailed paragraph.
 - Preserve ALL technical terms, project names, system names, acronyms, and numeric values exactly.
 - Do NOT omit any meaningful discussion entry.
-- Do NOT hallucinate additional facts.
+- Do NOT hallucinate or invent new content not present in the Raw MoM data.
 
 ACTION ITEMS
-- Extract every entry with type "action" or that has a non-null action.description from the discussion entries.
-- For each: set task = action.description (or point if description is null), owner = action.owner (or "Unassigned"), deadline = action.deadline (or "ASAP") or date related to it.
+- Generate detailed action items from the raw discussion/action entries.
+- For each action item, include:
+  * task: Clear description of the task.
+  * background: Relevant background/context from the discussion.
+  * owner: Responsible owner (if known, else "Unassigned").
+  * deadline: Deadline or important dates (ASAP if unspecified).
+  * status: Current status or expected outcome.
 - Do NOT duplicate action items.
 - Do NOT invent owners or deadlines not present in the data.
 
@@ -710,7 +765,7 @@ CONCLUSION
 
 STRICT RULES
 - Never hallucinate facts not present in the Raw MoM input.
-- Preserve all technical terminology exactly and also extract all important dates.
+- Produce detailed, professional meeting minutes suitable for official documentation rather than concise summaries.
 - If a field has no relevant information: arrays → [], string fields → null.
 - The output must be valid JSON and nothing else.
 
@@ -829,6 +884,112 @@ TRANSCRIPT (only {speaker}'s lines):
 
 
 # ══════════════════════════════════════════════════════════════
+# Collection AI Chat Prompts — used by Collection AI feature
+# ══════════════════════════════════════════════════════════════
+
+COLLECTION_CHAT_PROMPT = """\
+You are an expert meeting analyst assistant. You have access to transcripts and notes from multiple meetings within a collection.
+
+Answer the user's question using ONLY the retrieved meeting context below. Be thorough, accurate, and professional.
+
+Rules:
+- Base your answer ONLY on the provided context. Do NOT make up information.
+- When referencing information from a specific meeting, cite it using the format: [Meeting: <meeting_name>]
+- If timestamps are available, include them: [Meeting: <meeting_name> @ MM:SS]
+- If the context does not contain enough information to answer, say so clearly.
+- Preserve all technical terms, project names, and acronyms exactly.
+- Format your response in clear Markdown with headers, bullets, and bold text where appropriate.
+
+{conversation_history}
+
+MEETING CONTEXT:
+{context}
+
+USER QUESTION: {question}
+
+Answer:"""
+
+COLLECTION_COMPARE_PROMPT = """\
+You are an expert meeting analyst. Compare the following two meetings and generate a structured comparison report.
+
+Generate a detailed comparison document in Markdown format with EXACTLY these sections:
+
+## Common Discussion Topics
+Topics that appear in both meetings.
+
+## New Topics Introduced
+Topics in Meeting B that were NOT discussed in Meeting A.
+
+## Progress & Improvements
+Areas where progress was made between Meeting A and Meeting B.
+
+## Decisions Changed
+Decisions that were revised or updated between the two meetings.
+
+## Pending Items Carried Over
+Action items or open issues from Meeting A that remain unresolved in Meeting B.
+
+## Recommendations & Next Steps
+Based on the trajectory across both meetings, what should happen next.
+
+Rules:
+- Be specific and reference actual discussion content from each meeting.
+- Cite which meeting each point comes from: [Meeting A: <name>] or [Meeting B: <name>]
+- Preserve all technical terms and project names exactly.
+- If a section has no relevant content, write "None identified." — do NOT omit the section.
+- Do NOT invent information not present in the meeting data.
+
+MEETING A: {meeting_a_name} ({meeting_a_date})
+{meeting_a_context}
+
+MEETING B: {meeting_b_name} ({meeting_b_date})
+{meeting_b_context}
+
+Comparison Report:"""
+
+COLLECTION_TOPIC_GROWTH_PROMPT = """\
+You are an expert meeting analyst. Track the evolution of a specific topic across multiple meetings in chronological order.
+
+Generate a chronological report in Markdown format with EXACTLY these sections:
+
+## Topic Overview
+Brief summary of the topic and its significance across the meetings.
+
+## Chronological Timeline
+
+For EACH meeting that discusses this topic, create a subsection:
+
+### <Meeting Name> (<Date>)
+- **What was discussed**: Key points about the topic in this meeting
+- **Decisions made**: Any decisions related to the topic
+- **Action items**: Tasks assigned related to the topic
+
+## Progress Over Time
+How the topic evolved from the earliest to the latest meeting.
+
+## Current Status
+The most recent state of this topic based on the latest meeting.
+
+## Open Issues & Next Steps
+Unresolved items and recommended next actions.
+
+Rules:
+- Only include meetings that actually discuss the topic.
+- Be specific — reference actual discussion content.
+- Cite meetings: [Meeting: <name>]
+- Preserve all technical terms and project names exactly.
+- If a section has no relevant content, write "None identified."
+- Do NOT invent information not present in the meeting data.
+
+TOPIC: {topic}
+
+MEETING DATA (chronological order):
+{meetings_context}
+
+Topic Growth Report:"""
+
+
+# ══════════════════════════════════════════════════════════════
 # Shared utilities
 # ══════════════════════════════════════════════════════════════
 
@@ -869,6 +1030,10 @@ def _get_prompt(key: str) -> str:
         "speaker_summary": SPEAKER_SUMMARY_PROMPT,
         "speaker_key_points": SPEAKER_KEY_POINTS_PROMPT,
         "speaker_action_items": SPEAKER_ACTION_ITEMS_PROMPT,
+        "raw_mom_repair": RAW_MOM_REPAIR_PROMPT,
+        "collection_chat": COLLECTION_CHAT_PROMPT,
+        "collection_compare": COLLECTION_COMPARE_PROMPT,
+        "collection_topic_growth": COLLECTION_TOPIC_GROWTH_PROMPT,
     }
     return _CONSTANT_MAP.get(key, "")
 
@@ -910,6 +1075,21 @@ def _clean_list(raw: str) -> List[str]:
         else:
             cleaned.append(line)
     return [c for c in cleaned if c and len(c) > 3]
+
+
+def strip_thinking(text: str) -> str:
+    """Remove <think>...</think> block or unclosed <think> tags from LLM output."""
+    if not text:
+        return ""
+    import re
+    # Remove complete <think>...</think> block
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Also handle unclosed <think> tag if it was truncated at the end
+    if "<think>" in cleaned:
+        parts = cleaned.split("<think>", 1)
+        cleaned = parts[0]
+    return cleaned.strip()
+
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -1028,6 +1208,9 @@ class QwenProvider(AIProvider):
     _pipeline = None
     _load_attempted = False
     _device = None
+    _cached_ollama_port = None
+    _cached_ollama_priority = None
+    _cached_ollama_model = None
 
     @classmethod
     def clean_up_other_models(cls):
@@ -1216,17 +1399,347 @@ class QwenProvider(AIProvider):
         log_gpu_memory("Post-unload QwenLLM")
 
 
-    def _infer(self, prompt: str, max_new_tokens: int = 512) -> str:
-        """Run inference with the loaded Qwen3 model."""
+    @classmethod
+    def _get_active_settings(cls):
+        """Retrieve all active settings (Ollama options + task limits) from DB/config."""
+        from config import settings
+        
+        cfg = {
+            "use_ollama": getattr(settings, "USE_OLLAMA", True),
+            "ollama_server_url": getattr(settings, "OLLAMA_SERVER_URL", "http://localhost:11434"),
+            "ollama_port": getattr(settings, "OLLAMA_PORT", 11434),
+            "ollama_model_priority": getattr(settings, "OLLAMA_MODEL_PRIORITY", "gemma,qwen,llama,deepseek,mistral"),
+            "ollama_num_ctx": 32768,
+            "ollama_temperature": 0.0,
+            "ollama_top_p": 0.9,
+            "ollama_top_k": 40,
+            "ollama_repeat_penalty": 1.15,
+            "ollama_seed": -1,
+            "ollama_stop": "",
+            "ollama_keep_alive": "5m",
+            "ollama_num_thread": 0,
+            "ollama_num_gpu": -1,
+            "max_tokens_mom": 1500,
+            "max_tokens_mom_merge": 3072,
+            "max_tokens_raw_mom_to_mom": 3000,
+            "max_tokens_raw_mom_extraction": 1024,
+            "max_tokens_raw_mom_repair": 1024,
+            "max_tokens_agenda_compress": 2000,
+            "max_tokens_reference_compress": 2000,
+            "max_tokens_agenda_from_summary": 1024,
+            "max_tokens_executive_summary": 700,
+            "max_tokens_short_summary": 120,
+            "max_tokens_detailed_summary": 3000,
+            "max_tokens_chunk_summary": 256,
+            "max_tokens_key_points": 1028,
+            "max_tokens_action_items": 1028,
+            "max_tokens_key_decisions": 1028,
+            "max_tokens_speaker_summary": 200,
+            "max_tokens_speaker_key_points": 350,
+            "max_tokens_speaker_action_items": 250,
+            "max_tokens_collection_chat": 1500,
+            "max_tokens_collection_compare": 1500,
+            "max_tokens_collection_topic_growth": 1500,
+            "max_tokens_vocab_extractor": 512,
+        }
+
+        import sqlite3
+        db_url = getattr(settings, "DATABASE_URL", "")
+        db_path = None
+        if db_url.startswith("sqlite+aiosqlite:///"):
+            db_path = db_url[len("sqlite+aiosqlite:///"):]
+        elif db_url.startswith("sqlite:///"):
+            db_path = db_url[len("sqlite:///"):]
+        elif db_url:
+            db_path = db_url
+
+        if db_path:
+            try:
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM user_settings ORDER BY id DESC LIMIT 1")
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    for k in cfg:
+                        try:
+                            val = row[k]
+                            if val is not None:
+                                if isinstance(cfg[k], bool):
+                                    cfg[k] = bool(val)
+                                else:
+                                    cfg[k] = val
+                        except Exception:
+                            pass
+            except Exception as db_err:
+                logger.debug(f"[QwenAI] Failed to read settings from SQLite DB: {db_err}")
+
+        # Normalize server_url
+        server_url = cfg["ollama_server_url"]
+        if not server_url.startswith("http://") and not server_url.startswith("https://"):
+            server_url = f"http://{server_url}"
+        cfg["ollama_server_url"] = server_url.rstrip("/")
+
+        return cfg
+
+    @classmethod
+    def _get_ollama_settings(cls):
+        """Retrieve active Ollama settings from config and SQLite database."""
+        cfg = cls._get_active_settings()
+        return cfg["use_ollama"], cfg["ollama_server_url"], cfg["ollama_port"], cfg["ollama_model_priority"]
+
+    @classmethod
+    def _detect_ollama_model(cls, server_url: str, priority_list_str: str) -> Optional[str]:
+        """Detect the best supported Ollama model currently running or installed."""
+        import urllib.request
+        import json
+
+        base_url = server_url.rstrip("/")
+        priorities = [p.strip().lower() for p in priority_list_str.split(",") if p.strip()]
+        if not priorities:
+            return None
+
+        def get_url_json(url):
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                    if resp.status == 200:
+                        return json.loads(resp.read().decode('utf-8'))
+            except Exception:
+                pass
+            return None
+
+        def find_match(models_list):
+            for priority in priorities:
+                for m in models_list:
+                    name = m.get("name", "").lower()
+                    model_id = m.get("model", "").lower()
+                    details = m.get("details", {})
+                    family = (details.get("family") or "").lower()
+                    families = [f.lower() for f in details.get("families") or [] if f]
+                    
+                    if (priority in name or 
+                        priority in model_id or 
+                        priority in family or 
+                        any(priority in fam for fam in families)):
+                        return m.get("name")
+            return None
+
+        # 1. Check running models first via /api/ps
+        ps_data = get_url_json(f"{base_url}/api/ps")
+        if ps_data and "models" in ps_data:
+            match = find_match(ps_data["models"])
+            if match:
+                logger.info(f"[QwenAI] Detected running Ollama model: {match} at {base_url}")
+                return match
+
+        # 2. Check installed models via /api/tags
+        tags_data = get_url_json(f"{base_url}/api/tags")
+        if tags_data and "models" in tags_data:
+            match = find_match(tags_data["models"])
+            if match:
+                logger.info(f"[QwenAI] Detected installed Ollama model: {match} at {base_url}")
+                return match
+
+        return None
+
+    @classmethod
+    def _call_ollama(cls, server_url: str, model: str, prompt: str, max_new_tokens: int) -> Optional[str]:
+        """Perform chat generation call using configured Ollama server endpoint."""
+        import urllib.request
+        import json
+
+        cfg = cls._get_active_settings()
+        
+        # Prepare options payload with validation defaults
+        options = {
+            "num_predict": max_new_tokens,
+            "temperature": float(cfg["ollama_temperature"]),
+            "num_ctx": int(cfg["ollama_num_ctx"]),
+            "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
+            "top_p": float(cfg["ollama_top_p"]),
+            "top_k": int(cfg["ollama_top_k"]),
+        }
+        if cfg["ollama_seed"] is not None and cfg["ollama_seed"] >= 0:
+            options["seed"] = int(cfg["ollama_seed"])
+        if cfg["ollama_stop"]:
+            stop_seqs = [s.strip() for s in cfg["ollama_stop"].split(",") if s.strip()]
+            if stop_seqs:
+                options["stop"] = stop_seqs
+        if cfg["ollama_num_thread"] is not None and cfg["ollama_num_thread"] > 0:
+            options["num_thread"] = int(cfg["ollama_num_thread"])
+        if cfg["ollama_num_gpu"] is not None and cfg["ollama_num_gpu"] >= 0:
+            options["num_gpu"] = int(cfg["ollama_num_gpu"])
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert enterprise meeting analyst. "
+                        "Follow instructions exactly. Preserve all technical terminology."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "options": options,
+            "stream": False
+        }
+        if cfg["ollama_keep_alive"] is not None:
+            try:
+                payload["keep_alive"] = int(cfg["ollama_keep_alive"])
+            except ValueError:
+                payload["keep_alive"] = str(cfg["ollama_keep_alive"])
+
+        base_url = server_url.rstrip("/")
+        url = f"{base_url}/api/chat"
+
+        # Log detailed request configuration
+        est_tokens = "N/A"
+        try:
+            if cls._tokenizer:
+                est_tokens = len(cls._tokenizer.encode(prompt))
+        except Exception:
+            pass
+
+        logger.info(
+            f"[QwenAI] Sending Ollama Request:\n"
+            f"  - Model: {model}\n"
+            f"  - Server URL: {server_url}\n"
+            f"  - Prompt Chars: {len(prompt)}\n"
+            f"  - Estimated Prompt Tokens: {est_tokens}\n"
+            f"  - Options: {options}\n"
+            f"  - Keep Alive: {payload.get('keep_alive', 'N/A')}"
+        )
+        logger.debug(f"[QwenAI] Complete Ollama Request JSON Payload: {json.dumps(payload)}")
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={"Content-Type": "application/json"}
+            )
+            # Timeout set to 90 seconds for long generation tasks
+            with urllib.request.urlopen(req, timeout=90.0) as response:
+                status_code = response.status
+                raw_body = response.read().decode('utf-8')
+                logger.debug(f"[QwenAI] Raw Ollama response: {raw_body}")
+
+                if status_code == 200:
+                    resp_data = json.loads(raw_body)
+                    content = resp_data.get("message", {}).get("content", "")
+                    
+                    total_dur = resp_data.get("total_duration")
+                    load_dur = resp_data.get("load_duration")
+                    prompt_eval_dur = resp_data.get("prompt_eval_duration")
+                    eval_dur = resp_data.get("eval_duration")
+                    
+                    total_dur_str = f"{total_dur / 1e9:.2f}s" if total_dur is not None else "N/A"
+                    load_dur_str = f"{load_dur / 1e9:.2f}s" if load_dur is not None else "N/A"
+                    prompt_eval_dur_str = f"{prompt_eval_dur / 1e9:.2f}s" if prompt_eval_dur is not None else "N/A"
+                    eval_dur_str = f"{eval_dur / 1e9:.2f}s" if eval_dur is not None else "N/A"
+
+                    done_reason = resp_data.get("done_reason", "")
+                    end_reason = "Unknown"
+                    if done_reason == "stop":
+                        end_reason = "EOS token or stop sequence reached"
+                    elif done_reason == "length":
+                        end_reason = "Reached maximum tokens (num_predict limit)"
+
+                    resp_tokens = "N/A"
+                    try:
+                        if cls._tokenizer:
+                            resp_tokens = len(cls._tokenizer.encode(content))
+                    except Exception:
+                        pass
+
+                    logger.info(
+                        f"[QwenAI] Received Ollama Response:\n"
+                        f"  - HTTP Status: {status_code}\n"
+                        f"  - Prompt Eval Tokens: {resp_data.get('prompt_eval_count', 'N/A')}\n"
+                        f"  - Output Tokens: {resp_data.get('eval_count', 'N/A')}\n"
+                        f"  - Total Duration: {total_dur_str}\n"
+                        f"  - Load Duration: {load_dur_str}\n"
+                        f"  - Prompt Eval Duration: {prompt_eval_dur_str}\n"
+                        f"  - Output Eval Duration: {eval_dur_str}\n"
+                        f"  - Done: {resp_data.get('done', 'N/A')}\n"
+                        f"  - Done Reason: {done_reason} ({end_reason})\n"
+                        f"  - Response Chars: {len(content)}\n"
+                        f"  - Response Tokens (est): {resp_tokens}"
+                    )
+                    return strip_thinking(content)
+                else:
+                    logger.error(f"[QwenAI] Ollama request failed with status {status_code}")
+        except Exception as e:
+            logger.error(f"[QwenAI] Ollama chat inference failed for model '{model}' at {base_url}: {e}")
+        return None
+
+    def _infer(self, prompt: str, max_new_tokens: int = 5120, task_key: Optional[str] = None) -> str:
+        """Run inference using Ollama offline fallback or local Qwen3 model."""
+        cls = self.__class__
+        
+        cfg = cls._get_active_settings()
+        use_ollama = cfg["use_ollama"]
+        server_url = cfg["ollama_server_url"]
+        port = cfg["ollama_port"]
+        priority_list = cfg["ollama_model_priority"]
+
+        # Override max_new_tokens dynamically from config if task_key matches
+        if task_key:
+            db_max_tokens = cfg.get(f"max_tokens_{task_key}")
+            if db_max_tokens is not None and db_max_tokens > 0:
+                max_new_tokens = db_max_tokens
+
+        if use_ollama:
+            # Invalidate cache if server_url, port, or priority list settings changed
+            if (getattr(cls, "_cached_ollama_server_url", None) != server_url or 
+                getattr(cls, "_cached_ollama_port", None) != port or 
+                getattr(cls, "_cached_ollama_priority", None) != priority_list):
+                cls._cached_ollama_model = None
+
+            # Check cached model
+            model_name = getattr(cls, "_cached_ollama_model", None)
+            if model_name is not None:
+                logger.info(f"[QwenAI] Attempting inference using cached Ollama model '{model_name}' at {server_url}...")
+                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens)
+                if res is not None:
+                    logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
+                    return res
+                else:
+                    logger.warning(f"[QwenAI] Inference failed using cached Ollama model '{model_name}'. Invalidating cache.")
+                    cls._cached_ollama_model = None
+
+            # Perform detection if cache is empty
+            logger.info(f"[QwenAI] Checking Ollama server at {server_url}...")
+            model_name = cls._detect_ollama_model(server_url, priority_list)
+            if model_name is not None:
+                cls._cached_ollama_server_url = server_url
+                cls._cached_ollama_port = port
+                cls._cached_ollama_priority = priority_list
+                cls._cached_ollama_model = model_name
+                
+                logger.info(f"[QwenAI] Ollama model detected. Running inference with '{model_name}' at {server_url}...")
+                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens)
+                if res is not None:
+                    logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
+                    return res
+                else:
+                    logger.warning(f"[QwenAI] Inference failed using newly detected Ollama model '{model_name}'. Invalidating cache.")
+                    cls._cached_ollama_model = None
+        else:
+            logger.info("[QwenAI] Ollama integration disabled. Skipping Ollama check entirely.")
+
+        # Fall back to local Qwen model inference
+        logger.info("[QwenAI] Ollama offline fallback unavailable/failed or disabled. Running inference via local Qwen model...")
         pipe = self._get_pipeline()
         if pipe is None:
-            logger.warning("[QwenAI] Model not available. Returning empty result.")
+            logger.warning("[QwenAI] Local Qwen model not available. Returning empty result.")
             return ""
 
         try:
             # Use chat template for Qwen3 Instruct
-            # enable_thinking=False suppresses the <think>...</think> preamble
-            # that Qwen3 emits in reasoning mode — keeps output clean for structured docs.
             messages = [
                 {
                     "role": "system",
@@ -1247,19 +1760,22 @@ class QwenProvider(AIProvider):
                 enable_thinking=False,  # Qwen3: disable chain-of-thought preamble
             )
 
+            rep_penalty = cfg.get("ollama_repeat_penalty", 1.15)
+            if rep_penalty is None or rep_penalty <= 0:
+                rep_penalty = 1.15
+
             output = pipe(
                 text,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,          # deterministic — enterprise doc quality
                 temperature=1.0,          # ignored when do_sample=False
-                repetition_penalty=1.15,  # reduce repetitive output
+                repetition_penalty=rep_penalty,  # reduce repetitive output
                 return_full_text=False,
             )
 
             # Extract generated text
             result = output[0]["generated_text"]
             if isinstance(result, list):
-                # Chat pipeline returns list of messages
                 for msg in reversed(result):
                     if msg.get("role") == "assistant":
                         return msg.get("content", "").strip()
@@ -1277,7 +1793,7 @@ class QwenProvider(AIProvider):
         Public generate method — used by vocab_extractor for AI-assisted extraction.
         Delegates to _infer.
         """
-        return self._infer(prompt, max_new_tokens=max_new_tokens)
+        return self._infer(prompt, max_new_tokens=max_new_tokens, task_key="vocab_extractor")
 
     def _hierarchical_summarize(self, text: str) -> str:
         """
@@ -1298,6 +1814,7 @@ class QwenProvider(AIProvider):
             summary = self._infer(
                 _get_prompt("chunk_summary").format(chunk=chunk),
                 max_new_tokens=256,
+                task_key="chunk_summary",
             )
             if summary:
                 chunk_summaries.append(summary)
@@ -1333,11 +1850,11 @@ class QwenProvider(AIProvider):
             chunks = _chunk_text(text, max_words=1200)
             summaries = []
             for chunk in chunks:
-                out = self._infer(_get_prompt("agenda_compress").format(text=chunk), max_new_tokens=2000)
+                out = self._infer(_get_prompt("agenda_compress").format(text=chunk), max_new_tokens=2000, task_key="agenda_compress")
                 if out:
                     summaries.append(out.strip())
             text = "\n".join(summaries)
-        result = self._infer(_get_prompt("agenda_compress").format(text=text), max_new_tokens=2000)
+        result = self._infer(_get_prompt("agenda_compress").format(text=text), max_new_tokens=2000, task_key="agenda_compress")
         return result.strip() if result else ""
 
     def compress_reference(self, text: str) -> str:
@@ -1349,11 +1866,11 @@ class QwenProvider(AIProvider):
             chunks = _chunk_text(text, max_words=1200)
             summaries = []
             for chunk in chunks:
-                out = self._infer(_get_prompt("reference_compress").format(text=chunk), max_new_tokens=2000)
+                out = self._infer(_get_prompt("reference_compress").format(text=chunk), max_new_tokens=2000, task_key="reference_compress")
                 if out:
                     summaries.append(out.strip())
             text = "\n".join(summaries)
-        result = self._infer(_get_prompt("reference_compress").format(text=text), max_new_tokens=2000)
+        result = self._infer(_get_prompt("reference_compress").format(text=text), max_new_tokens=2000, task_key="reference_compress")
         return result.strip() if result else ""
 
     # ── AIProvider interface ──────────────────────────────────
@@ -1374,6 +1891,7 @@ class QwenProvider(AIProvider):
         result = self._infer(
             _get_prompt("short_summary").format(transcript=context),
             max_new_tokens=120,
+            task_key="short_summary",
         )
         return result or "Unable to generate summary."
 
@@ -1389,6 +1907,7 @@ class QwenProvider(AIProvider):
         result = self._infer(
             _get_prompt("detailed_summary").format(transcript=context),
             max_new_tokens=3000,
+            task_key="detailed_summary",
         )
         return result or "Unable to generate detailed summary."
 
@@ -1404,6 +1923,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("key_points").format(transcript=context),
             max_new_tokens=1028,
+            task_key="key_points",
         )
         if not raw:
             return []
@@ -1437,6 +1957,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("action_items").format(transcript=context),
             max_new_tokens=1028,
+            task_key="action_items",
         )
         if not raw or "none identified" in raw.lower():
             return []
@@ -1464,6 +1985,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("key_decisions").format(transcript=context),
             max_new_tokens=1028,
+            task_key="key_decisions",
         )
         if not raw or "none identified" in raw.lower():
             return []
@@ -1487,6 +2009,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("executive_summary").format(transcript=context),
             max_new_tokens=700,
+            task_key="executive_summary",
         )
 
         if not raw:
@@ -1586,12 +2109,14 @@ class QwenProvider(AIProvider):
             summary_raw = self._infer(
                 _get_prompt("speaker_summary").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=200,
+                task_key="speaker_summary",
             )
 
             # Key points
             kp_raw = self._infer(
                 _get_prompt("speaker_key_points").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=350,
+                task_key="speaker_key_points",
             )
             key_points = []
             if kp_raw:
@@ -1614,6 +2139,7 @@ class QwenProvider(AIProvider):
             ai_raw = self._infer(
                 _get_prompt("speaker_action_items").format(speaker=speaker, transcript=speaker_text),
                 max_new_tokens=250,
+                task_key="speaker_action_items",
             )
             action_items = [] if (not ai_raw or "none identified" in ai_raw.lower()) else _clean_list(ai_raw)
 
@@ -1640,6 +2166,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("agenda_from_summary").format(summary=summary.strip()),
             max_new_tokens=1024,
+            task_key="agenda_from_summary",
         )
         if not raw:
             return []
@@ -1705,6 +2232,7 @@ class QwenProvider(AIProvider):
         raw = self._infer(
             _get_prompt("agenda_compress").format(text=agenda_text.strip()),
             max_new_tokens=1024,
+            task_key="agenda_compress",
         )
         if not raw:
             return []
@@ -1794,6 +2322,7 @@ class QwenProvider(AIProvider):
                 evidence=evidence.strip(),
             ),
             max_new_tokens=1024,
+            task_key="raw_mom_extraction",
         )
 
         if not raw:
@@ -1803,21 +2332,59 @@ class QwenProvider(AIProvider):
                 "discussion": [],
             }
 
-        # Strip markdown fences
+        # Clean markdown fences using a robust regex
         raw = raw.strip()
-        if raw.startswith("```json"):
-            raw = raw[7:]
-        elif raw.startswith("```"):
-            raw = raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw_clean = json_match.group(1).strip()
+        else:
+            raw_clean = raw
 
+        data = None
         try:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("Expected JSON object")
+            data = json.loads(raw_clean)
+        except json.JSONDecodeError:
+            # Fallback: extract the largest JSON object matching {...}
+            match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    data = None
 
+        # Automatic JSON Repair Fallback if initial parsing failed
+        if data is None:
+            logger.info(f"[QwenAI] Initial Raw MoM JSON parsing failed. Triggering automatic JSON repair fallback...")
+            try:
+                repaired_raw = self._infer(
+                    _get_prompt("raw_mom_repair").format(raw_json=raw),
+                    max_new_tokens=1024,
+                    task_key="raw_mom_repair",
+                )
+                if repaired_raw:
+                    repaired_raw = repaired_raw.strip()
+                    json_match_repaired = re.search(r'```(?:json)?\s*(.*?)\s*```', repaired_raw, re.DOTALL)
+                    if json_match_repaired:
+                        repaired_clean = json_match_repaired.group(1).strip()
+                    else:
+                        repaired_clean = repaired_raw
+
+                    try:
+                        data = json.loads(repaired_clean)
+                        logger.info("[QwenAI] Automatic JSON repair succeeded.")
+                    except json.JSONDecodeError:
+                        # Fallback for repaired: extract the largest JSON object matching {...}
+                        match_repaired = re.search(r'\{.*\}', repaired_clean, re.DOTALL)
+                        if match_repaired:
+                            try:
+                                data = json.loads(match_repaired.group())
+                                logger.info("[QwenAI] Automatic JSON repair (curly-brace fallback) succeeded.")
+                            except Exception:
+                                data = None
+            except Exception as repair_err:
+                logger.error(f"[QwenAI] Automatic JSON repair failed: {repair_err}", exc_info=True)
+
+        if isinstance(data, dict):
             discussion = data.get("discussion", [])
             if not isinstance(discussion, list):
                 discussion = []
@@ -1856,27 +2423,15 @@ class QwenProvider(AIProvider):
                 "discussion": normalized,
             }
 
-        except Exception as e:
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group())
-                    if isinstance(data, dict):
-                        return {
-                            "agenda_topic": agenda_topic,
-                            "agenda_speaker": agenda_speaker,
-                            "discussion": data.get("discussion", []),
-                        }
-                except Exception:
-                    pass
-            logger.warning(
-                f"[QwenAI] Raw MoM extraction failed for '{agenda_topic[:50]}': {e}"
-            )
-            return {
-                "agenda_topic": agenda_topic,
-                "agenda_speaker": agenda_speaker,
-                "discussion": raw,
-            }
+        # If all parsing failed, return raw string in discussion
+        logger.warning(
+            f"[QwenAI] Raw MoM extraction parsing failed for '{agenda_topic[:50]}' — raw output: {raw[:200]}"
+        )
+        return {
+            "agenda_topic": agenda_topic,
+            "agenda_speaker": agenda_speaker,
+            "discussion": raw,
+        }
 
     def _parse_mom_json(self, raw: str, recording_meta: dict) -> Optional[dict]:
 
@@ -1916,8 +2471,10 @@ class QwenProvider(AIProvider):
         action_items = [
             {
                 "task": (a.get("task", a) if isinstance(a, dict) else str(a)),
+                "background": (a.get("background") if (isinstance(a, dict) and "background" in a) else None),
                 "owner": (a.get("owner", "Unassigned") if isinstance(a, dict) else "Unassigned"),
                 "deadline": (a.get("deadline", "ASAP") if isinstance(a, dict) else "ASAP"),
+                "status": (a.get("status") if (isinstance(a, dict) and "status" in a) else None),
             }
             for a in ai_list
         ]
@@ -1998,6 +2555,7 @@ class QwenProvider(AIProvider):
                         reference_section=reference_section,
                     ),
                     max_new_tokens=1500,
+                    task_key="mom",
                 )
                 sec_data = self._parse_mom_json(raw_sec, recording_meta)
                 if sec_data:
@@ -2026,9 +2584,10 @@ class QwenProvider(AIProvider):
         partial_moms_json = json.dumps(partial_moms, indent=2)
         try:
             raw_merge = self._infer(
-                _get_prompt("mom_merge").format(partial_moms_json=partial_moms_json),
-                max_new_tokens=3072,
-            )
+                    _get_prompt("mom_merge").format(partial_moms_json=partial_moms_json),
+                    max_new_tokens=3072,
+                    task_key="mom_merge",
+                )
             final_data = self._parse_mom_json(raw_merge, recording_meta)
             if final_data:
                 logger.info("[QwenAI] MoM consolidation complete.")
@@ -2070,7 +2629,13 @@ class QwenProvider(AIProvider):
             "conclusion": " ".join(conclusions)[:1000],
         }
 
-    def generate_mom_from_raw_mom(self, raw_mom: dict, recording_meta: dict) -> dict:
+    def generate_mom_from_raw_mom(
+        self,
+        raw_mom: dict,
+        recording_meta: dict,
+        char_limit: Optional[int] = None,
+        use_max_tokens: Optional[bool] = False,
+    ) -> dict:
         """
         Generate a final MoM from a structured Raw MoM JSON.
 
@@ -2085,6 +2650,8 @@ class QwenProvider(AIProvider):
         raw_mom        : The Raw MoM dict ({"meeting": {"agendas": [...]}}).
         recording_meta : Recording metadata (filename, created_at, duration,
                          speakers_detected) for fallback population.
+        char_limit     : The max char limit (representing token budget).
+        use_max_tokens : If True, iteratively reduce discussion entries to fit char_limit.
 
         Returns
         -------
@@ -2092,51 +2659,75 @@ class QwenProvider(AIProvider):
                planned_start_time, actual_start_time, participants,
                introduction, points_discussed, action_items, conclusion.
         """
-        agendas = raw_mom.get("meeting", {}).get("agendas", [])
+        agendas = raw_mom.get("meeting", {}).get("agendas", []) or raw_mom.get("agendas", [])
         if not agendas:
             logger.warning("[QwenAI] generate_mom_from_raw_mom: no agendas in raw_mom — returning empty MoM")
             return _empty_mom(recording_meta)
 
-        # ── Build human-readable text representation of the Raw MoM ──
-        lines: list[str] = []
-        for idx, agenda in enumerate(agendas, start=1):
-            topic = agenda.get("agenda_topic", "")
-            speaker = agenda.get("agenda_speaker") or "Not specified"
-            discussion = agenda.get("discussion", [])
-            lines.append(f"AGENDA {idx}: {topic}")
-            lines.append(f"  Speaker/Owner: {speaker}")
-            if not discussion:
-                lines.append("  (No discussion entries extracted)")
-            elif isinstance(discussion, str):
-                lines.append(f"  Raw Discussion: {discussion}")
-            else:
-                for entry in discussion:
-                    entry_type = str(entry.get("type", "discussion")).upper()
-                    entry_speaker = entry.get("speaker") or "Unknown"
-                    point = str(entry.get("point", "")).strip()
-                    lines.append(f"  [{entry_type}] {entry_speaker}: {point}")
-                    action = entry.get("action") or {}
-                    if action.get("description"):
-                        owner = action.get("owner") or "Unassigned"
-                        deadline = action.get("deadline") or "ASAP"
-                        status = action.get("status") or "open"
-                        lines.append(
-                            f"    → ACTION: {action['description']} | Owner: {owner} | "
-                            f"Deadline: {deadline} | Status: {status}"
-                        )
-                    for date_entry in (entry.get("dates") or []):
-                        lines.append(
-                            f"    → DATE ({date_entry.get('purpose', '')}): {date_entry.get('value', '')}"
-                        )
-            lines.append("")  # blank line between agendas
+        import copy
+        agendas_copy = copy.deepcopy(agendas)
 
-        raw_mom_text = "\n".join(lines).strip()
+        def _format_raw_mom_to_text(items: list[dict]) -> str:
+            lines: list[str] = []
+            for idx, agenda in enumerate(items, start=1):
+                topic = agenda.get("agenda_topic", "")
+                speaker = agenda.get("agenda_speaker") or "Not specified"
+                discussion = agenda.get("discussion", [])
+                lines.append(f"AGENDA {idx}: {topic}")
+                lines.append(f"  Speaker/Owner: {speaker}")
+                if not discussion:
+                    lines.append("  (No discussion entries extracted)")
+                elif isinstance(discussion, str):
+                    lines.append(f"  Raw Discussion: {discussion}")
+                else:
+                    for entry in discussion:
+                        entry_type = str(entry.get("type", "discussion")).upper()
+                        entry_speaker = entry.get("speaker") or "Unknown"
+                        point = str(entry.get("point", "")).strip()
+                        lines.append(f"  [{entry_type}] {entry_speaker}: {point}")
+                        action = entry.get("action") or {}
+                        if action.get("description"):
+                            owner = action.get("owner") or "Unassigned"
+                            deadline = action.get("deadline") or "ASAP"
+                            status = action.get("status") or "open"
+                            lines.append(
+                                f"    → ACTION: {action['description']} | Owner: {owner} | "
+                                f"Deadline: {deadline} | Status: {status}"
+                            )
+                        for date_entry in (entry.get("dates") or []):
+                            lines.append(
+                                f"    → DATE ({date_entry.get('purpose', '')}): {date_entry.get('value', '')}"
+                            )
+                lines.append("")  # blank line between agendas
+            return "\n".join(lines).strip()
+
+        # Iterate and remove the last discussion point from each agenda until it fits the char limit (if enabled)
+        if use_max_tokens and char_limit is not None:
+            while True:
+                raw_mom_text = _format_raw_mom_to_text(agendas_copy)
+                if len(raw_mom_text) <= char_limit:
+                    break
+                removed_any = False
+                for agenda in agendas_copy:
+                    disc = agenda.get("discussion", [])
+                    if isinstance(disc, list) and len(disc) > 0:
+                        disc.pop()
+                        removed_any = True
+                if not removed_any:
+                    break  # no more entries to remove
+            logger.info(
+                f"[QwenAI] generate_mom_from_raw_mom: shrunk input to fit {char_limit} limit. "
+                f"Remaining chars: {len(raw_mom_text)}"
+            )
+        else:
+            raw_mom_text = _format_raw_mom_to_text(agendas_copy)
+
         if not raw_mom_text:
             logger.warning("[QwenAI] generate_mom_from_raw_mom: raw_mom_text is empty — returning empty MoM")
             return _empty_mom(recording_meta)
 
         logger.info(
-            f"[QwenAI] generate_mom_from_raw_mom: {len(agendas)} agendas, "
+            f"[QwenAI] generate_mom_from_raw_mom: {len(agendas_copy)} agendas, "
             f"{len(raw_mom_text)} chars of formatted input"
         )
 
@@ -2144,6 +2735,7 @@ class QwenProvider(AIProvider):
             raw_output = self._infer(
                 _get_prompt("raw_mom_to_mom").format(raw_mom_text=raw_mom_text),
                 max_new_tokens=3000,
+                task_key="raw_mom_to_mom",
             )
             data = self._parse_mom_json(raw_output, recording_meta)
             if data and data.get("points_discussed"):
@@ -2194,7 +2786,11 @@ class QwenProvider(AIProvider):
 
         # Calculate final context token length and decide generation strategy
         from config import settings
-        self._get_pipeline()  # Ensure model/tokenizer is loaded
+        
+        use_ollama, _, _, _ = self._get_ollama_settings()
+        if not use_ollama:
+            self._get_pipeline()  # Ensure model/tokenizer is loaded
+            
         if self._tokenizer:
             context_tokens = len(self._tokenizer.encode(context))
         else:
@@ -2226,6 +2822,7 @@ class QwenProvider(AIProvider):
                     reference_section=reference_section,
                 ),
                 max_new_tokens=1500,
+                task_key="mom",
             )
             data = self._parse_mom_json(raw, recording_meta)
             if data and data.get("points_discussed"):

@@ -34,6 +34,58 @@ def _get_dim() -> int:
     return _get_embedder().embedding_dim()
 
 
+def _get_rag_settings(user_id: Optional[str] = None):
+    """Retrieve RAG settings synchronously from SQLite or fall back to default settings."""
+    from config import settings
+    chunk_size = settings.RAG_CHUNK_SIZE
+    overlap = settings.RAG_CHUNK_OVERLAP
+    k_global = settings.RAG_RETRIEVAL_K_GLOBAL
+    k_meeting = settings.RAG_RETRIEVAL_K_MEETING
+    k_transcript = settings.RAG_RETRIEVAL_K_TRANSCRIPT
+    score_cutoff = settings.RAG_RELATIVE_SCORE_CUTOFF
+
+    import sqlite3
+    db_url = getattr(settings, "DATABASE_URL", "")
+    db_path = None
+    if db_url.startswith("sqlite+aiosqlite:///"):
+        db_path = db_url[len("sqlite+aiosqlite:///"):]
+    elif db_url.startswith("sqlite:///"):
+        db_path = db_url[len("sqlite:///"):]
+    elif db_url:
+        db_path = db_url
+
+    if db_path:
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            cursor = conn.cursor()
+            if user_id:
+                cursor.execute(
+                    "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
+                    "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
+                    "FROM user_settings WHERE user_id = ? LIMIT 1",
+                    (user_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
+                    "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
+                    "FROM user_settings ORDER BY id DESC LIMIT 1"
+                )
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                if row[0] is not None: chunk_size = int(row[0])
+                if row[1] is not None: overlap = int(row[1])
+                if row[2] is not None: k_global = int(row[2])
+                if row[3] is not None: k_meeting = int(row[3])
+                if row[4] is not None: k_transcript = int(row[4])
+                if row[5] is not None: score_cutoff = float(row[5])
+        except Exception as e:
+            logger.debug(f"[RAG] Failed to read RAG settings from SQLite DB synchronously: {e}")
+
+    return chunk_size, overlap, k_global, k_meeting, k_transcript, score_cutoff
+
+
 def _filter_by_relative_similarity(
     results: List[Dict],
     cutoff_value: float,
@@ -120,10 +172,11 @@ def embed_global_context_doc(
         logger.warning(f"[RAG] No text extracted from {filename} — skipping embed")
         return 0
 
+    chunk_size, overlap, _, _, _, _ = _get_rag_settings(user_id)
     chunks = chunk_text(
         text,
-        chunk_size=settings.RAG_CHUNK_SIZE,
-        overlap=settings.RAG_CHUNK_OVERLAP,
+        chunk_size=chunk_size,
+        overlap=overlap,
     )
     if not chunks:
         logger.warning(f"[RAG] No chunks produced for {filename}")
@@ -241,10 +294,11 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         if not text_content.strip():
             continue
 
+        chunk_size, overlap, _, _, _, _ = _get_rag_settings(user_id)
         chunks = chunk_text(
             text_content,
-            chunk_size=settings.RAG_CHUNK_SIZE,
-            overlap=settings.RAG_CHUNK_OVERLAP,
+            chunk_size=chunk_size,
+            overlap=overlap,
         )
         if not chunks:
             continue
@@ -307,10 +361,11 @@ def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) ->
 
     logger.info(f"[RAG] Embedding transcript for recording {recording_id}")
 
+    chunk_size, overlap, _, _, _, _ = _get_rag_settings(user_id)
     chunks = chunk_transcript(
         transcript,
-        chunk_size=settings.RAG_CHUNK_SIZE,
-        overlap=settings.RAG_CHUNK_OVERLAP,
+        chunk_size=chunk_size,
+        overlap=overlap,
     )
     if not chunks:
         logger.warning(f"[RAG] No transcript chunks for recording {recording_id}")
@@ -337,8 +392,20 @@ def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) ->
     from services.dictionary_service import expand_terms_in_chunks
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
 
+    # Strip speaker labels (e.g. "Speaker 1: ") from the text used to generate embeddings
+    cleaned_expanded_texts = []
+    for text in expanded_texts:
+        cleaned_lines = []
+        for line in text.split("\n"):
+            parts = line.split(": ", 1)
+            if len(parts) > 1:
+                cleaned_lines.append(parts[1])
+            else:
+                cleaned_lines.append(line)
+        cleaned_expanded_texts.append("\n".join(cleaned_lines))
+
     texts = [c["text"] for c in chunks]
-    embeddings = embedder.encode_batch(expanded_texts)
+    embeddings = embedder.encode_batch(cleaned_expanded_texts)
 
     metadatas = [
         {
@@ -416,9 +483,10 @@ def retrieve_evidence_for_agenda(
     from config import settings
     import numpy as np
 
-    k_g = k_global or settings.RAG_RETRIEVAL_K_GLOBAL
-    k_m = k_meeting or settings.RAG_RETRIEVAL_K_MEETING
-    k_t = k_transcript or settings.RAG_RETRIEVAL_K_TRANSCRIPT
+    _, _, db_k_g, db_k_m, db_k_t, db_score_cutoff = _get_rag_settings(user_id)
+    k_g = k_global or db_k_g
+    k_m = k_meeting or db_k_m
+    k_t = k_transcript or db_k_t
 
     # Detect procedural agenda items to optimize retrieval and prevent OOM/truncation
     topic_lower = agenda_topic.lower()
@@ -452,7 +520,7 @@ def retrieve_evidence_for_agenda(
         if t_store.exists() and k_t > 0:
             t_results = t_store.search(query_embedding, k=k_t)
             if t_results:
-                t_results = _filter_by_relative_similarity(t_results, settings.RAG_RELATIVE_SCORE_CUTOFF, "transcript")
+                t_results = _filter_by_relative_similarity(t_results, db_score_cutoff, "transcript")
                 section_lines = []
                 for res in t_results:
                     text = res.get("_text", "").strip()
@@ -473,7 +541,7 @@ def retrieve_evidence_for_agenda(
         if m_store.exists() and total_chars < char_limit and k_m > 0:
             m_results = m_store.search(query_embedding, k=k_m)
             if m_results:
-                m_results = _filter_by_relative_similarity(m_results, settings.RAG_RELATIVE_SCORE_CUTOFF, "meeting")
+                m_results = _filter_by_relative_similarity(m_results, db_score_cutoff, "meeting")
                 section_lines = []
                 for res in m_results:
                     text = res.get("_text", "").strip()
@@ -497,7 +565,7 @@ def retrieve_evidence_for_agenda(
         if g_store.exists() and total_chars < char_limit and k_g > 0:
             g_results = g_store.search(query_embedding, k=k_g)
             if g_results:
-                g_results = _filter_by_relative_similarity(g_results, settings.RAG_RELATIVE_SCORE_CUTOFF, "global_context")
+                g_results = _filter_by_relative_similarity(g_results, db_score_cutoff, "global_context")
                 section_lines = []
                 for res in g_results:
                     text = res.get("_text", "").strip()
@@ -527,6 +595,145 @@ def retrieve_evidence_for_agenda(
     return evidence
 
 
+def retrieve_transcript_hybrid(
+    recording_id: str,
+    query_embedding,
+    agenda_index: int,
+    total_agendas: int,
+    recording_duration: float,
+    k_transcript: int,
+    high_confidence_threshold: float = 0.70,
+    timeline_stride: float = 60.0,
+    relative_cutoff: float = 0.01,
+) -> List[Dict]:
+    """
+    Hybrid transcript retrieval combining timeline-window and full semantic search.
+
+    Strategy
+    --------
+    1. Timeline window: compute expected time slice for this agenda item by
+       dividing recording duration equally among all agenda items, then expand
+       the window by ``timeline_stride`` seconds on each side.  Every stored
+       transcript chunk whose [start, end] overlaps the window is included.
+    2. Full semantic search: run a FAISS search across all transcript chunks
+       with the agenda topic as the query.
+    3. Merge: deduplicate by chunk_index; unconditionally include any semantic
+       result with score >= high_confidence_threshold regardless of timeline;
+       sort final set by start time.
+
+    Parameters
+    ----------
+    recording_id             : Recording whose transcript store to query.
+    query_embedding          : Pre-computed embedding for the agenda topic.
+    agenda_index             : 0-based position of this agenda item.
+    total_agendas            : Total number of agenda items.
+    recording_duration       : Total duration in seconds (0 → skip timeline).
+    k_transcript             : Max number of semantic FAISS results to fetch.
+    high_confidence_threshold: Score >= this always included even outside window.
+    timeline_stride          : Seconds to pad on each side of the timeline window.
+    relative_cutoff          : Relative similarity cutoff for semantic results.
+
+    Returns
+    -------
+    List of chunk dicts with full metadata, sorted by start time.
+    """
+    from services.vector_store import get_transcript_store
+
+    embedder = _get_embedder()
+    dim = embedder.embedding_dim()
+
+    try:
+        t_store = get_transcript_store(recording_id, dim)
+        if not t_store.exists():
+            return []
+    except Exception as e:
+        logger.warning(f"[RAG] Could not open transcript store: {e}")
+        return []
+
+    # ── 1. Timeline window chunks (metadata scan) ──────────────────────────────
+    timeline_chunks_by_index: dict = {}
+    if recording_duration > 0 and total_agendas > 0:
+        slot_size = recording_duration / total_agendas
+        win_start = max(0.0, agenda_index * slot_size - timeline_stride)
+        win_end = min(recording_duration, (agenda_index + 1) * slot_size + timeline_stride)
+        logger.debug(
+            f"[RAG] Timeline window for agenda {agenda_index}: "
+            f"{win_start:.1f}s – {win_end:.1f}s"
+        )
+        # Walk all metadata to find overlapping chunks (O(n), fast for typical transcripts)
+        try:
+            t_store.load_or_create()
+            for meta_entry in t_store._meta:
+                chunk_start = meta_entry.get("start", 0.0) or 0.0
+                chunk_end = meta_entry.get("end", 0.0) or 0.0
+                # Overlap condition: chunk starts before window ends AND ends after window starts
+                if chunk_start <= win_end and chunk_end >= win_start:
+                    cidx = meta_entry.get("chunk_index", -1)
+                    if cidx >= 0:
+                        timeline_chunks_by_index[cidx] = {
+                            "chunk_index": cidx,
+                            "start": chunk_start,
+                            "end": chunk_end,
+                            "text": meta_entry.get("_text", ""),
+                            "speakers": meta_entry.get("speakers", []),
+                            "score": 0.0,  # will be updated if also in semantic results
+                            "_from_timeline": True,
+                        }
+        except Exception as e:
+            logger.warning(f"[RAG] Timeline scan failed: {e}")
+
+    # ── 2. Semantic FAISS search ──────────────────────────────────────────────
+    semantic_by_index: dict = {}
+    if k_transcript > 0:
+        try:
+            # Fetch more than k to give the relative-cutoff filter room
+            raw_results = t_store.search(query_embedding, k=min(k_transcript * 3, 50))
+            if raw_results:
+                raw_results = _filter_by_relative_similarity(raw_results, relative_cutoff, "transcript")
+                for res in raw_results:
+                    cidx = res.get("chunk_index", -1)
+                    if cidx < 0:
+                        continue
+                    semantic_by_index[cidx] = {
+                        "chunk_index": cidx,
+                        "start": res.get("start", 0.0),
+                        "end": res.get("end", 0.0),
+                        "text": res.get("_text", ""),
+                        "speakers": res.get("speakers", []),
+                        "score": float(res.get("score", 0.0)),
+                        "_from_semantic": True,
+                    }
+        except Exception as e:
+            logger.warning(f"[RAG] Semantic transcript search failed: {e}")
+
+    # ── 3. Filter out timeline duplicates and construct additional transcript evidence ──
+    final_semantic: dict = {}
+    semantic_only_count = 0
+
+    for cidx, chunk in sorted(semantic_by_index.items()):
+        # Exclude chunks already present in the timeline transcript
+        if cidx in timeline_chunks_by_index:
+            continue
+
+        # Include if it passes the high-confidence threshold or if within k limit
+        if chunk.get("score", 0.0) >= high_confidence_threshold:
+            final_semantic[cidx] = chunk
+        elif semantic_only_count < k_transcript:
+            final_semantic[cidx] = chunk
+            semantic_only_count += 1
+
+    # Sort chronologically by start time
+    result = sorted(final_semantic.values(), key=lambda c: c.get("start", 0.0))
+
+    logger.info(
+        f"[RAG] Hybrid transcript retrieval for agenda {agenda_index}: "
+        f"Timeline count: {len(timeline_chunks_by_index)}, Semantic count: {len(semantic_by_index)} "
+        f"→ {len(result)} additional non-duplicate chunks"
+    )
+    return result
+
+
+
 def retrieve_evidence_raw(
     agenda_topic: str,
     recording_id: str,
@@ -536,6 +743,12 @@ def retrieve_evidence_raw(
     k_transcript: int,
     relative_cutoff: float,
     char_limit: int = 15000,
+    # ── Hybrid transcript retrieval params ────────────────────────────────────
+    agenda_index: int = 0,
+    total_agendas: int = 1,
+    recording_duration: float = 0.0,
+    timeline_stride: float = 60.0,
+    high_confidence_threshold: float = 0.70,
 ) -> Dict:
     """
     Retrieve evidence for one agenda topic and return raw chunk dicts with
@@ -543,24 +756,22 @@ def retrieve_evidence_raw(
     assemble chunks into a formatted string — callers receive the raw results
     so they can inspect, filter, or reorder them before assembly.
 
+    Transcript retrieval uses a **hybrid strategy** (timeline window + semantic).
+    Meeting and global context retrieval remain purely semantic.
+
     Returns
     -------
     {
-        "transcript": [{"chunk_id": str, "source": "transcript", "score": float,
-                         "text": str, "speakers": list, "start": float,
-                         "end": float, "word_count": int, "char_count": int}, ...],
-        "meeting":    [{"chunk_id": str, "source": "meeting", "score": float,
-                         "text": str, "filename": str, "page": int|None,
-                         "char_count": int}, ...],
-        "global":     [{"chunk_id": str, "source": "global", "score": float,
-                         "text": str, "filename": str, "char_count": int}, ...],
+        "transcript": [{chunk_id, source, score, text, speakers, start, end,
+                         word_count, char_count, from_timeline, from_semantic}, ...],
+        "meeting":    [{chunk_id, source, score, text, filename, page, char_count}, ...],
+        "global":     [{chunk_id, source, score, text, filename, char_count}, ...],
         "is_procedural": bool,
     }
     """
     from services.vector_store import (
         get_global_context_store,
         get_meeting_context_store,
-        get_transcript_store,
     )
     import numpy as np
 
@@ -576,6 +787,8 @@ def retrieve_evidence_raw(
         k_global = 0
         k_meeting = 0
         k_transcript = min(k_transcript, 3)
+        # Disable timeline for procedural items — limit to pure semantic
+        recording_duration = 0.0
         logger.info(
             f"[RAG] Procedural topic detected '{agenda_topic}': "
             f"disabled global/meeting RAG, capped transcript RAG at {k_transcript}"
@@ -592,32 +805,37 @@ def retrieve_evidence_raw(
     meeting_chunks = []
     global_chunks = []
 
-    # ── Transcript ────────────────────────────────────────────────────────────
+    # ── Transcript (hybrid: timeline + semantic) ──────────────────────────────
     if k_transcript > 0:
-        try:
-            t_store = get_transcript_store(recording_id, dim)
-            if t_store.exists():
-                t_results = t_store.search(query_embedding, k=k_transcript)
-                if t_results:
-                    t_results = _filter_by_relative_similarity(t_results, relative_cutoff, "transcript")
-                    for i, res in enumerate(t_results):
-                        text = res.get("_text", "").strip()
-                        if not text:
-                            continue
-                        transcript_chunks.append({
-                            "chunk_id": _make_chunk_id("transcript", i),
-                            "source": "transcript",
-                            "score": round(res.get("score", 0.0), 4),
-                            "text": text,
-                            "speakers": res.get("speakers", []),
-                            "start": res.get("start", 0.0),
-                            "end": res.get("end", 0.0),
-                            "chunk_index": res.get("chunk_index", i),
-                            "word_count": len(text.split()),
-                            "char_count": len(text),
-                        })
-        except Exception as e:
-            logger.warning(f"[RAG] Transcript raw retrieval failed: {e}")
+        hybrid_results = retrieve_transcript_hybrid(
+            recording_id=recording_id,
+            query_embedding=query_embedding,
+            agenda_index=agenda_index,
+            total_agendas=total_agendas,
+            recording_duration=recording_duration,
+            k_transcript=k_transcript,
+            high_confidence_threshold=high_confidence_threshold,
+            timeline_stride=timeline_stride,
+            relative_cutoff=relative_cutoff,
+        )
+        for i, res in enumerate(hybrid_results):
+            text = res.get("text", "").strip()
+            if not text:
+                continue
+            transcript_chunks.append({
+                "chunk_id": _make_chunk_id("transcript", i),
+                "source": "transcript",
+                "score": round(res.get("score", 0.0), 4),
+                "text": text,
+                "speakers": res.get("speakers", []),
+                "start": res.get("start", 0.0),
+                "end": res.get("end", 0.0),
+                "chunk_index": res.get("chunk_index", i),
+                "word_count": len(text.split()),
+                "char_count": len(text),
+                "from_timeline": res.get("_from_timeline", False),
+                "from_semantic": res.get("_from_semantic", False),
+            })
 
     # ── Meeting Context ───────────────────────────────────────────────────────
     if k_meeting > 0:
@@ -679,6 +897,8 @@ def retrieve_evidence_raw(
         "global": global_chunks,
         "is_procedural": is_procedural,
     }
+
+
 
 
 # ── 6. Full Raw MoM Generation ────────────────────────────────────────────────

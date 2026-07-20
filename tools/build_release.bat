@@ -41,7 +41,7 @@ if exist "!ISCC_PATH!" (
         echo ERROR: Inno Setup compilation failed.
         exit /b 1
     )
-    echo [OK] Setup_AIMeetingTranscriber_v3.3.0.exe created in installer\dist\
+    echo [OK] Setup_AIMeetingTranscriber_v3.3.2.exe created in installer\dist\
 ) else (
     echo WARNING: Inno Setup compiler not found at: !ISCC_PATH!
     echo          Skipping installer compilation.
@@ -50,9 +50,9 @@ echo.
 
 REM ── 3. Create Incremental Update Patch ───────────────────────
 echo [3/3] Creating Incremental Update Patch...
-set PATCH_OUT_ZIP=%PROJECT_ROOT%\patch_v3.2.1_to_v3.3.0.zip
+set PATCH_OUT_ZIP=%PROJECT_ROOT%\patch_v3.2.1_to_v3.3.2.zip
 echo Creating patch from "%OLD_APP_DIR%" to "%NEW_APP_DIR%"...
-"%PROJECT_ROOT%\backend\venv\Scripts\python.exe" "%TOOLS_DIR%\create_patch.py" --old "%OLD_APP_DIR%" --new "%NEW_APP_DIR%" --out "%PATCH_OUT_ZIP%" --version-from 3.2.1 --version-to 3.3.0
+"%PROJECT_ROOT%\backend\venv\Scripts\python.exe" "%TOOLS_DIR%\create_patch.py" --old "%OLD_APP_DIR%" --new "%NEW_APP_DIR%" --out "%PATCH_OUT_ZIP%" --version-from 3.2.1 --version-to 3.3.2
 
 if !ERRORLEVEL! neq 0 (
     echo ERROR: Patch creation failed.
@@ -68,7 +68,7 @@ echo.
 
 echo ============================================================
 echo  RELEASE PACKAGING COMPLETE
-echo  1. Setup Installer : installer\dist\Setup_AIMeetingTranscriber_v3.3.0.exe
+echo  1. Setup Installer : installer\dist\Setup_AIMeetingTranscriber_v3.3.2.exe
 echo  2. Update Patch    : %PATCH_OUT_ZIP%
 echo ============================================================
 pause

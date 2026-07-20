@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bot, Sparkles, FileText, ListChecks, ChevronRight, ChevronLeft,
   Copy, Check, Loader, Users, ClipboardList, Zap, CheckCircle,
-  Trash2, Upload, Brain, ChevronDown, ChevronUp, AlertTriangle
+  Trash2, Upload, Brain, ChevronDown, ChevronUp, AlertTriangle, FlaskConical
 } from 'lucide-react'
 import api from '../api/client'
 import { renderMarkdown } from '../lib/markdown'
@@ -280,7 +280,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
   const handlePdf = async () => {
     setPdfStatus('loading')
     try {
-      const res = await api.post(`/mom/${recordingId}/pdf`, {}, { responseType: 'blob' })
+      const res = await api.post(`/mom/${recordingId}/pdf`, {} , { responseType: 'blob' })
       const blob = new Blob([res.data], { type: 'application/pdf' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -866,17 +866,36 @@ export default function AIChatPanel({
   onGenerateInsights,
   isGeneratingInsights = false,
 }: Props) {
+  const navigate = useNavigate()
   const [summaryTab, setSummaryTab] = useState<'short' | 'detailed' | 'speaker'>('short')
   const [activeView, setActiveView] = useState<'mom' | 'insights'>('mom')
+  const [localMomData, setLocalMomData] = useState<MomData | null>(null)
+  const [isGeneratingLocalMom, setIsGeneratingLocalMom] = useState(false)
+  const [localMomError, setLocalMomError] = useState<string | null>(null)
+
+  const handleGenerateMomPanel = async () => {
+    if (!recordingId || isGeneratingLocalMom) return
+    setIsGeneratingLocalMom(true)
+    setLocalMomError(null)
+    try {
+      const res = await api.post(`/mom/${recordingId}/generate`)
+      setLocalMomData(res.data)
+    } catch (err: unknown) {
+      setLocalMomError(getApiErrorDetail(err, 'Failed to generate MoM.'))
+    } finally {
+      setIsGeneratingLocalMom(false)
+    }
+  }
 
   const resolvedShort = shortSummary || summary || ''
   const resolvedDetailed = detailedSummary || ''
 
-  const hasMom = momData && (momData.title || momData.introduction || (momData.points_discussed && momData.points_discussed.length > 0))
+  const currentMom = localMomData || momData
+  const hasMom = currentMom && (currentMom.title || currentMom.introduction || (currentMom.points_discussed && currentMom.points_discussed.length > 0))
   const hasInsights = resolvedShort || resolvedDetailed || keyPoints?.length || actionItems?.length || (speakerSummary && Object.keys(speakerSummary).length > 0)
 
   const showGeneratingSkeleton = isGenerating && !hasInsights
-  const showMomGenerating = isGeneratingMom && !hasMom
+  const showMomGenerating = (isGeneratingMom || isGeneratingLocalMom) && !hasMom
 
   /* ── Collapsed strip */
   if (!isOpen) {
@@ -1044,23 +1063,69 @@ export default function AIChatPanel({
 
             {/* MoM ready */}
             {!showMomGenerating && hasMom && (
-              <MomDisplay mom={momData!} recordingId={recordingId} />
+              <MomDisplay mom={currentMom!} recordingId={recordingId} />
             )}
 
             {/* No MoM yet (pipeline done, MoM failed or not yet run) */}
             {!showMomGenerating && !hasMom && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '2rem', gap: '14px', textAlign: 'center' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '2rem 1.25rem', gap: '14px', textAlign: 'center' }}>
                 <div style={{
                   width: '56px', height: '56px', borderRadius: '16px',
-                  background: 'linear-gradient(135deg, hsl(var(--muted) / .3), hsl(var(--muted) / .1))',
-                  border: '1.5px solid hsl(var(--border) / .3)',
+                  background: 'linear-gradient(135deg, hsl(var(--accent) / .12), hsl(var(--accent) / .04))',
+                  border: '1.5px solid hsl(var(--accent) / .25)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>
-                  <ClipboardList size={24} style={{ color: 'hsl(var(--pencil))' }} />
+                  <ClipboardList size={24} style={{ color: 'hsl(var(--accent))' }} />
                 </div>
-                <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.82rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, maxWidth: '280px', margin: '0 auto' }}>
-                  Minutes of Meeting will appear here after processing completes
-                </p>
+                <div>
+                  <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.88rem', color: 'hsl(var(--ink))', fontWeight: 600, marginBottom: '.3rem' }}>
+                    No MoM Available
+                  </p>
+                  <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.78rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, maxWidth: '260px', margin: '0 auto' }}>
+                    Generate Minutes of Meeting now or open the Raw MoM Lab interface.
+                  </p>
+                </div>
+                {localMomError && (
+                  <div style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', background: 'hsl(var(--destructive) / .1)', border: '1px solid hsl(var(--destructive) / .25)', color: 'hsl(var(--destructive))', fontSize: '0.75rem', fontFamily: 'Inter, sans-serif' }}>
+                    <AlertTriangle size={12} style={{ display: 'inline', marginRight: '4px' }} />
+                    {localMomError}
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%', maxWidth: '240px' }}>
+                  <button
+                    id="panel-btn-generate-mom"
+                    onClick={handleGenerateMomPanel}
+                    disabled={isGeneratingLocalMom}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                      padding: '.55rem 1rem',
+                      background: 'linear-gradient(135deg, hsl(var(--accent)), hsl(var(--accent) / .8))',
+                      color: 'white', border: 'none', borderRadius: '8px',
+                      fontSize: '.8rem', fontWeight: 700, fontFamily: 'Inter, sans-serif',
+                      cursor: 'pointer', boxShadow: '0 3px 10px hsl(var(--accent) / .25)',
+                    }}
+                  >
+                    {isGeneratingLocalMom ? <Loader size={14} className="spin" /> : <Sparkles size={14} />}
+                    {isGeneratingLocalMom ? 'Generating...' : 'Generate MoM'}
+                  </button>
+
+                  <button
+                    id="panel-btn-open-raw-mom-lab"
+                    onClick={() => navigate(`/dashboard/history/${recordingId}/raw-mom`)}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                      padding: '.55rem 1rem',
+                      background: 'hsl(var(--paper))',
+                      color: 'hsl(var(--ink))',
+                      border: '1.5px solid hsl(var(--border))', borderRadius: '8px',
+                      fontSize: '.8rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <FlaskConical size={14} style={{ color: 'hsl(280,75%,65%)' }} />
+                    Open Raw MoM Lab
+                  </button>
+                </div>
               </div>
             )}
           </>

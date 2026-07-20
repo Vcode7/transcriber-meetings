@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   History as HistoryIcon, Clock, FileAudio, Mic,
-  Loader, Trash2, ChevronRight, Search, X, Users, Calendar, Sparkles, FlaskConical, MoreVertical
+  Loader, Trash2, ChevronRight, Search, X, Users, Calendar, Sparkles, FlaskConical, MoreVertical, FolderOpen
 } from 'lucide-react'
+import CollectionsPanel from '../components/collections/CollectionsPanel'
 import api from '../api/client'
 import InlineEdit from '../components/InlineEdit'
 
@@ -63,6 +64,7 @@ export default function HistoryPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [activeTab, setActiveTab] = useState<'meetings' | 'collections'>('meetings')
   const navigate = useNavigate()
 
   const load = async () => {
@@ -180,7 +182,61 @@ export default function HistoryPage() {
         )}
       </div>
 
-      {/* ═══════════════ BODY ═══════════════ */}
+      {/* ═══════════════ TAB BAR ═══════════════ */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 0,
+        padding: '0 2rem',
+        borderBottom: '2px solid hsl(var(--border) / .12)',
+        background: 'hsl(var(--paper))',
+        flexShrink: 0,
+      }}>
+        {[
+          { key: 'meetings' as const, label: 'All Meetings', icon: HistoryIcon },
+          { key: 'collections' as const, label: 'Collections', icon: FolderOpen },
+        ].map(tab => {
+          const active = activeTab === tab.key
+          const Icon = tab.icon
+          return (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '.5rem',
+                padding: '.85rem 1.25rem',
+                fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
+                color: active ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                background: 'transparent',
+                border: 'none', borderBottom: `2px solid ${active ? 'hsl(var(--accent))' : 'transparent'}`,
+                cursor: 'pointer',
+                marginBottom: '-2px',
+                transition: 'all .2s ease',
+                opacity: active ? 1 : 0.75,
+              }}
+              onMouseEnter={e => {
+                if (!active) (e.currentTarget as HTMLButtonElement).style.color = 'hsl(var(--ink))'
+              }}
+              onMouseLeave={e => {
+                if (!active) (e.currentTarget as HTMLButtonElement).style.color = 'hsl(var(--pencil))'
+              }}
+            >
+              <Icon size={16} />
+              {tab.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* ═══════════════ TAB CONTENT ═══════════════ */}
+
+      {/* Collections Tab */}
+      {activeTab === 'collections' && (
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          <CollectionsPanel />
+        </div>
+      )}
+
+      {/* All Meetings Tab */}
+      {activeTab === 'meetings' && (
       <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem 2rem 2rem', minHeight: 0 }}>
 
         {/* Loading */}
@@ -480,6 +536,7 @@ export default function HistoryPage() {
           ))}
         </div>
       </div>
+      )}
       {/* Click-away overlay to dismiss dropdown */}
       {menuOpenId && (
         <div

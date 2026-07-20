@@ -5,7 +5,7 @@ import {
   ArrowLeft, Sparkles, Loader, FileDown, Copy, CheckCircle,
   AlertTriangle, Clock, RotateCcw, Plus, X, History, User, Users,
   FileText, Upload, ChevronDown, ChevronUp, Trash2, Brain, Zap, ChevronRight,
-  Database
+  Database, FlaskConical
 } from 'lucide-react'
 import api from '../api/client'
 import MomSection from '../components/MomSection'
@@ -903,16 +903,16 @@ export default function MomPage() {
       {/* Body */}
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex' }}>
 
-        {/* Idle - Generate CTA */}
+        {/* Idle - Actions CTA */}
         {pageState === 'idle' && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '3rem 2rem', gap: '1.5rem', textAlign: 'center' }}>
             <div style={{ width: '100px', height: '100px', borderRadius: '50%', background: 'hsl(var(--accent) / .08)', border: '2.5px dashed hsl(var(--accent) / .3)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 0 12px hsl(var(--accent) / .04)' }}>
               <Sparkles size={42} style={{ color: 'hsl(var(--accent))', opacity: 0.75 }} className="animate-float" />
             </div>
             <div>
-              <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '.5rem' }}>Generate Minutes of Meeting</h2>
+              <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '.5rem' }}>No Minutes of Meeting Generated</h2>
               <p style={{ fontSize: '0.9rem', color: 'hsl(var(--pencil))', maxWidth: '420px', lineHeight: 1.6, fontFamily: 'Inter, sans-serif' }}>
-                AI will extract a structured MoM — introduction, discussion points, action items by speaker, and conclusion.
+                Select an action below to generate a structured Minutes of Meeting or open the Raw MoM Lab.
               </p>
             </div>
             {error && (
@@ -921,9 +921,14 @@ export default function MomPage() {
                 {error}
               </div>
             )}
-            <button className="btn btn-primary" onClick={handleGenerate} style={{ fontSize: '0.95rem', padding: '0.75rem 2.25rem', gap: '8px', borderRadius: '12px' }}>
-              <Sparkles size={16} /> Generate Minutes of Meeting
-            </button>
+            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+              <button id="btn-generate-mom" className="btn btn-primary" onClick={handleGenerate} style={{ fontSize: '0.95rem', padding: '0.75rem 1.75rem', gap: '8px', borderRadius: '12px' }}>
+                <Sparkles size={16} /> Generate MoM
+              </button>
+              <button id="btn-open-raw-mom-lab" className="btn btn-ghost" onClick={() => navigate(`/dashboard/history/${id}/raw-mom`)} style={{ fontSize: '0.95rem', padding: '0.75rem 1.75rem', gap: '8px', borderRadius: '12px', border: '1.5px solid hsl(var(--border))' }}>
+                <FlaskConical size={16} style={{ color: 'hsl(280,75%,65%)' }} /> Open Raw MoM Lab
+              </button>
+            </div>
           </div>
         )}
 

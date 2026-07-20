@@ -43,7 +43,13 @@ _EMBEDDINGS_DIR = _resolve_embeddings_dir()
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download the Qwen3-Embedding-0.6B model for offline RAG use."
+        description="Download a Qwen embedding model for offline RAG use."
+    )
+    parser.add_argument(
+        "--model",
+        default="Qwen3-Embedding-4B-Instruct-INT8",
+        choices=["Qwen3-Embedding-0.6B", "Qwen3-Embedding-4B-Instruct-INT8"],
+        help="Embedding model to download (default: Qwen3-Embedding-0.6B)",
     )
     parser.add_argument(
         "--provider",
@@ -63,9 +69,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Friendly model to repo mapping
+    MODEL_MAP = {
+        "Qwen3-Embedding-0.6B": {
+            "huggingface": "Qwen/Qwen3-Embedding-0.6B",
+            "modelscope": "qwen/Qwen3-Embedding-0.6B"
+        },
+        "Qwen3-Embedding-4B-Instruct-INT8": {
+            "huggingface": "Qwen/Qwen3-Embedding-4B",
+            "modelscope": "qwen/Qwen3-Embedding-4B"
+        }
+    }
+
     # Determine destination dir
     base_dir = Path(args.dest_dir).resolve() if args.dest_dir else _EMBEDDINGS_DIR
-    dest = base_dir / "Qwen3-Embedding-0.6B"
+    model_name = args.model
+    dest = base_dir / model_name
     dest.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Target model directory: {dest}")
@@ -73,16 +92,23 @@ def main() -> None:
     # Check if key model files already exist to skip download
     required_files = [
         dest / "config.json",
-        dest / "model.safetensors",
         dest / "tokenizer.json",
     ]
     missing = [p for p in required_files if not p.exists()]
     if not missing:
-        logger.info(f"[SKIP] Qwen3-Embedding-0.6B is already present at {dest}")
+        logger.info(f"[SKIP] {model_name} is already present at {dest}")
         sys.exit(0)
 
+    # Resolve repo IDs dynamically based on the model map
+    repo_info = MODEL_MAP.get(model_name, {
+        "huggingface": f"Qwen/{model_name}",
+        "modelscope": f"qwen/{model_name}"
+    })
+    huggingface_repo_id = repo_info["huggingface"]
+    model_scope_id = repo_info["modelscope"]
+
     if args.provider == "modelscope":
-        logger.info(f"[DOWNLOAD] qwen/Qwen3-Embedding-0.6B from ModelScope → {dest}")
+        logger.info(f"[DOWNLOAD] {model_scope_id} from ModelScope → {dest}")
         try:
             from modelscope import snapshot_download
         except ImportError:
@@ -97,17 +123,17 @@ def main() -> None:
 
         try:
             snapshot_download(
-                model_id="qwen/Qwen3-Embedding-0.6B",
+                model_id=model_scope_id,
                 local_dir=str(dest),
                 ignore_file_pattern=["*.gif", "*.png", "*.jpg", "*.md", ".gitattributes"],
             )
-            logger.info(f"[OK] Qwen3-Embedding-0.6B model successfully cached from ModelScope at {dest} ✓")
+            logger.info(f"[OK] {model_name} model successfully cached from ModelScope at {dest} ✓")
         except Exception as e:
             logger.error(f"[ERROR] Failed to download model from ModelScope: {e}")
             sys.exit(1)
             
     else:  # huggingface
-        logger.info(f"[DOWNLOAD] Qwen/Qwen3-Embedding-0.6B from HuggingFace → {dest}")
+        logger.info(f"[DOWNLOAD] {huggingface_repo_id} from HuggingFace → {dest}")
         try:
             from huggingface_hub import snapshot_download
         except ImportError:
@@ -116,13 +142,13 @@ def main() -> None:
 
         try:
             snapshot_download(
-                repo_id="Qwen/Qwen3-Embedding-0.6B",
+                repo_id=huggingface_repo_id,
                 local_dir=str(dest),
                 local_dir_use_symlinks=False,
                 token=args.hf_token or None,
                 ignore_patterns=["*.gif", "*.png", "*.jpg", "*.md", ".gitattributes"],
             )
-            logger.info(f"[OK] Qwen3-Embedding-0.6B model successfully cached from HuggingFace at {dest} ✓")
+            logger.info(f"[OK] {model_name} model successfully cached from HuggingFace at {dest} ✓")
         except Exception as e:
             logger.error(f"[ERROR] Failed to download model from HuggingFace: {e}")
             sys.exit(1)

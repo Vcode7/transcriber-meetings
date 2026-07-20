@@ -117,6 +117,49 @@ async def connect_db():
                 word_conf_low REAL NOT NULL DEFAULT 0.7,
                 word_conf_mid REAL NOT NULL DEFAULT 0.85,
                 min_segment_duration REAL NOT NULL DEFAULT 1.5,
+                use_ollama INTEGER NOT NULL DEFAULT 0,
+                ollama_server_url TEXT NOT NULL DEFAULT 'http://localhost:11434',
+                ollama_port INTEGER NOT NULL DEFAULT 11434,
+                ollama_model_priority TEXT NOT NULL DEFAULT 'gemma,qwen,llama,deepseek,mistral',
+                rag_chunk_size INTEGER NOT NULL DEFAULT 400,
+                rag_chunk_overlap INTEGER NOT NULL DEFAULT 50,
+                rag_retrieval_k_global INTEGER NOT NULL DEFAULT 2,
+                rag_retrieval_k_meeting INTEGER NOT NULL DEFAULT 3,
+                rag_retrieval_k_transcript INTEGER NOT NULL DEFAULT 10,
+                rag_relative_score_cutoff REAL NOT NULL DEFAULT 0.01,
+                generate_mom_auto INTEGER NOT NULL DEFAULT 1,
+                ollama_num_ctx INTEGER NOT NULL DEFAULT 32768,
+                ollama_temperature REAL NOT NULL DEFAULT 0.0,
+                ollama_top_p REAL NOT NULL DEFAULT 0.9,
+                ollama_top_k INTEGER NOT NULL DEFAULT 40,
+                ollama_repeat_penalty REAL NOT NULL DEFAULT 1.15,
+                ollama_seed INTEGER NOT NULL DEFAULT -1,
+                ollama_stop TEXT NOT NULL DEFAULT '',
+                ollama_keep_alive TEXT NOT NULL DEFAULT '5m',
+                ollama_num_thread INTEGER NOT NULL DEFAULT 0,
+                ollama_num_gpu INTEGER NOT NULL DEFAULT -1,
+                max_tokens_mom INTEGER NOT NULL DEFAULT 1500,
+                max_tokens_mom_merge INTEGER NOT NULL DEFAULT 3072,
+                max_tokens_raw_mom_to_mom INTEGER NOT NULL DEFAULT 3000,
+                max_tokens_raw_mom_extraction INTEGER NOT NULL DEFAULT 1024,
+                max_tokens_raw_mom_repair INTEGER NOT NULL DEFAULT 1024,
+                max_tokens_agenda_compress INTEGER NOT NULL DEFAULT 2000,
+                max_tokens_reference_compress INTEGER NOT NULL DEFAULT 2000,
+                max_tokens_agenda_from_summary INTEGER NOT NULL DEFAULT 1024,
+                max_tokens_executive_summary INTEGER NOT NULL DEFAULT 700,
+                max_tokens_short_summary INTEGER NOT NULL DEFAULT 120,
+                max_tokens_detailed_summary INTEGER NOT NULL DEFAULT 3000,
+                max_tokens_chunk_summary INTEGER NOT NULL DEFAULT 256,
+                max_tokens_key_points INTEGER NOT NULL DEFAULT 1028,
+                max_tokens_action_items INTEGER NOT NULL DEFAULT 1028,
+                max_tokens_key_decisions INTEGER NOT NULL DEFAULT 1028,
+                max_tokens_speaker_summary INTEGER NOT NULL DEFAULT 200,
+                max_tokens_speaker_key_points INTEGER NOT NULL DEFAULT 350,
+                max_tokens_speaker_action_items INTEGER NOT NULL DEFAULT 250,
+                max_tokens_collection_chat INTEGER NOT NULL DEFAULT 1500,
+                max_tokens_collection_compare INTEGER NOT NULL DEFAULT 1500,
+                max_tokens_collection_topic_growth INTEGER NOT NULL DEFAULT 1500,
+                max_tokens_vocab_extractor INTEGER NOT NULL DEFAULT 512,
                 updated_at TEXT NOT NULL
             )
         """))
@@ -256,6 +299,57 @@ async def connect_db():
             except Exception:
                 pass  # column already exists
 
+        # ── Migration: add Ollama & RAG columns to user_settings if missing ──
+        for col_name, col_type in [
+            ("use_ollama", "INTEGER NOT NULL DEFAULT 0"),
+            ("ollama_server_url", "TEXT NOT NULL DEFAULT 'http://localhost:11434'"),
+            ("ollama_port", "INTEGER NOT NULL DEFAULT 11434"),
+            ("ollama_model_priority", "TEXT NOT NULL DEFAULT 'gemma,qwen,llama,deepseek,mistral'"),
+            ("rag_chunk_size", "INTEGER NOT NULL DEFAULT 400"),
+            ("rag_chunk_overlap", "INTEGER NOT NULL DEFAULT 50"),
+            ("rag_retrieval_k_global", "INTEGER NOT NULL DEFAULT 2"),
+            ("rag_retrieval_k_meeting", "INTEGER NOT NULL DEFAULT 3"),
+            ("rag_retrieval_k_transcript", "INTEGER NOT NULL DEFAULT 10"),
+            ("rag_relative_score_cutoff", "REAL NOT NULL DEFAULT 0.01"),
+            ("generate_mom_auto", "INTEGER NOT NULL DEFAULT 1"),
+            ("ollama_num_ctx", "INTEGER NOT NULL DEFAULT 32768"),
+            ("ollama_temperature", "REAL NOT NULL DEFAULT 0.0"),
+            ("ollama_top_p", "REAL NOT NULL DEFAULT 0.9"),
+            ("ollama_top_k", "INTEGER NOT NULL DEFAULT 40"),
+            ("ollama_repeat_penalty", "REAL NOT NULL DEFAULT 1.15"),
+            ("ollama_seed", "INTEGER NOT NULL DEFAULT -1"),
+            ("ollama_stop", "TEXT NOT NULL DEFAULT ''"),
+            ("ollama_keep_alive", "TEXT NOT NULL DEFAULT '5m'"),
+            ("ollama_num_thread", "INTEGER NOT NULL DEFAULT 0"),
+            ("ollama_num_gpu", "INTEGER NOT NULL DEFAULT -1"),
+            ("max_tokens_mom", "INTEGER NOT NULL DEFAULT 1500"),
+            ("max_tokens_mom_merge", "INTEGER NOT NULL DEFAULT 3072"),
+            ("max_tokens_raw_mom_to_mom", "INTEGER NOT NULL DEFAULT 3000"),
+            ("max_tokens_raw_mom_extraction", "INTEGER NOT NULL DEFAULT 1024"),
+            ("max_tokens_raw_mom_repair", "INTEGER NOT NULL DEFAULT 1024"),
+            ("max_tokens_agenda_compress", "INTEGER NOT NULL DEFAULT 2000"),
+            ("max_tokens_reference_compress", "INTEGER NOT NULL DEFAULT 2000"),
+            ("max_tokens_agenda_from_summary", "INTEGER NOT NULL DEFAULT 1024"),
+            ("max_tokens_executive_summary", "INTEGER NOT NULL DEFAULT 700"),
+            ("max_tokens_short_summary", "INTEGER NOT NULL DEFAULT 120"),
+            ("max_tokens_detailed_summary", "INTEGER NOT NULL DEFAULT 3000"),
+            ("max_tokens_chunk_summary", "INTEGER NOT NULL DEFAULT 256"),
+            ("max_tokens_key_points", "INTEGER NOT NULL DEFAULT 1028"),
+            ("max_tokens_action_items", "INTEGER NOT NULL DEFAULT 1028"),
+            ("max_tokens_key_decisions", "INTEGER NOT NULL DEFAULT 1028"),
+            ("max_tokens_speaker_summary", "INTEGER NOT NULL DEFAULT 200"),
+            ("max_tokens_speaker_key_points", "INTEGER NOT NULL DEFAULT 350"),
+            ("max_tokens_speaker_action_items", "INTEGER NOT NULL DEFAULT 250"),
+            ("max_tokens_collection_chat", "INTEGER NOT NULL DEFAULT 1500"),
+            ("max_tokens_collection_compare", "INTEGER NOT NULL DEFAULT 1500"),
+            ("max_tokens_collection_topic_growth", "INTEGER NOT NULL DEFAULT 1500"),
+            ("max_tokens_vocab_extractor", "INTEGER NOT NULL DEFAULT 512"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
+            except Exception:
+                pass  # column already exists
+
         for col_def in (
             "chunk_ids TEXT DEFAULT '[]'",
             "is_chunked INTEGER NOT NULL DEFAULT 0",
@@ -371,6 +465,59 @@ async def connect_db():
                 updated_at TEXT NOT NULL
             )
         """))
+
+        # ── Meeting Collections — organizational folders for recordings ────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS meeting_collections (
+                id            TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL,
+                name          TEXT NOT NULL,
+                description   TEXT DEFAULT '',
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                UNIQUE(user_id, name)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_collections_user ON meeting_collections(user_id)"
+        ))
+
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS meeting_collection_items (
+                id              TEXT PRIMARY KEY,
+                collection_id   TEXT NOT NULL,
+                meeting_id      TEXT NOT NULL,
+                display_order   INTEGER NOT NULL DEFAULT 0,
+                added_at        TEXT NOT NULL,
+                UNIQUE(collection_id, meeting_id)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_coll ON meeting_collection_items(collection_id)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_meeting ON meeting_collection_items(meeting_id)"
+        ))
+
+        # ── Collection AI Chat Messages — per-collection chat history ──────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS collection_chat_messages (
+                id              TEXT PRIMARY KEY,
+                collection_id   TEXT NOT NULL,
+                user_id         TEXT NOT NULL,
+                role            TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                message_type    TEXT NOT NULL DEFAULT 'chat',
+                metadata        TEXT DEFAULT '{}',
+                created_at      TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_chat_collection ON collection_chat_messages(collection_id)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_chat_user ON collection_chat_messages(user_id)"
+        ))
 
 
         # Fixes users who have an old 30-day cookie that has already expired.

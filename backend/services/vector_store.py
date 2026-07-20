@@ -91,20 +91,53 @@ class VectorStore:
 
         self._dir.mkdir(parents=True, exist_ok=True)
 
+        from config import settings
+        current_model_name = settings.QWEN_EMBEDDING_MODEL_NAME
+
+        recreate = False
         if self.exists():
-            logger.info(f"[VectorStore] Loading existing index from {self._dir}")
-            self._index = faiss.read_index(self._index_path.as_posix())
-            with open(self._meta_path, "r", encoding="utf-8") as f:
-                self._meta = json.load(f)
-            logger.info(
-                f"[VectorStore] Loaded {self._index.ntotal} vectors from {self._dir}"
-            )
+            try:
+                logger.info(f"[VectorStore] Loading existing index from {self._dir}")
+                self._index = faiss.read_index(self._index_path.as_posix())
+                with open(self._meta_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "meta" in data:
+                    self._meta = data["meta"]
+                    self._model_name = data.get("embedding_model")
+                else:
+                    self._meta = data
+                    self._model_name = None
+
+                # Check for dimension mismatch
+                if self._index.d != self._dim:
+                    logger.warning(
+                        f"[VectorStore] Dimension mismatch in {self._dir}: "
+                        f"index dim={self._index.d}, current dim={self._dim}. Recreating index."
+                    )
+                    recreate = True
+                # Check for model name mismatch
+                elif self._model_name is not None and self._model_name != current_model_name:
+                    logger.warning(
+                        f"[VectorStore] Embedding model mismatch in {self._dir}: "
+                        f"index model={self._model_name}, current model={current_model_name}. Recreating index."
+                    )
+                    recreate = True
+            except Exception as e:
+                logger.error(f"[VectorStore] Error loading existing index from {self._dir}: {e}. Recreating index.")
+                recreate = True
         else:
-            logger.info(f"[VectorStore] Creating new index at {self._dir} (dim={self._dim})")
+            recreate = True
+
+        if recreate:
+            logger.info(f"[VectorStore] Creating new index at {self._dir} (dim={self._dim}, model={current_model_name})")
             self._index = faiss.IndexFlatIP(self._dim)
             self._meta = []
-
-        self._loaded = True
+            self._model_name = current_model_name
+            # Save the new empty index to disk immediately to establish it
+            self._loaded = True
+            self.save()
+        else:
+            self._loaded = True
 
     def save(self) -> None:
         """Persist the index and metadata to disk."""
@@ -117,10 +150,19 @@ class VectorStore:
         temp_index_path = self._index_path.with_suffix(".faiss.tmp")
         temp_meta_path = self._meta_path.with_suffix(".json.tmp")
 
+        from config import settings
+        current_model_name = settings.QWEN_EMBEDDING_MODEL_NAME
+        self._model_name = current_model_name
+
         try:
             faiss.write_index(self._index, temp_index_path.as_posix())
+
+            data_to_save = {
+                "embedding_model": self._model_name,
+                "meta": self._meta
+            }
             with open(temp_meta_path, "w", encoding="utf-8") as f:
-                json.dump(self._meta, f, ensure_ascii=False, default=str)
+                json.dump(data_to_save, f, ensure_ascii=False, default=str)
 
             # Atomic swap
             if temp_index_path.exists():
@@ -136,8 +178,12 @@ class VectorStore:
             # Fallback to direct write if atomic replacement fails
             try:
                 faiss.write_index(self._index, self._index_path.as_posix())
+                data_to_save = {
+                    "embedding_model": self._model_name,
+                    "meta": self._meta
+                }
                 with open(self._meta_path, "w", encoding="utf-8") as f:
-                    json.dump(self._meta, f, ensure_ascii=False, default=str)
+                    json.dump(data_to_save, f, ensure_ascii=False, default=str)
             except Exception as e2:
                 logger.error(f"[VectorStore] Direct fallback save also failed: {e2}")
                 raise e2

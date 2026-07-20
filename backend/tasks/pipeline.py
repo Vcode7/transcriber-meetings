@@ -811,31 +811,74 @@ async def _run_pipeline_impl(
         _analytics["overlap_segments_in_final"] = sum(1 for s in final_segments if s.get("is_overlap"))
         logger.info(f"[Pipeline] {recording_id} — Final: {len(final_segments)} segments, speakers={speakers_detected}")
 
-        # ── Phase 1 complete: Save transcript immediately ──────────────
-        # Frontend can now show transcript while Qwen3 runs in the background.
+        # ── Phase 1 complete: Save transcript & check generate_mom_auto ──
         logger.info(f"[Pipeline] {recording_id} — PHASE 1 COMPLETE: Saving transcript to DB")
+
+        generate_mom_auto = True
         try:
-            transcript_json = to_json(final_segments)
-            speakers_json = to_json(speakers_detected)
             async with get_db() as db:
-                await db.execute(
-                    text("""
-                        UPDATE recordings SET
-                            status = 'transcript_ready', progress = 'generating_mom',
-                            transcript = :transcript, raw_text = :raw_text, language = :language,
-                            speakers_detected = :speakers_detected
-                        WHERE id = :recording_id
-                    """),
-                    {
-                        "transcript": transcript_json,
-                        "raw_text": raw_text,
-                        "language": language,
-                        "speakers_detected": speakers_json,
-                        "recording_id": recording_id,
-                    },
+                r = await db.execute(
+                    text("SELECT generate_mom_auto FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
                 )
-                await db.commit()
-            logger.info(f"[Pipeline] {recording_id} — Transcript saved to DB ✓ (status=transcript_ready)")
+                row = r.mappings().fetchone()
+                if row and row.get("generate_mom_auto") is not None:
+                    generate_mom_auto = bool(row["generate_mom_auto"])
+        except Exception as e:
+            logger.warning(f"[Pipeline] {recording_id} — Failed to fetch generate_mom_auto setting (defaulting to True): {e}")
+
+        now = datetime.now(timezone.utc)
+        transcript_json = to_json(final_segments)
+        speakers_json = to_json(speakers_detected)
+
+        try:
+            if not generate_mom_auto:
+                logger.info(f"[Pipeline] {recording_id} — Automatic MoM generation disabled by settings; skipping LLM stages.")
+                async with get_db() as db:
+                    await db.execute(
+                        text("""
+                            UPDATE recordings SET
+                                status = 'done', progress = 'done',
+                                processed_at = :processed_at,
+                                transcript = :transcript, raw_text = :raw_text, language = :language,
+                                speakers_detected = :speakers_detected
+                            WHERE id = :recording_id
+                        """),
+                        {
+                            "processed_at": dt_to_str(now),
+                            "transcript": transcript_json,
+                            "raw_text": raw_text,
+                            "language": language,
+                            "speakers_detected": speakers_json,
+                            "recording_id": recording_id,
+                        },
+                    )
+                    await db.commit()
+                logger.info(f"[Pipeline] {recording_id} — ===== PIPELINE COMPLETE (Automatic MoM skipped, status=done) ✓ =====")
+                _analytics["final_status"] = "done"
+                _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
+                await _emit_analytics(_analytics)
+                return
+            else:
+                async with get_db() as db:
+                    await db.execute(
+                        text("""
+                            UPDATE recordings SET
+                                status = 'transcript_ready', progress = 'generating_mom',
+                                transcript = :transcript, raw_text = :raw_text, language = :language,
+                                speakers_detected = :speakers_detected
+                            WHERE id = :recording_id
+                        """),
+                        {
+                            "transcript": transcript_json,
+                            "raw_text": raw_text,
+                            "language": language,
+                            "speakers_detected": speakers_json,
+                            "recording_id": recording_id,
+                        },
+                    )
+                    await db.commit()
+                logger.info(f"[Pipeline] {recording_id} — Transcript saved to DB ✓ (status=transcript_ready)")
         except Exception as e:
             logger.error(f"[Pipeline] {recording_id} — CRITICAL: Transcript DB save FAILED: {e}", exc_info=True)
             _analytics["error_stage"] = "transcript_save"
@@ -863,6 +906,7 @@ async def _run_pipeline_impl(
     # ─────────────────────────────────────────────────────────────────────
 
     logger.info(f"[Pipeline] {recording_id} — PHASE 2 START: Generating Minutes of Meeting (Qwen3 4B)")
+
 
     _t0_mom = time.monotonic()
     try:
@@ -1924,30 +1968,6 @@ async def _run_finalize_pipeline_impl(
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload speaker encoder: {e}")
     log_gpu_memory("Post-ECAPA Refinement Unload")
 
-    # ── Step 7b: Build final segments early so chunk summarization can use them ──
-    # (we need speaker labels to build attributed chunk text, so resolve final_segments now)
-    pre_final_segments = []
-    for seg in speaker_segments:
-        pre_final_segments.append({
-            "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
-            "speaker_profile_id": seg.get("speaker_profile_id"),
-            "speaker": seg.get("speaker"),
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg["text"],
-            "words": seg.get("words", []),
-            "is_overlap": seg.get("is_overlap", False),
-            "overlap_regions": seg.get("overlap_regions", []),
-        })
-
-    # ── Step 7c: Speaker-aware chunk summary generation (post speaker-ID) ────
-    if chunk_ids and chunk_rows:
-        logger.info(f"[FinalPipeline] {recording_id} — Generating speaker-aware chunk summaries")
-        await _update_status_safe(recording_id, "processing", {"progress": "summarizing_chunks"})
-        log_gpu_memory("Pre-chunk-summaries")
-        await _generate_speaker_aware_chunk_summaries(chunk_rows, pre_final_segments, recording_id, loop)
-
-
     # ── Step 8: Build final segments ─────────────────────────────────────
     final_segments = []
     for seg in speaker_segments:
@@ -1976,7 +1996,66 @@ async def _run_finalize_pipeline_impl(
         f"speakers={speakers_detected}"
     )
 
-    # ── Save transcript immediately (Phase 1 complete) ──────────────────
+    # ── Check user settings for automatic MoM generation ──────────────
+    generate_mom_auto = True
+    try:
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT generate_mom_auto FROM user_settings WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+            row = r.mappings().fetchone()
+            if row and row.get("generate_mom_auto") is not None:
+                generate_mom_auto = bool(row["generate_mom_auto"])
+    except Exception as e:
+        logger.warning(f"[FinalPipeline] {recording_id} — Failed to fetch generate_mom_auto setting (defaulting to True): {e}")
+
+    now_fin = datetime.now(timezone.utc)
+    transcript_json = to_json(final_segments)
+    speakers_json = to_json(speakers_detected)
+
+    try:
+        if not generate_mom_auto:
+            logger.info(f"[FinalPipeline] {recording_id} — Automatic MoM generation disabled by settings; skipping LLM stages.")
+            async with get_db() as db:
+                await db.execute(
+                    text("""
+                        UPDATE recordings SET
+                            status = 'done', progress = 'done',
+                            processed_at = :processed_at,
+                            transcript = :transcript, raw_text = :raw_text, language = :language,
+                            speakers_detected = :speakers_detected
+                        WHERE id = :recording_id
+                    """),
+                    {
+                        "processed_at": dt_to_str(now_fin),
+                        "transcript": transcript_json,
+                        "raw_text": raw_text,
+                        "language": language,
+                        "speakers_detected": speakers_json,
+                        "recording_id": recording_id,
+                    },
+                )
+                await db.commit()
+            logger.info(f"[FinalPipeline] {recording_id} — ===== FINALIZE PIPELINE COMPLETE (Automatic MoM skipped, status=done) ✓ =====")
+            _analytics_fin["final_status"] = "done"
+            _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start_fin, 3)
+            await _emit_analytics(_analytics_fin)
+            return
+    except Exception as e:
+        logger.error(f"[FinalPipeline] {recording_id} — CRITICAL: Transcript DB save FAILED: {e}", exc_info=True)
+        await _update_status_safe(recording_id, "error", {"error_message": f"Transcript save failed: {str(e)}"})
+        unload_all_models()
+        return
+
+    # ── Step 7c: Speaker-aware chunk summary generation (post speaker-ID, LLM stage) ────
+    if chunk_ids and chunk_rows:
+        logger.info(f"[FinalPipeline] {recording_id} — Generating speaker-aware chunk summaries")
+        await _update_status_safe(recording_id, "processing", {"progress": "summarizing_chunks"})
+        log_gpu_memory("Pre-chunk-summaries")
+        await _generate_speaker_aware_chunk_summaries(chunk_rows, final_segments, recording_id, loop)
+
+    # ── Save transcript immediately for Phase 2 (status=transcript_ready) ──
     try:
         async with get_db() as db:
             await db.execute(
@@ -1988,10 +2067,10 @@ async def _run_finalize_pipeline_impl(
                     WHERE id = :recording_id
                 """),
                 {
-                    "transcript": to_json(final_segments),
+                    "transcript": transcript_json,
                     "raw_text": raw_text,
                     "language": language,
-                    "speakers_detected": to_json(speakers_detected),
+                    "speakers_detected": speakers_json,
                     "recording_id": recording_id,
                 },
             )

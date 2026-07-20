@@ -28,22 +28,22 @@ router = APIRouter(prefix="/mom", tags=["mom"])
 
 
 class ActionItem(BaseModel):
-    task: str
-    owner: str
-    deadline: str
+    task: str = ""
+    owner: str = ""
+    deadline: str = ""
 
 
 class MoMData(BaseModel):
-    title: str
-    date: str
-    duration: float
+    title: str = ""
+    date: str = ""
+    duration: float = 0.0
     planned_start_time: str = ""
     actual_start_time: str = ""
-    participants: List[str]
-    introduction: str
-    points_discussed: List[str]
-    action_items: List[ActionItem]
-    conclusion: str
+    participants: List[str] = []
+    introduction: str = ""
+    points_discussed: List[str] = []
+    action_items: List[ActionItem] = []
+    conclusion: str = ""
 
 
 def _normalize_action_items(items: list) -> list:
@@ -374,23 +374,49 @@ async def get_mom_versions(recording_id: str, current_user: dict = Depends(get_c
 
 
 @router.post("/{recording_id}/pdf")
-async def export_mom_pdf(recording_id: str, data: MoMData, current_user: dict = Depends(get_current_user)):
+async def export_mom_pdf(
+    recording_id: str,
+    data: Optional[MoMData] = None,
+    current_user: dict = Depends(get_current_user)
+):
     user_id = current_user["id"]
 
-    # Lightweight ownership check — verify this recording belongs to the user.
-    # We don't read MoM data from DB; the caller supplies the latest editor state directly.
-    async with get_db() as db:
-        r = await db.execute(
-            text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
-            {"rid": recording_id, "uid": user_id},
-        )
-        exists = r.fetchone()
+    # Check if the input data is missing or effectively empty
+    is_empty = True
+    if data:
+        d = data.dict()
+        # If any of the main content fields are present, we consider it non-empty
+        if (d.get("title") or d.get("introduction") or d.get("conclusion") or
+            d.get("points_discussed") or d.get("action_items") or d.get("participants")):
+            is_empty = False
 
-    if not exists:
-        raise HTTPException(status_code=404, detail="MoM not found")
+    if is_empty:
+        # Load MoM from database (which also verifies ownership)
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+                {"rid": recording_id, "uid": user_id},
+            )
+            mom_row = r.mappings().fetchone()
 
-    # Use the caller-supplied data (live editor state) instead of stale DB content.
-    mom = data.dict()
+        if not mom_row:
+            raise HTTPException(status_code=404, detail="MoM not found")
+        mom = _mom_row_to_dict(mom_row)
+    else:
+        # Verify ownership / existence
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+                {"rid": recording_id, "uid": user_id},
+            )
+            exists = r.fetchone()
+
+        if not exists:
+            raise HTTPException(status_code=404, detail="MoM not found")
+
+        # Use the caller-supplied data (live editor state)
+        mom = data.dict()
+
     mom["action_items"] = _normalize_action_items(mom.get("action_items", []))
 
     # Build PDF in memory to avoid disk accumulation

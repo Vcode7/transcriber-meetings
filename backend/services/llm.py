@@ -90,7 +90,12 @@ def generate_mom(
     )
 
 
-def generate_mom_from_raw_mom(raw_mom: dict, recording_meta: dict) -> dict:
+def generate_mom_from_raw_mom(
+    raw_mom: dict,
+    recording_meta: dict,
+    char_limit: Optional[int] = None,
+    use_max_tokens: Optional[bool] = False,
+) -> dict:
     """
     Generate final MoM from structured Raw MoM JSON (offline, Qwen3 4B).
 
@@ -98,7 +103,12 @@ def generate_mom_from_raw_mom(raw_mom: dict, recording_meta: dict) -> dict:
     Input is the raw_mom dict produced by the Raw MoM Lab pipeline.
     Output matches the standard minutes_of_meeting schema.
     """
-    return get_provider().generate_mom_from_raw_mom(raw_mom, recording_meta)
+    return get_provider().generate_mom_from_raw_mom(
+        raw_mom,
+        recording_meta,
+        char_limit=char_limit,
+        use_max_tokens=use_max_tokens,
+    )
 
 
 def generate_executive_summary(transcript: List[Dict], context: Optional[str] = None) -> dict:

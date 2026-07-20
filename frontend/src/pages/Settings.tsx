@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
-  MessageSquare, RotateCcw, Upload, Download, FileText, Code
+  MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -19,6 +19,53 @@ interface UserSettings {
   word_conf_low: number
   word_conf_mid: number
   min_segment_duration: number
+  use_ollama?: boolean
+  ollama_server_url?: string
+  ollama_port?: number
+  ollama_model_priority?: string
+  rag_chunk_size?: number
+  rag_chunk_overlap?: number
+  rag_retrieval_k_global?: number
+  rag_retrieval_k_meeting?: number
+  rag_retrieval_k_transcript?: number
+  rag_relative_score_cutoff?: number
+  generate_mom_auto?: boolean
+
+  // New Ollama settings
+  ollama_num_ctx?: number
+  ollama_temperature?: number
+  ollama_top_p?: number
+  ollama_top_k?: number
+  ollama_repeat_penalty?: number
+  ollama_seed?: number
+  ollama_stop?: string
+  ollama_keep_alive?: string
+  ollama_num_thread?: number
+  ollama_num_gpu?: number
+
+  // Task max tokens
+  max_tokens_mom?: number
+  max_tokens_mom_merge?: number
+  max_tokens_raw_mom_to_mom?: number
+  max_tokens_raw_mom_extraction?: number
+  max_tokens_raw_mom_repair?: number
+  max_tokens_agenda_compress?: number
+  max_tokens_reference_compress?: number
+  max_tokens_agenda_from_summary?: number
+  max_tokens_executive_summary?: number
+  max_tokens_short_summary?: number
+  max_tokens_detailed_summary?: number
+  max_tokens_chunk_summary?: number
+  max_tokens_key_points?: number
+  max_tokens_action_items?: number
+  max_tokens_key_decisions?: number
+  max_tokens_speaker_summary?: number
+  max_tokens_speaker_key_points?: number
+  max_tokens_speaker_action_items?: number
+  max_tokens_collection_chat?: number
+  max_tokens_collection_compare?: number
+  max_tokens_collection_topic_growth?: number
+  max_tokens_vocab_extractor?: number
 }
 
 interface PromptTemplate {
@@ -43,6 +90,16 @@ export default function SettingsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
   const [settingsSaved, setSettingsSaved] = useState(false)
+
+  // Ollama test state
+  const [testingOllama, setTestingOllama] = useState(false)
+  const [ollamaTestResult, setOllamaTestResult] = useState<{
+    success: boolean
+    message: string
+    available_models?: string[]
+    running_models?: string[]
+    error?: string
+  } | null>(null)
 
   // Global prompt
   const [globalPrompt, setGlobalPrompt] = useState('')
@@ -120,7 +177,33 @@ export default function SettingsPage() {
     setTimeout(() => setSettingsSaved(false), 2000)
   }
 
-  const upd = (key: keyof UserSettings, val: number) =>
+  const handleTestOllamaConnection = async () => {
+    setTestingOllama(true)
+    setOllamaTestResult(null)
+    try {
+      const res = await api.post('/settings/test-ollama', {
+        server_url: settings?.ollama_server_url || 'http://localhost:11434'
+      })
+      setOllamaTestResult(res.data)
+      if (res.data.success) {
+        toast.success(res.data.message || 'Connected to Ollama server!')
+      } else {
+        toast.error(res.data.error || 'Failed to connect to Ollama server.')
+      }
+    } catch (err: any) {
+      const errorMsg = err.response?.data?.error || err.message || 'Connection test failed.'
+      setOllamaTestResult({
+        success: false,
+        message: 'Connection failed.',
+        error: errorMsg,
+      })
+      toast.error(errorMsg)
+    } finally {
+      setTestingOllama(false)
+    }
+  }
+
+  const upd = (key: keyof UserSettings, val: any) =>
     setSettings((prev) => prev ? { ...prev, [key]: val } : prev)
 
   const handleSavePromptTemplate = async (key: string, template: string) => {
@@ -254,65 +337,7 @@ export default function SettingsPage() {
 
       {/* Page title - REMOVED, now in panel-header */}
 
-      {/* ─── Global Transcription Prompt ─── */}
-      <section className="animate-slide-up" style={{ marginBottom: '2.5rem', animationDelay: '0.02s', animationFillMode: 'both' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.25rem' }}>
-          <div style={{
-            width: '36px', height: '36px', borderRadius: '9px',
-            background: 'hsl(280,70%,60% / .12)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: '1.5px solid hsl(280,70%,60% / .25)',
-          }}>
-            <MessageSquare size={18} style={{ color: 'hsl(280,70%,60%)' }} />
-          </div>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-            Global Transcription Prompt
-          </h2>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {promptSaving && <Loader size={13} className="spin" style={{ color: 'hsl(var(--pencil))' }} />}
-            {promptSaved && <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '.78rem', color: 'hsl(130,60%,45%)', fontFamily: 'Inter, sans-serif', fontWeight: 600 }}>
-              <CheckCircle size={13} /> Saved
-            </span>}
-          </div>
-        </div>
-
-        <div style={{
-          padding: '1.25rem',
-          background: 'hsl(var(--card))',
-          border: '1.5px solid hsl(var(--ink) / .1)',
-          borderRadius: '12px',
-        }}>
-          <textarea
-            id="global-prompt-textarea"
-            value={globalPrompt}
-            onChange={e => handlePromptChange(e.target.value)}
-            placeholder="Enter a global system prompt for all transcriptions…\n\nExamples:\n\u2022 This is a technical meeting in the healthcare domain.\n\u2022 The participants speak English with Indian accents.\n\u2022 Use formal language and preserve acronyms as-is."
-            rows={5}
-            style={{
-              width: '100%',
-              padding: '.75rem',
-              borderRadius: '8px',
-              background: 'hsl(var(--muted) / .4)',
-              border: '1.5px solid hsl(var(--ink) / .1)',
-              color: 'hsl(var(--ink))',
-              fontFamily: 'Inter, sans-serif',
-              fontSize: '.88rem',
-              lineHeight: 1.7,
-              resize: 'vertical',
-              outline: 'none',
-              boxSizing: 'border-box',
-              transition: 'border-color .15s',
-            }}
-            onFocus={e => (e.currentTarget.style.borderColor = 'hsl(280,70%,60% / .5)')}
-            onBlur={e => (e.currentTarget.style.borderColor = 'hsl(var(--ink) / .1)')}
-          />
-          <p style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', marginTop: '.6rem', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
-            This prompt is automatically included in every Whisper transcription request.
-            Keep it under 200 words for best results. Auto-saved as you type.
-          </p>
-        </div>
-      </section>
-
+      
       {/* ─── Voice Profiles ─── */}
       <section className="animate-slide-up" style={{ marginBottom: '2.5rem', animationDelay: '0.05s', animationFillMode: 'both' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.5rem' }}>
@@ -581,6 +606,909 @@ export default function SettingsPage() {
             })}
           </div>
 
+          {/* ─── Minutes of Meeting (MoM) Automation ─── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(var(--accent) / .15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(var(--accent) / .3)',
+            }}>
+              <Sparkles size={18} style={{ color: 'hsl(var(--accent))' }} />
+            </div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+              Minutes of Meeting (MoM) Automation
+            </h2>
+          </div>
+
+          <div style={{
+            padding: '1.75rem',
+            background: 'hsl(var(--card))',
+            border: '1.5px solid hsl(var(--ink) / .1)',
+            borderRadius: '12px',
+            display: 'flex', flexDirection: 'column', gap: '2rem'
+          }}>
+            {/* ── Generate MoM Automatically toggle ── */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '1rem 1.25rem',
+              background: (settings.generate_mom_auto ?? true) ? 'hsl(var(--accent) / .06)' : 'hsl(var(--muted) / .3)',
+              borderRadius: '10px',
+              border: `1.5px solid ${(settings.generate_mom_auto ?? true) ? 'hsl(var(--accent) / .35)' : 'hsl(var(--ink) / .08)'}`,
+              transition: 'background .2s, border-color .2s',
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '3px' }}>
+                  Generate MoM Automatically
+                </div>
+                <div style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                  {(settings.generate_mom_auto ?? true)
+                    ? 'ON — After speaker identification completes, automatically generate the MoM.'
+                    : 'OFF — Skip automatic MoM generation. The pipeline will finish after speaker identification without starting MoM generation.'}
+                </div>
+              </div>
+              <button
+                id="generate-mom-auto-toggle"
+                onClick={() => upd('generate_mom_auto', !(settings.generate_mom_auto ?? true))}
+                style={{
+                  flexShrink: 0,
+                  width: '52px', height: '28px',
+                  borderRadius: '999px',
+                  border: 'none',
+                  background: (settings.generate_mom_auto ?? true) ? 'hsl(var(--accent))' : 'hsl(var(--ink) / .18)',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  transition: 'background .25s',
+                  outline: 'none',
+                  boxShadow: (settings.generate_mom_auto ?? true) ? '0 0 0 3px hsl(var(--accent) / .2)' : 'none',
+                }}
+                title={(settings.generate_mom_auto ?? true) ? 'Click to disable automatic MoM generation' : 'Click to enable automatic MoM generation'}
+              >
+                <span style={{
+                  position: 'absolute',
+                  top: '3px',
+                  left: (settings.generate_mom_auto ?? true) ? '26px' : '3px',
+                  width: '22px', height: '22px',
+                  borderRadius: '50%',
+                  background: 'white',
+                  transition: 'left .25s cubic-bezier(.4,0,.2,1)',
+                  boxShadow: '0 1px 4px rgba(0,0,0,.25)',
+                  display: 'block',
+                }} />
+              </button>
+            </div>
+          </div>
+
+          {/* ─── Ollama Settings ─── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(180,90%,50% / .15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(180,90%,50% / .3)',
+            }}>
+              <Cpu size={18} style={{ color: 'hsl(180,90%,50%)' }} />
+            </div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+              Ollama Offline Fallback Settings
+            </h2>
+          </div>
+
+          <div style={{
+            padding: '1.75rem',
+            background: 'hsl(var(--card))',
+            border: '1.5px solid hsl(var(--ink) / .1)',
+            borderRadius: '12px',
+            display: 'flex', flexDirection: 'column', gap: '2rem'
+          }}>
+
+            {/* ── Use Ollama toggle ── */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '1rem 1.25rem',
+              background: settings.use_ollama ? 'hsl(180,90%,50% / .06)' : 'hsl(var(--muted) / .3)',
+              borderRadius: '10px',
+              border: `1.5px solid ${settings.use_ollama ? 'hsl(180,90%,50% / .35)' : 'hsl(var(--ink) / .08)'}`,
+              transition: 'background .2s, border-color .2s',
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '3px' }}>
+                  Use Ollama
+                </div>
+                <div style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                  {settings.use_ollama
+                    ? 'Ollama will be tried first. Falls back to the bundled Qwen model if unavailable.'
+                    : 'Disabled — the bundled Qwen model is used directly. Ollama is not contacted.'}
+                </div>
+              </div>
+              {/* Toggle switch */}
+              <button
+                id="use-ollama-toggle"
+                onClick={() => upd('use_ollama', !settings.use_ollama)}
+                style={{
+                  flexShrink: 0,
+                  width: '52px', height: '28px',
+                  borderRadius: '999px',
+                  border: 'none',
+                  background: settings.use_ollama ? 'hsl(180,90%,45%)' : 'hsl(var(--ink) / .18)',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  transition: 'background .25s',
+                  outline: 'none',
+                  boxShadow: settings.use_ollama ? '0 0 0 3px hsl(180,90%,50% / .2)' : 'none',
+                }}
+                title={settings.use_ollama ? 'Click to disable Ollama' : 'Click to enable Ollama'}
+              >
+                <span style={{
+                  position: 'absolute',
+                  top: '3px',
+                  left: settings.use_ollama ? '26px' : '3px',
+                  width: '22px', height: '22px',
+                  borderRadius: '50%',
+                  background: 'white',
+                  transition: 'left .25s cubic-bezier(.4,0,.2,1)',
+                  boxShadow: '0 1px 4px rgba(0,0,0,.25)',
+                  display: 'block',
+                }} />
+              </button>
+            </div>
+
+            {/* Server URL, Port, and Priority — dimmed when Ollama disabled */}
+            <div style={{ opacity: settings.use_ollama ? 1 : 0.45, transition: 'opacity .2s', pointerEvents: settings.use_ollama ? 'auto' : 'none' }}>
+              
+              {/* ── Ollama Server URL Field with Test Connection Button ── */}
+              <div style={{ marginBottom: '1.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    Ollama Server URL
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleTestOllamaConnection}
+                    disabled={testingOllama}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '6px',
+                      fontSize: '.85rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
+                      padding: '.35rem .85rem',
+                      borderRadius: '7px',
+                      background: 'hsl(180,90%,50% / .15)',
+                      color: 'hsl(180,90%,35%)',
+                      border: '1.5px solid hsl(180,90%,50% / .35)',
+                      cursor: testingOllama ? 'not-allowed' : 'pointer',
+                      transition: 'all .2s',
+                    }}
+                  >
+                    {testingOllama ? <Loader size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                    {testingOllama ? 'Testing...' : 'Test Connection'}
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={settings.ollama_server_url !== undefined ? settings.ollama_server_url : 'http://localhost:11434'}
+                  onChange={(e) => {
+                    upd('ollama_server_url', e.target.value)
+                    setOllamaTestResult(null)
+                  }}
+                  placeholder="http://localhost:11434"
+                  style={{
+                    width: '100%',
+                    fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
+                    color: 'hsl(var(--ink))', fontWeight: 500,
+                    padding: '.55rem .85rem',
+                    background: 'hsl(var(--background))',
+                    borderRadius: '8px',
+                    border: '1.5px solid hsl(var(--ink) / .15)',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6, marginTop: '6px' }}>
+                  Configurable HTTP/HTTPS endpoint for your Ollama instance (default: <code>http://localhost:11434</code>). Accepts <code>http://192.168.x.x:11434</code> or custom domain.
+                </p>
+
+                {/* Connection test result banner */}
+                {ollamaTestResult && (
+                  <div style={{
+                    marginTop: '12px',
+                    padding: '.85rem 1rem',
+                    borderRadius: '8px',
+                    fontSize: '.85rem',
+                    fontFamily: 'Inter, sans-serif',
+                    background: ollamaTestResult.success ? 'hsl(142, 70%, 45% / .12)' : 'hsl(0, 70%, 50% / .12)',
+                    border: `1.5px solid ${ollamaTestResult.success ? 'hsl(142, 70%, 45% / .35)' : 'hsl(0, 70%, 50% / .35)'}`,
+                    color: ollamaTestResult.success ? 'hsl(142, 70%, 30%)' : 'hsl(0, 70%, 35%)',
+                  }}>
+                    <div style={{ fontWeight: 700, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {ollamaTestResult.success ? <CheckCircle size={15} /> : <span style={{ fontWeight: 900 }}>✕</span>}
+                      {ollamaTestResult.success ? 'Connection Successful' : 'Connection Failed'}
+                    </div>
+                    <div>{ollamaTestResult.message || ollamaTestResult.error}</div>
+                    {ollamaTestResult.error && (
+                      <div style={{ marginTop: '4px', fontSize: '.8rem', opacity: 0.9, fontFamily: 'JetBrains Mono, monospace' }}>
+                        {ollamaTestResult.error}
+                      </div>
+                    )}
+                    {ollamaTestResult.available_models && ollamaTestResult.available_models.length > 0 && (
+                      <div style={{ marginTop: '8px', paddingTop: '6px', borderTop: '1px solid hsl(142, 70%, 45% / .2)', fontSize: '.8rem' }}>
+                        <strong>Available Models ({ollamaTestResult.available_models.length}):</strong>{' '}
+                        {ollamaTestResult.available_models.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    Ollama Port
+                  </label>
+                  <input
+                    type="number"
+                    min={1} max={65535}
+                    value={settings.ollama_port !== undefined ? settings.ollama_port : 11434}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('ollama_port', isNaN(parsed) ? 11434 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.3rem .65rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '100px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
+                  Port of the locally running Ollama server (default: 11434).
+                </p>
+              </div>
+
+                <div style={{ marginTop: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
+                    <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                      Model Priority List
+                    </label>
+                    <input
+                      type="text"
+                      value={settings.ollama_model_priority !== undefined ? settings.ollama_model_priority : 'gemma,qwen,llama,deepseek,mistral'}
+                      onChange={(e) => {
+                        upd('ollama_model_priority', e.target.value)
+                      }}
+                      style={{
+                        fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
+                        color: 'hsl(var(--accent))', fontWeight: 600,
+                        padding: '.3rem .65rem',
+                        background: 'hsl(var(--accent) / .1)',
+                        borderRadius: '6px',
+                        border: '1.5px solid hsl(var(--accent) / .2)',
+                        width: '280px',
+                        outline: 'none',
+                      }}
+                    />
+                  </div>
+                  <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
+                    Comma-separated list of model keywords in order of preference (e.g., gemma, qwen, llama, deepseek, mistral).
+                  </p>
+                </div>
+
+                {/* ── Ollama Advanced Parameters Subgrid ── */}
+                <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid hsl(var(--border) / .3)' }}>
+                  <h3 style={{ fontSize: '0.92rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '1.25rem' }}>
+                    Ollama Advanced Generation Parameters
+                  </h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
+                    
+                    {/* Context Size */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Context Size (num_ctx)
+                        </label>
+                        <input
+                          type="number"
+                          min={512} max={131072} step={512}
+                          value={settings.ollama_num_ctx ?? 32768}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10)
+                            upd('ollama_num_ctx', isNaN(parsed) ? 32768 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Context window size (default: 32768). Keep large.
+                      </p>
+                    </div>
+
+                    {/* Temperature */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Temperature
+                        </label>
+                        <input
+                          type="number"
+                          min={0.0} max={2.0} step={0.1}
+                          value={settings.ollama_temperature ?? 0.0}
+                          onChange={(e) => {
+                            const parsed = parseFloat(e.target.value)
+                            upd('ollama_temperature', isNaN(parsed) ? 0.0 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Creative randomness: 0.0 is deterministic.
+                      </p>
+                    </div>
+
+                    {/* Top P */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Top P
+                        </label>
+                        <input
+                          type="number"
+                          min={0.0} max={1.0} step={0.05}
+                          value={settings.ollama_top_p ?? 0.9}
+                          onChange={(e) => {
+                            const parsed = parseFloat(e.target.value)
+                            upd('ollama_top_p', isNaN(parsed) ? 0.9 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Nucleus sampling threshold (default: 0.9).
+                      </p>
+                    </div>
+
+                    {/* Top K */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Top K
+                        </label>
+                        <input
+                          type="number"
+                          min={0} max={500} step={5}
+                          value={settings.ollama_top_k ?? 40}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10)
+                            upd('ollama_top_k', isNaN(parsed) ? 40 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Top-K sampling limit (default: 40).
+                      </p>
+                    </div>
+
+                    {/* Repeat Penalty */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Repeat Penalty
+                        </label>
+                        <input
+                          type="number"
+                          min={0.0} max={3.0} step={0.05}
+                          value={settings.ollama_repeat_penalty ?? 1.15}
+                          onChange={(e) => {
+                            const parsed = parseFloat(e.target.value)
+                            upd('ollama_repeat_penalty', isNaN(parsed) ? 1.15 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Repetition penalty weight (default: 1.15).
+                      </p>
+                    </div>
+
+                    {/* Seed */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Random Seed
+                        </label>
+                        <input
+                          type="number"
+                          min={-1}
+                          value={settings.ollama_seed ?? -1}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10)
+                            upd('ollama_seed', isNaN(parsed) ? -1 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Determinism seed (-1 for random).
+                      </p>
+                    </div>
+
+                    {/* Threads */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          CPU Threads
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={settings.ollama_num_thread ?? 0}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10)
+                            upd('ollama_num_thread', isNaN(parsed) ? 0 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Number of CPU threads (default: 0 = auto).
+                      </p>
+                    </div>
+
+                    {/* GPU Layers */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          GPU Layers
+                        </label>
+                        <input
+                          type="number"
+                          min={-1}
+                          value={settings.ollama_num_gpu ?? -1}
+                          onChange={(e) => {
+                            const parsed = parseInt(e.target.value, 10)
+                            upd('ollama_num_gpu', isNaN(parsed) ? -1 : parsed)
+                          }}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Layers offloaded to GPU (-1 = auto).
+                      </p>
+                    </div>
+
+                    {/* Keep Alive */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Keep Alive
+                        </label>
+                        <input
+                          type="text"
+                          value={settings.ollama_keep_alive ?? '5m'}
+                          onChange={(e) => upd('ollama_keep_alive', e.target.value)}
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Time model stays loaded (e.g. 5m, 1h, 0).
+                      </p>
+                    </div>
+
+                    {/* Stop Sequences */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                          Stop Sequences
+                        </label>
+                        <input
+                          type="text"
+                          value={settings.ollama_stop ?? ''}
+                          onChange={(e) => upd('ollama_stop', e.target.value)}
+                          placeholder="e.g. \n,User:"
+                          style={{
+                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                            color: 'hsl(var(--accent))', fontWeight: 700,
+                            padding: '.25rem .5rem',
+                            background: 'hsl(var(--accent) / .1)',
+                            borderRadius: '6px',
+                            border: '1.5px solid hsl(var(--accent) / .2)',
+                            width: '90px', textAlign: 'center',
+                            outline: 'none',
+                          }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                        Comma-separated sequence list.
+                      </p>
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          {/* ─── RAG Configuration Settings ─── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(210,90%,50% / .15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(210,90%,50% / .3)',
+            }}>
+              <Database size={18} style={{ color: 'hsl(210,90%,50%)' }} />
+            </div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+              RAG & Retrieval Settings
+            </h2>
+          </div>
+
+          <div style={{
+            padding: '1.75rem',
+            background: 'hsl(var(--card))',
+            border: '1.5px solid hsl(var(--ink) / .1)',
+            borderRadius: '12px',
+            display: 'flex', flexDirection: 'column', gap: '2rem'
+          }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.5rem' }}>
+              {/* Chunk Size */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    Chunk Size (words)
+                  </label>
+                  <input
+                    type="number"
+                    min={50} max={2000} step={50}
+                    value={settings.rag_chunk_size !== undefined ? settings.rag_chunk_size : 400}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('rag_chunk_size', isNaN(parsed) ? 400 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Target number of words per document chunk (default: 400).
+                </p>
+              </div>
+
+              {/* Chunk Overlap */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    Chunk Overlap (words)
+                  </label>
+                  <input
+                    type="number"
+                    min={0} max={500} step={10}
+                    value={settings.rag_chunk_overlap !== undefined ? settings.rag_chunk_overlap : 50}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('rag_chunk_overlap', isNaN(parsed) ? 50 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Words of overlap between adjacent chunks (default: 50).
+                </p>
+              </div>
+
+              {/* K Global */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    K Global Context
+                  </label>
+                  <input
+                    type="number"
+                    min={0} max={20} step={1}
+                    value={settings.rag_retrieval_k_global !== undefined ? settings.rag_retrieval_k_global : 2}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('rag_retrieval_k_global', isNaN(parsed) ? 2 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Top-K global context documents to retrieve (default: 2).
+                </p>
+              </div>
+
+              {/* K Meeting */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    K Meeting Attachments
+                  </label>
+                  <input
+                    type="number"
+                    min={0} max={20} step={1}
+                    value={settings.rag_retrieval_k_meeting !== undefined ? settings.rag_retrieval_k_meeting : 3}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('rag_retrieval_k_meeting', isNaN(parsed) ? 3 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Top-K meeting context attachments to retrieve (default: 3).
+                </p>
+              </div>
+
+              {/* K Transcript */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    K Transcript Chunks
+                  </label>
+                  <input
+                    type="number"
+                    min={0} max={30} step={1}
+                    value={settings.rag_retrieval_k_transcript !== undefined ? settings.rag_retrieval_k_transcript : 10}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10)
+                      upd('rag_retrieval_k_transcript', isNaN(parsed) ? 10 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Top-K transcript discussion chunks to retrieve (default: 10).
+                </p>
+              </div>
+
+              {/* Score Cutoff */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                    Relative Score Cutoff
+                  </label>
+                  <input
+                    type="number"
+                    min={0.001} max={0.5} step={0.001}
+                    value={settings.rag_relative_score_cutoff !== undefined ? settings.rag_relative_score_cutoff : 0.01}
+                    onChange={(e) => {
+                      const parsed = parseFloat(e.target.value)
+                      upd('rag_relative_score_cutoff', isNaN(parsed) ? 0.01 : parsed)
+                    }}
+                    style={{
+                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                      color: 'hsl(var(--accent))', fontWeight: 700,
+                      padding: '.25rem .5rem',
+                      background: 'hsl(var(--accent) / .1)',
+                      borderRadius: '6px',
+                      border: '1.5px solid hsl(var(--accent) / .2)',
+                      width: '80px', textAlign: 'center',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                  Similarity score delta threshold to filter low-ranking search results (default: 0.01).
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* ─── AI Task Output Settings ─── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(260,70%,60% / .15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(260,70%,60% / .3)',
+            }}>
+              <FileText size={18} style={{ color: 'hsl(260,70%,60%)' }} />
+            </div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+              AI Task Output Limits (max_new_tokens)
+            </h2>
+          </div>
+
+          <div style={{
+            padding: '1.75rem',
+            background: 'hsl(var(--card))',
+            border: '1.5px solid hsl(var(--ink) / .1)',
+            borderRadius: '12px',
+            display: 'flex', flexDirection: 'column', gap: '2rem',
+            marginBottom: '2rem'
+          }}>
+            <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0, lineHeight: 1.6 }}>
+              Configure the maximum generation token limit (`max_new_tokens`) for every individual AI task type.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
+              {[
+                { key: 'max_tokens_mom', label: 'Minutes of Meeting (MoM)', desc: 'Max output tokens for generating the primary Minutes of Meeting.' },
+                { key: 'max_tokens_mom_merge', label: 'MoM Merge Consolidation', desc: 'Max tokens used during multi-section MoM merges.' },
+                { key: 'max_tokens_raw_mom_to_mom', label: 'Raw MoM to Final MoM', desc: 'Max tokens for compiling final MoM from raw annotations.' },
+                { key: 'max_tokens_raw_mom_extraction', label: 'Raw MoM Extraction', desc: 'Max tokens for parsing discussion points per section.' },
+                { key: 'max_tokens_raw_mom_repair', label: 'Raw MoM Repair', desc: 'Max tokens used to fix corrupted raw MoM JSON structures.' },
+                { key: 'max_tokens_agenda_compress', label: 'Agenda Compression', desc: 'Max tokens for converting long/messy agendas into lists.' },
+                { key: 'max_tokens_reference_compress', label: 'Reference Document Compression', desc: 'Max tokens for summarizing attached reference knowledge.' },
+                { key: 'max_tokens_agenda_from_summary', label: 'Agenda Generation from Summary', desc: 'Max tokens for creating agenda items based on a summary.' },
+                { key: 'max_tokens_executive_summary', label: 'Executive Summary', desc: 'Max tokens for generating executive PDF report summaries.' },
+                { key: 'max_tokens_short_summary', label: 'Short Summary', desc: 'Max tokens for generating the ~120-word meeting summary.' },
+                { key: 'max_tokens_detailed_summary', label: 'Detailed Summary', desc: 'Max tokens for the detailed section-by-section summaries.' },
+                { key: 'max_tokens_chunk_summary', label: 'Chunk Summary', desc: 'Max tokens for single-chunk summaries during RAG/hierarchical passes.' },
+                { key: 'max_tokens_key_points', label: 'Key Points', desc: 'Max tokens for generating bullet-point meeting highlights.' },
+                { key: 'max_tokens_action_items', label: 'Action Items', desc: 'Max tokens for extracting standard action item lists.' },
+                { key: 'max_tokens_key_decisions', label: 'Key Decisions', desc: 'Max tokens for highlighting critical meeting decisions.' },
+                { key: 'max_tokens_speaker_summary', label: 'Speaker Summary', desc: 'Max tokens for summarizing a speaker\'s overall contributions.' },
+                { key: 'max_tokens_speaker_key_points', label: 'Speaker Key Points', desc: 'Max tokens for extracting speaker-specific highlights.' },
+                { key: 'max_tokens_speaker_action_items', label: 'Speaker Action Items', desc: 'Max tokens for extracting tasks assigned to specific speakers.' },
+                { key: 'max_tokens_collection_chat', label: 'Collection Chat', desc: 'Max output tokens for collection-level RAG questions.' },
+                { key: 'max_tokens_collection_compare', label: 'Collection Comparison', desc: 'Max tokens for comparing two full meetings.' },
+                { key: 'max_tokens_collection_topic_growth', label: 'Collection Topic Growth', desc: 'Max tokens for tracking how a topic grows over time.' },
+                { key: 'max_tokens_vocab_extractor', label: 'Vocabulary Extractor', desc: 'Max tokens for AI-assisted glossary/vocab extraction.' },
+              ].map(({ key, label, desc }) => {
+                return (
+                  <div key={key}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
+                      <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                        {label}
+                      </label>
+                      <input
+                        type="number"
+                        min={1} max={65536}
+                        value={settings[key as keyof UserSettings] ?? 1024}
+                        onChange={(e) => {
+                          const parsed = parseInt(e.target.value, 10)
+                          upd(key as keyof UserSettings, isNaN(parsed) ? 1024 : parsed)
+                        }}
+                        style={{
+                          fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
+                          color: 'hsl(var(--accent))', fontWeight: 700,
+                          padding: '.25rem .5rem',
+                          background: 'hsl(var(--accent) / .1)',
+                          borderRadius: '6px',
+                          border: '1.5px solid hsl(var(--accent) / .2)',
+                          width: '80px', textAlign: 'center',
+                          outline: 'none',
+                        }}
+                      />
+                    </div>
+                    <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
+                      {desc}
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
           <button
             className={`btn ${settingsSaved ? 'btn-success' : 'btn-primary'}`}
             onClick={handleSaveSettings}
@@ -825,8 +1753,68 @@ export default function SettingsPage() {
                 )
               })}
             </div>
+            {/* ─── Global Transcription Prompt ─── */}
+      <section className="animate-slide-up" style={{ marginBottom: '2.5rem', animationDelay: '0.02s', animationFillMode: 'both' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.25rem' }}>
+          <div style={{
+            width: '36px', height: '36px', borderRadius: '9px',
+            background: 'hsl(280,70%,60% / .12)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '1.5px solid hsl(280,70%,60% / .25)',
+          }}>
+            <MessageSquare size={18} style={{ color: 'hsl(280,70%,60%)' }} />
+          </div>
+          <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+            Global Transcription Prompt
+          </h2>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {promptSaving && <Loader size={13} className="spin" style={{ color: 'hsl(var(--pencil))' }} />}
+            {promptSaved && <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '.78rem', color: 'hsl(130,60%,45%)', fontFamily: 'Inter, sans-serif', fontWeight: 600 }}>
+              <CheckCircle size={13} /> Saved
+            </span>}
+          </div>
+        </div>
+
+        <div style={{
+          padding: '1.25rem',
+          background: 'hsl(var(--card))',
+          border: '1.5px solid hsl(var(--ink) / .1)',
+          borderRadius: '12px',
+        }}>
+          <textarea
+            id="global-prompt-textarea"
+            value={globalPrompt}
+            onChange={e => handlePromptChange(e.target.value)}
+            placeholder="Enter a global system prompt for all transcriptions…\n\nExamples:\n\u2022 This is a technical meeting in the healthcare domain.\n\u2022 The participants speak English with Indian accents.\n\u2022 Use formal language and preserve acronyms as-is."
+            rows={5}
+            style={{
+              width: '100%',
+              padding: '.75rem',
+              borderRadius: '8px',
+              background: 'hsl(var(--muted) / .4)',
+              border: '1.5px solid hsl(var(--ink) / .1)',
+              color: 'hsl(var(--ink))',
+              fontFamily: 'Inter, sans-serif',
+              fontSize: '.88rem',
+              lineHeight: 1.7,
+              resize: 'vertical',
+              outline: 'none',
+              boxSizing: 'border-box',
+              transition: 'border-color .15s',
+            }}
+            onFocus={e => (e.currentTarget.style.borderColor = 'hsl(280,70%,60% / .5)')}
+            onBlur={e => (e.currentTarget.style.borderColor = 'hsl(var(--ink) / .1)')}
+          />
+          <p style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', marginTop: '.6rem', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
+            This prompt is automatically included in every Whisper transcription request.
+            Keep it under 200 words for best results. Auto-saved as you type.
+          </p>
+        </div>
+      </section>
+
           </div>
         )}
+      
       </section>
       </div>
     </div>

@@ -145,7 +145,7 @@ export function useGlobalJobPoller() {
       const localJobs = useJobsStore.getState().jobs
       const backendIds = new Set(backendJobs.map((j) => j.jobId))
       const missingActiveJobs = localJobs.filter(
-        (j) => (j.status === 'pending' || j.status === 'processing') && !backendIds.has(j.jobId)
+        (j) => (j.status === 'pending' || j.status === 'processing' || j.status === 'transcript_ready') && !backendIds.has(j.jobId)
       )
 
       // Query status individually for each missing active job to resolve its terminal state

@@ -49,32 +49,37 @@ class Settings(BaseSettings):
     # SQLite database — relative to runtime/
     DATABASE_URL: str = f"sqlite+aiosqlite:///{(RUNTIME_DIR / 'data' / 'voicesum.db').as_posix()}"
 
-    # ── RAG / Text Embedding (Qwen3-Embedding-0.6B) ───────────────────────────
-    # Model name — change to "Qwen3-Embedding-8B" to upgrade; all embeddings
-    # must be regenerated after changing this value.
-    QWEN_EMBEDDING_MODEL_NAME: str = "Qwen3-Embedding-0.6B"
+    # ── RAG / Text Embedding ──────────────────────────────────────────────────
+    # The active embedding model to load from local runtime directory.
+    # Supported: "Qwen3-Embedding-0.6B", "Qwen3-Embedding-4B-Instruct-INT8", etc.
+    EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"
 
-    # Resolved path to the embedding model directory.
-    # Development: checks Application/runtime/embeddings/<model_name>/ first.
-    # Production:  <runtime_dir>/embeddings/<model_name>/
-    # Override in .env with an absolute path if needed.
-    QWEN_EMBEDDING_MODEL_DIR: str = str(
-        (BASE_DIR.parent / "Application" / "runtime" / "embeddings" / "Qwen3-Embedding-0.6B")
-        if (BASE_DIR.parent / "Application" / "runtime" / "embeddings" / "Qwen3-Embedding-0.6B").is_dir()
-        else (RUNTIME_DIR / "embeddings" / "Qwen3-Embedding-0.6B")
-    )
+    # Backward-compatible model name. Automatically synchronized with EMBEDDING_MODEL in __init__.
+    QWEN_EMBEDDING_MODEL_NAME: Optional[str] = None
+
+    @property
+    def QWEN_EMBEDDING_MODEL_DIR(self) -> str:
+        """
+        Resolved path to the embedding model directory.
+        Checks Application/runtime/embeddings/<model_name>/ first, then falls back
+        to <runtime_dir>/embeddings/<model_name>/.
+        """
+        dev_path = BASE_DIR.parent / "Application" / "runtime" / "embeddings" / self.EMBEDDING_MODEL
+        if dev_path.is_dir() and not getattr(sys, "frozen", False):
+            return str(dev_path)
+        return str(RUNTIME_DIR / "embeddings" / self.EMBEDDING_MODEL)
 
     # FAISS vector store base directory
     VECTOR_STORE_DIR: str = str(RUNTIME_DIR / "vector_store")
 
     # RAG chunking parameters
-    RAG_CHUNK_SIZE: int = 200        # target words per chunk
-    RAG_CHUNK_OVERLAP: int = 20      # words of overlap between chunks
+    RAG_CHUNK_SIZE: int = 400        # target words per chunk
+    RAG_CHUNK_OVERLAP: int = 50      # words of overlap between chunks
 
     # RAG retrieval — top-K per source
-    RAG_RETRIEVAL_K_GLOBAL: int = 0      # global context docs
-    RAG_RETRIEVAL_K_MEETING: int = 1     # meeting context attachments
-    RAG_RETRIEVAL_K_TRANSCRIPT: int = 8  # transcript chunks
+    RAG_RETRIEVAL_K_GLOBAL: int = 2      # global context docs
+    RAG_RETRIEVAL_K_MEETING: int = 3     # meeting context attachments
+    RAG_RETRIEVAL_K_TRANSCRIPT: int = 10  # transcript chunks
     RAG_RELATIVE_SCORE_CUTOFF: float = 0.01  # similarity score window
 
     # JWT — Access token (short-lived, in-memory on client)
@@ -93,6 +98,11 @@ class Settings(BaseSettings):
     QWEN_MODEL_ID: str = "Qwen/Qwen3-4B"
     QWEN_MAX_NEW_TOKENS: int = 1024
     QWEN_LOAD_IN_4BIT: bool = True  # Requires bitsandbytes; saves ~50% VRAM
+
+    # Ollama offline fallback settings
+    OLLAMA_SERVER_URL: str = "http://localhost:11434"
+    OLLAMA_PORT: int = 11434
+    OLLAMA_MODEL_PRIORITY: str = "gemma,qwen,llama,deepseek,mistral"
 
     # Configurable token threshold for switching to Section-wise MoM Generation
     MOM_CONTEXT_TOKEN_THRESHOLD: int = 3000
@@ -123,7 +133,7 @@ class Settings(BaseSettings):
 
     MIN_SEGMENT_DURATION: float = 1.5  # seconds
 
-    speaker_refinement_margin: float = 0.10  # margins/similarity difference for refinement
+    speaker_refinement_margin: float = 0.30  # margins/similarity difference for refinement
 
     # --- Audio preprocessing before alignment ---
     # When True, a lightweight cleanup pass (silence trim, clipping repair,
@@ -148,6 +158,13 @@ class Settings(BaseSettings):
     # Overlap detection model (Wav2Vec2-based binary classifier)
     # Default is relative to base dir; override in .env with absolute path if needed
     OVERLAP_MODEL_PATH: str = str(BASE_DIR / "checkpoints" / "overlap_model.pth")
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        if self.QWEN_EMBEDDING_MODEL_NAME is not None:
+            self.EMBEDDING_MODEL = self.QWEN_EMBEDDING_MODEL_NAME
+        else:
+            self.QWEN_EMBEDDING_MODEL_NAME = self.EMBEDDING_MODEL
 
     model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
 

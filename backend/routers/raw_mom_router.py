@@ -38,6 +38,16 @@ router = APIRouter(prefix="/raw-mom", tags=["raw-mom"])
 
 # ── Pydantic request models ───────────────────────────────────────────────────
 
+class AgendaItem(BaseModel):
+    topic: str
+    speaker: Optional[str] = None
+
+
+class GenerateFinalMomRequest(BaseModel):
+    char_limit: Optional[int] = None
+    use_max_tokens: Optional[bool] = False
+
+
 class RetrieveRequest(BaseModel):
     k_transcript: int = Field(default=8, ge=0, le=30)
     k_meeting: int = Field(default=4, ge=0, le=30)
@@ -45,12 +55,19 @@ class RetrieveRequest(BaseModel):
     relative_similarity_cutoff: float = Field(default=0.01, ge=0.0, le=1.0)
     char_limit: int = Field(default=15000, ge=1000, le=100000)
     force_reembed: bool = False
+    # Agenda-first: pre-parsed agenda avoids a second LLM call at retrieve time
+    agenda_items: Optional[List[AgendaItem]] = None
+    # Hybrid transcript retrieval params
+    timeline_stride_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
+    high_confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    recording_duration: float = Field(default=0.0, ge=0.0)
 
 
 class AgendaEvidenceItem(BaseModel):
     topic: str
     speaker: Optional[str] = None
     evidence: str  # pre-assembled evidence string from frontend
+    manual_context: Optional[str] = None  # per-agenda free-text context added in UI
 
 
 class GenerateFromEvidenceRequest(BaseModel):
@@ -202,8 +219,15 @@ async def retrieve_evidence_endpoint(
                 k_global=body.k_global,
                 relative_cutoff=body.relative_similarity_cutoff,
                 char_limit=body.char_limit,
+                # Agenda-first: skip LLM agenda parsing if frontend supplies them
+                agenda_items_override=[a.model_dump() for a in body.agenda_items] if body.agenda_items else None,
+                # Hybrid retrieval params
+                timeline_stride_seconds=body.timeline_stride_seconds,
+                high_confidence_threshold=body.high_confidence_threshold,
+                recording_duration=body.recording_duration,
             ),
         )
+
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
@@ -211,6 +235,194 @@ async def retrieve_evidence_endpoint(
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
 
     return result
+
+
+# ── POST agenda (create/load agenda items only, no LLM if cached) ─────────────
+
+class CreateAgendaRequest(BaseModel):
+    force_reparse: bool = False
+
+
+@router.post("/{recording_id}/agenda")
+async def create_agenda_endpoint(
+    recording_id: str,
+    body: CreateAgendaRequest = CreateAgendaRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Generate or load the agenda items for a recording.
+
+    If a cached parsed agenda already exists in the DB and force_reparse=False,
+    returns it immediately (no LLM call).  Otherwise runs get_or_create_agenda_items
+    which will parse the raw agenda document or generate from the context summary.
+
+    Returns the agenda as an ordered list so the frontend can display and edit
+    each item before proceeding to evidence retrieval.
+    """
+    user_id = current_user["id"]
+    rec = await _get_recording_or_404(recording_id, user_id)
+
+    transcript = from_json(rec.get("transcript"), [])
+    agenda_text: Optional[str] = rec.get("agenda_summary") or None
+    if not agenda_text:
+        agenda_text = await _load_raw_agenda_text(recording_id, user_id)
+
+    import asyncio
+    _loop = asyncio.get_running_loop()
+
+    try:
+        agendas, source = await _loop.run_in_executor(
+            None,
+            lambda: _run_create_agenda(
+                recording_id=recording_id,
+                user_id=user_id,
+                transcript=transcript,
+                agenda_text=agenda_text,
+                force_reparse=body.force_reparse,
+            ),
+        )
+    except Exception as e:
+        logger.error(f"[RawMoM] Agenda creation failed for {recording_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Agenda creation failed: {str(e)}")
+
+    return {"agendas": agendas, "source": source}
+
+
+# ── POST retrieve-agenda (single-agenda retrieval) ────────────────────────────
+
+class RetrieveAgendaRequest(BaseModel):
+    topic: str
+    speaker: Optional[str] = None
+    agenda_index: int = Field(default=0, ge=0)
+    total_agendas: int = Field(default=1, ge=1)
+    k_transcript: int = Field(default=8, ge=0, le=30)
+    k_meeting: int = Field(default=4, ge=0, le=30)
+    k_global: int = Field(default=2, ge=0, le=30)
+    relative_similarity_cutoff: float = Field(default=0.01, ge=0.0, le=1.0)
+    char_limit: int = Field(default=15000, ge=1000, le=100000)
+    force_reembed: bool = False
+    timeline_stride_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
+    high_confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    recording_duration: float = Field(default=0.0, ge=0.0)
+
+
+@router.post("/{recording_id}/retrieve-agenda")
+async def retrieve_single_agenda_endpoint(
+    recording_id: str,
+    body: RetrieveAgendaRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve evidence for a single agenda item only.
+
+    Embeds transcript/meeting context if not already done (same as /retrieve),
+    then runs the hybrid retrieval for the given agenda topic/index.
+
+    Returns a single AgendaResult object (not a list).
+    """
+    user_id = current_user["id"]
+    rec = await _get_recording_or_404(recording_id, user_id)
+
+    transcript = from_json(rec.get("transcript"), [])
+    if not transcript:
+        raise HTTPException(
+            status_code=400,
+            detail="No transcript available. Run transcription first.",
+        )
+
+    import asyncio
+    _loop = asyncio.get_running_loop()
+
+    try:
+        result = await _loop.run_in_executor(
+            None,
+            lambda: _run_retrieve_single_agenda(
+                recording_id=recording_id,
+                user_id=user_id,
+                transcript=transcript,
+                topic=body.topic,
+                speaker=body.speaker,
+                agenda_index=body.agenda_index,
+                total_agendas=body.total_agendas,
+                force_reembed=body.force_reembed,
+                k_transcript=body.k_transcript,
+                k_meeting=body.k_meeting,
+                k_global=body.k_global,
+                relative_cutoff=body.relative_similarity_cutoff,
+                char_limit=body.char_limit,
+                timeline_stride_seconds=body.timeline_stride_seconds,
+                high_confidence_threshold=body.high_confidence_threshold,
+                recording_duration=body.recording_duration,
+            ),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(
+            f"[RawMoM] retrieve-agenda failed for {recording_id} agenda {body.agenda_index}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
+
+    return result
+
+
+# ── POST extract-file-text (in-session file text extraction) ─────────────────
+
+from fastapi import UploadFile, File as FastAPIFile
+import tempfile
+import os as _os
+
+
+@router.post("/{recording_id}/extract-file-text")
+async def extract_file_text_endpoint(
+    recording_id: str,
+    file: UploadFile = FastAPIFile(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Accept a multipart file upload and extract its plain text.
+
+    No DB storage — the text is returned directly to the caller for
+    in-session use as per-agenda context. Supports PDF, DOCX, PPTX, TXT, MD,
+    PNG, JPG, XLSX, XLS, CSV (same as doc_extractor).
+
+    Returns { "filename": str, "text": str, "char_count": int }
+    """
+    # Auth check — ensure the recording belongs to this user
+    await _get_recording_or_404(recording_id, current_user["id"])
+
+    filename = file.filename or "upload"
+    content = await file.read()
+
+    # Write to temp file for doc_extractor (it works with file paths)
+    suffix = _os.path.splitext(filename)[1] or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        from services.doc_extractor import extract_text_from_file
+        import asyncio
+        _loop = asyncio.get_running_loop()
+        text = await _loop.run_in_executor(
+            None, lambda: extract_text_from_file(tmp_path, filename)
+        )
+    except Exception as e:
+        logger.error(f"[RawMoM] extract-file-text failed for {filename}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
+    finally:
+        try:
+            _os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    text = text.strip()
+    return {
+        "filename": filename,
+        "text": text,
+        "char_count": len(text),
+    }
 
 
 # ── POST generate (from pre-assembled evidence) ───────────────────────────────
@@ -266,6 +478,7 @@ async def generate_from_evidence_endpoint(
 @router.post("/{recording_id}/generate-final-mom")
 async def generate_final_mom_from_raw_mom_endpoint(
     recording_id: str,
+    req: Optional[GenerateFinalMomRequest] = None,
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -281,6 +494,8 @@ async def generate_final_mom_from_raw_mom_endpoint(
     MoM Editor.
     """
     user_id = current_user["id"]
+    char_limit = req.char_limit if req else None
+    use_max_tokens = req.use_max_tokens if req else False
 
     # Fetch recording with all needed columns
     async with get_db() as db:
@@ -322,7 +537,12 @@ async def generate_final_mom_from_raw_mom_endpoint(
     try:
         mom_data = await _loop.run_in_executor(
             None,
-            lambda: _run_generate_mom_from_raw_mom(raw_mom_data, recording_meta),
+            lambda: _run_generate_mom_from_raw_mom(
+                raw_mom_data,
+                recording_meta,
+                char_limit=char_limit,
+                use_max_tokens=use_max_tokens,
+            ),
         )
     except Exception as e:
         logger.error(
@@ -647,6 +867,54 @@ async def delete_raw_mom(
 
 # ── Sync pipeline runners ─────────────────────────────────────────────────────
 
+def _run_create_agenda(
+    recording_id: str,
+    user_id: str,
+    transcript: list,
+    agenda_text: Optional[str],
+    force_reparse: bool,
+) -> tuple:
+    """Synchronous agenda generation. Returns (agenda_items, source)."""
+    from services.rag_pipeline import (
+        get_or_create_agenda_items,
+        _load_parsed_agenda,
+        _save_parsed_agenda,
+    )
+    from services.ai_provider import get_provider
+    from services.text_embedding_service import unload_text_embedder
+
+    try:
+        if not force_reparse:
+            cached = _load_parsed_agenda(recording_id)
+            if cached:
+                logger.info(f"[RawMoM] Returning cached agenda ({len(cached)} items)")
+                return cached, "cached"
+
+        if force_reparse:
+            # Clear cached agenda so get_or_create re-parses
+            _save_parsed_agenda(recording_id, user_id, [])
+
+        agenda_items = get_or_create_agenda_items(
+            recording_id=recording_id,
+            user_id=user_id,
+            transcript=transcript,
+            agenda_text=agenda_text,
+        )
+        source = "parsed" if agenda_text else "generated"
+        return agenda_items, source
+    finally:
+        try:
+            from services.ai_provider import QwenProvider
+            QwenProvider.unload_model()
+        except Exception:
+            pass
+        try:
+            unload_text_embedder()
+        except Exception:
+            pass
+
+
+
 def _run_retrieve_pipeline(
     recording_id: str,
     user_id: str,
@@ -658,6 +926,11 @@ def _run_retrieve_pipeline(
     k_global: int,
     relative_cutoff: float,
     char_limit: int,
+    # Hybrid retrieval params
+    agenda_items_override: Optional[list] = None,
+    timeline_stride_seconds: float = 60.0,
+    high_confidence_threshold: float = 0.70,
+    recording_duration: float = 0.0,
 ) -> dict:
     """Synchronous retrieval-only pipeline (no LLM)."""
     from services.rag_pipeline import (
@@ -681,17 +954,23 @@ def _run_retrieve_pipeline(
             if count > 0:
                 _mark_meeting_context_embedded(recording_id, user_id)
 
-        # Step 3: Get or generate agenda items (unified logic)
-        agenda_items = get_or_create_agenda_items(
-            recording_id=recording_id,
-            user_id=user_id,
-            transcript=transcript,
-            agenda_text=agenda_text,
-        )
+        # Step 3: Get agenda items — use pre-parsed override if provided
+        if agenda_items_override:
+            agenda_items = agenda_items_override
+            logger.info(f"[RawMoM] Using {len(agenda_items)} pre-parsed agenda items from frontend")
+        else:
+            agenda_items = get_or_create_agenda_items(
+                recording_id=recording_id,
+                user_id=user_id,
+                transcript=transcript,
+                agenda_text=agenda_text,
+            )
+
+        total_agendas = len(agenda_items)
 
         # Step 4: Retrieve raw chunks per agenda item
         agendas_with_chunks = []
-        for item in agenda_items:
+        for idx, item in enumerate(agenda_items):
             topic = item.get("topic", "")
             if not topic:
                 continue
@@ -704,6 +983,12 @@ def _run_retrieve_pipeline(
                 k_transcript=k_transcript,
                 relative_cutoff=relative_cutoff,
                 char_limit=char_limit,
+                # Hybrid params
+                agenda_index=idx,
+                total_agendas=total_agendas,
+                recording_duration=recording_duration,
+                timeline_stride=timeline_stride_seconds,
+                high_confidence_threshold=high_confidence_threshold,
             )
             agendas_with_chunks.append({
                 "topic": topic,
@@ -722,10 +1007,84 @@ def _run_retrieve_pipeline(
                 "k_global": k_global,
                 "relative_similarity_cutoff": relative_cutoff,
                 "char_limit": char_limit,
+                "timeline_stride_seconds": timeline_stride_seconds,
+                "high_confidence_threshold": high_confidence_threshold,
+                "recording_duration": recording_duration,
             },
         }
     finally:
         # Unload embedding model to free VRAM
+        try:
+            unload_text_embedder()
+        except Exception as e:
+            logger.warning(f"[RawMoM] Failed to unload embedder: {e}")
+
+
+
+def _run_retrieve_single_agenda(
+    recording_id: str,
+    user_id: str,
+    transcript: list,
+    topic: str,
+    speaker: Optional[str],
+    agenda_index: int,
+    total_agendas: int,
+    force_reembed: bool,
+    k_transcript: int,
+    k_meeting: int,
+    k_global: int,
+    relative_cutoff: float,
+    char_limit: int,
+    timeline_stride_seconds: float,
+    high_confidence_threshold: float,
+    recording_duration: float,
+) -> dict:
+    """Synchronous retrieval for a single agenda item. Embeds if needed."""
+    from services.rag_pipeline import (
+        embed_transcript, embed_meeting_context,
+        retrieve_evidence_raw, _transcript_embedded, _meeting_context_embedded,
+        _mark_transcript_embedded, _mark_meeting_context_embedded,
+    )
+    from services.text_embedding_service import unload_text_embedder
+
+    try:
+        # Ensure transcript is embedded
+        if transcript and (force_reembed or not _transcript_embedded(recording_id)):
+            count = embed_transcript(recording_id, transcript, user_id)
+            if count > 0:
+                _mark_transcript_embedded(recording_id, user_id)
+
+        # Ensure meeting context is embedded
+        if force_reembed or not _meeting_context_embedded(recording_id):
+            count = embed_meeting_context(recording_id, user_id)
+            if count > 0:
+                _mark_meeting_context_embedded(recording_id, user_id)
+
+        chunks = retrieve_evidence_raw(
+            agenda_topic=topic,
+            recording_id=recording_id,
+            user_id=user_id,
+            k_global=k_global,
+            k_meeting=k_meeting,
+            k_transcript=k_transcript,
+            relative_cutoff=relative_cutoff,
+            char_limit=char_limit,
+            agenda_index=agenda_index,
+            total_agendas=total_agendas,
+            recording_duration=recording_duration,
+            timeline_stride=timeline_stride_seconds,
+            high_confidence_threshold=high_confidence_threshold,
+        )
+
+        return {
+            "topic": topic,
+            "speaker": speaker,
+            "is_procedural": chunks["is_procedural"],
+            "transcript_chunks": chunks["transcript"],
+            "meeting_chunks": chunks["meeting"],
+            "global_chunks": chunks["global"],
+        }
+    finally:
         try:
             unload_text_embedder()
         except Exception as e:
@@ -746,6 +1105,11 @@ def _run_generate_from_evidence(agendas: list) -> dict:
             topic = item.topic
             speaker = item.speaker
             evidence = item.evidence
+
+            # Append per-agenda manual context if provided
+            manual_ctx = (item.manual_context or "").strip()
+            if manual_ctx:
+                evidence = evidence + "\n\n=== AGENDA-SPECIFIC CONTEXT ===\n" + manual_ctx
 
             try:
                 result = provider.extract_raw_mom_for_agenda(
@@ -781,12 +1145,22 @@ def _run_generate_from_evidence(agendas: list) -> dict:
             logger.warning(f"[RawMoM] Failed to unload LLM: {e}")
 
 
-def _run_generate_mom_from_raw_mom(raw_mom_data: dict, recording_meta: dict) -> dict:
+def _run_generate_mom_from_raw_mom(
+    raw_mom_data: dict,
+    recording_meta: dict,
+    char_limit: Optional[int] = None,
+    use_max_tokens: Optional[bool] = False,
+) -> dict:
     """Synchronous wrapper for the Raw MoM → Final MoM conversion pipeline."""
     from services.ai_provider import QwenProvider
     from services.llm import generate_mom_from_raw_mom
     try:
-        return generate_mom_from_raw_mom(raw_mom_data, recording_meta)
+        return generate_mom_from_raw_mom(
+            raw_mom_data,
+            recording_meta,
+            char_limit=char_limit,
+            use_max_tokens=use_max_tokens,
+        )
     finally:
         try:
             QwenProvider.unload_model()

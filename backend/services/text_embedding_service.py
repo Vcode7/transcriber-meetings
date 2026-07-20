@@ -56,7 +56,7 @@ class TextEmbeddingService:
 
     def load(self) -> None:
         """
-        Load the Qwen3-Embedding model from the local runtime directory.
+        Load the Qwen embedding model from the local runtime directory.
 
         Raises
         ------
@@ -75,7 +75,7 @@ class TextEmbeddingService:
         if not model_dir.exists() or not model_dir.is_dir():
             raise FileNotFoundError(
                 f"[TextEmbedding] Embedding model directory not found: {model_dir}\n"
-                f"Expected model: {settings.QWEN_EMBEDDING_MODEL_NAME}\n"
+                f"Expected model: {settings.EMBEDDING_MODEL}\n"
                 "Please place the model folder at the path above before starting the application.\n"
                 "The application will NOT download models from the internet."
             )
@@ -85,15 +85,20 @@ class TextEmbeddingService:
         if not model_files:
             raise FileNotFoundError(
                 f"[TextEmbedding] Model directory is empty: {model_dir}\n"
-                f"Please populate it with the {settings.QWEN_EMBEDDING_MODEL_NAME} model files."
+                f"Please populate it with the {settings.EMBEDDING_MODEL} model files."
             )
 
         logger.info(
-            f"[TextEmbedding] Loading {settings.QWEN_EMBEDDING_MODEL_NAME} "
+            f"[TextEmbedding] Loading {settings.EMBEDDING_MODEL} "
             f"from {model_dir} ..."
         )
 
         try:
+            import os
+            # Enforce offline behavior
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
             import torch
             from transformers import AutoTokenizer, AutoModel
 
@@ -103,22 +108,53 @@ class TextEmbeddingService:
             self._tokenizer = AutoTokenizer.from_pretrained(
                 str(model_dir),
                 local_files_only=True,
+                trust_remote_code=True,
             )
-            self._model = AutoModel.from_pretrained(
-                str(model_dir),
-                local_files_only=True,
-                torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
-            )
-            self._model.eval()
-            if self._device == "cuda":
-                self._model = self._model.cuda()
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token
 
-            # Determine embedding dimension via a dry-run
-            self._dim = self._get_dim()
+            torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
+
+            try:
+                # Try loading with device_map="auto" if cuda is available
+                if self._device == "cuda":
+                    self._model = AutoModel.from_pretrained(
+                        str(model_dir),
+                        local_files_only=True,
+                        trust_remote_code=True,
+                        torch_dtype=torch_dtype,
+                        device_map="auto"
+                    )
+                else:
+                    self._model = AutoModel.from_pretrained(
+                        str(model_dir),
+                        local_files_only=True,
+                        trust_remote_code=True,
+                        torch_dtype=torch_dtype
+                    )
+                    self._model = self._model.to(self._device)
+            except Exception as e:
+                logger.warning(f"[TextEmbedding] Failed loading with standard AutoModel: {e}. Retrying without device_map / custom args.")
+                # Fallback load
+                self._model = AutoModel.from_pretrained(
+                    str(model_dir),
+                    local_files_only=True,
+                    trust_remote_code=True
+                )
+                self._model = self._model.to(self._device)
+
+            self._model.eval()
+
+            # Determine embedding dimension dynamically
+            if hasattr(self._model, "config") and hasattr(self._model.config, "hidden_size"):
+                self._dim = self._model.config.hidden_size
+            else:
+                self._dim = self._get_dim()
+
             self._loaded = True
 
             logger.info(
-                f"[TextEmbedding] {settings.QWEN_EMBEDDING_MODEL_NAME} loaded "
+                f"[TextEmbedding] {settings.EMBEDDING_MODEL} loaded "
                 f"(device={self._device}, dim={self._dim}) ✓"
             )
 
@@ -248,6 +284,20 @@ class TextEmbeddingService:
             pass
         logger.info("[TextEmbedding] Embedding model unloaded.")
 
+    # ── Compatibility Aliases ──────────────────────────────────────────────────
+
+    def embed_text(self, text: str) -> np.ndarray:
+        """Alias for encode for backward compatibility."""
+        return self.encode(text)
+
+    def embed_chunks(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """Alias for encode_batch for backward compatibility."""
+        return self.encode_batch(texts, batch_size=batch_size)
+
+    def embed_query(self, text: str) -> np.ndarray:
+        """Alias for encode for backward compatibility."""
+        return self.encode(text)
+
 
 # ── Singleton accessor ────────────────────────────────────────────────────────
 
@@ -264,3 +314,21 @@ def unload_text_embedder() -> None:
     global _embedder
     if _embedder is not None:
         _embedder.unload()
+
+
+# ── Compatibility Module-Level Wrappers ──────────────────────────────────────
+
+def embed_text(text: str) -> np.ndarray:
+    """Module-level wrapper for embed_text."""
+    return get_text_embedder().embed_text(text)
+
+
+def embed_chunks(texts: List[str], batch_size: int = 32) -> np.ndarray:
+    """Module-level wrapper for embed_chunks."""
+    return get_text_embedder().embed_chunks(texts, batch_size=batch_size)
+
+
+def embed_query(text: str) -> np.ndarray:
+    """Module-level wrapper for embed_query."""
+    return get_text_embedder().embed_query(text)
+

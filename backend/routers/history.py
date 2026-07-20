@@ -129,6 +129,12 @@ async def delete_recording(recording_id: str, current_user: dict = Depends(get_c
         if rec.get("file_path"):
             delete_file(rec["file_path"])
 
+        # Remove from any collections
+        await db.execute(
+            text("DELETE FROM meeting_collection_items WHERE meeting_id = :id"),
+            {"id": recording_id},
+        )
+        
         await db.execute(
             text("DELETE FROM recordings WHERE id = :id"),
             {"id": recording_id},
