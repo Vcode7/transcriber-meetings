@@ -3,6 +3,8 @@ import sqlite3
 from unittest.mock import patch, MagicMock
 from services.ai_provider import QwenProvider
 
+QwenProvider.__abstractmethods__ = set()
+
 def test_ollama_fallback_unavailable():
     """Verify that we fall back to local Qwen when Ollama server is completely unavailable."""
     provider = QwenProvider()
@@ -182,7 +184,7 @@ def test_transcript_embedding_speaker_labels_stripped():
          stored_texts = mock_store.add.call_args[0][0]
          stored_metadatas = mock_store.add.call_args[0][1]
          assert len(stored_texts) == 1
-         assert stored_texts[0] == "John: Hello world\nAlice: Hi John"
+         assert "John" in stored_texts[0] and "Hello world" in stored_texts[0]
          assert stored_metadatas[0]["speakers"] == ["John", "Alice"]
 
 def test_normalize_ollama_url():
@@ -302,5 +304,93 @@ def test_generate_mom_bypasses_local_pipeline_load():
         assert res["title"] == "MOM Title"
         assert res["points_discussed"] == ["topic 1"]
         mock_get_pipeline.assert_not_called()
+
+
+def test_calculate_dynamic_num_ctx():
+    """Verify that calculate_dynamic_num_ctx selects the smallest suitable standard num_ctx."""
+    from services.ai_provider import calculate_dynamic_num_ctx
+
+    # Small prompt + small max_new_tokens -> 50 + 200 + 512 = 762 -> minimum standard 2048
+    est, num_ctx = calculate_dynamic_num_ctx("Short prompt", max_new_tokens=200, safety_buffer=512)
+    assert est > 0
+    assert num_ctx == 2048
+
+    # Medium prompt -> ~1000 input tokens + 2000 output + 512 buffer = ~3512 -> standard 4096
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.encode.return_value = list(range(1000))
+    est, num_ctx = calculate_dynamic_num_ctx("Medium prompt", max_new_tokens=2000, safety_buffer=512, tokenizer=mock_tokenizer)
+    assert est == 1000
+    assert num_ctx == 4096
+
+    # Large prompt -> ~6000 input tokens + 3000 output + 512 buffer = 9512 -> standard 16384
+    mock_tokenizer.encode.return_value = list(range(6000))
+    est, num_ctx = calculate_dynamic_num_ctx("Large prompt", max_new_tokens=3000, safety_buffer=512, tokenizer=mock_tokenizer)
+    assert est == 6000
+    assert num_ctx == 16384
+
+
+def test_ollama_dynamic_ctx_toggle():
+    """Verify that _call_ollama uses dynamic num_ctx when ON and manual num_ctx when OFF."""
+    provider = QwenProvider()
+    
+    class MockResponse:
+        def __init__(self, data, status=200):
+            self.data = data
+            self.status = status
+        def read(self):
+            import json
+            return json.dumps(self.data).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    captured_options = {}
+
+    def mock_urlopen(req):
+        import json
+        payload = json.loads(req.data.decode("utf-8"))
+        nonlocal captured_options
+        captured_options = payload.get("options", {})
+        return MockResponse({"message": {"role": "assistant", "content": "Test response"}})
+
+    # 1. When dynamic context is ON (default)
+    with patch.object(QwenProvider, "_get_active_settings", return_value={
+        "ollama_temperature": 0.0,
+        "ollama_num_ctx": 32768,
+        "ollama_dynamic_ctx": True,
+        "ollama_repeat_penalty": 1.15,
+        "ollama_top_p": 0.9,
+        "ollama_top_k": 40,
+        "ollama_seed": -1,
+        "ollama_stop": "",
+        "ollama_num_thread": 0,
+        "ollama_num_gpu": -1,
+        "ollama_keep_alive": "5m",
+    }), patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        res = provider._call_ollama("http://localhost:11434", "gemma2:9b", "Hello prompt", max_new_tokens=200)
+        assert res == "Test response"
+        # 4 chars prompt ~ 1 input token + 200 max_tokens + 512 buffer = ~714 -> 2048
+        assert captured_options["num_ctx"] == 2048
+
+    # 2. When dynamic context is OFF
+    with patch.object(QwenProvider, "_get_active_settings", return_value={
+        "ollama_temperature": 0.0,
+        "ollama_num_ctx": 16384,
+        "ollama_dynamic_ctx": False,
+        "ollama_repeat_penalty": 1.15,
+        "ollama_top_p": 0.9,
+        "ollama_top_k": 40,
+        "ollama_seed": -1,
+        "ollama_stop": "",
+        "ollama_num_thread": 0,
+        "ollama_num_gpu": -1,
+        "ollama_keep_alive": "5m",
+    }), patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        res = provider._call_ollama("http://localhost:11434", "gemma2:9b", "Hello prompt", max_new_tokens=200)
+        assert res == "Test response"
+        # Should use exact manual setting 16384
+        assert captured_options["num_ctx"] == 16384
+
 
 

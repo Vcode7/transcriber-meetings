@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   Database, Upload, Trash2, CheckCircle, Loader, AlertTriangle,
-  RefreshCw, Info, FileText, File, X, ChevronRight
+  RefreshCw, Info, FileText, File, X, ChevronRight, FolderUp, Folder
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 interface GlobalContextDoc {
   id: string
   filename: string
+  relative_path?: string
   file_hash: string
   embedded: boolean
   chunk_count: number
@@ -25,21 +26,7 @@ interface StatusInfo {
   vector_store_dir: string
 }
 
-const ALLOWED_TYPES = [
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'text/plain',
-  'text/markdown',
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-excel',
-  'text/csv',
-]
-
-const ALLOWED_EXT_LABELS = 'PDF, DOCX, PPTX, TXT, MD, PNG, JPG, EXCEL, CSV'
+const ALLOWED_EXT_LABELS = 'PDF, DOCX, DOC, PPTX, PPT, TXT, MD, PNG, JPG, EXCEL, CSV'
 
 function formatDate(str: string) {
   try {
@@ -54,12 +41,51 @@ function getFileIcon(filename: string) {
   const ext = filename.split('.').pop()?.toLowerCase()
   switch (ext) {
     case 'pdf': return '📄'
-    case 'docx': return '📝'
-    case 'pptx': return '📊'
+    case 'docx': case 'doc': return '📝'
+    case 'pptx': case 'ppt': return '📊'
     case 'txt': case 'md': return '📃'
     case 'png': case 'jpg': case 'jpeg': case 'webp': return '🖼️'
+    case 'xlsx': case 'xls': case 'csv': return '📈'
     default: return '📎'
   }
+}
+
+async function getFilesFromDataTransfer(items: DataTransferItemList): Promise<{ file: File; relPath: string }[]> {
+  const result: { file: File; relPath: string }[] = []
+
+  async function traverseEntry(entry: any, path: string) {
+    if (entry.isFile) {
+      await new Promise<void>((resolve) => {
+        entry.file((file: File) => {
+          result.push({ file, relPath: path ? `${path}/${file.name}` : file.name })
+          resolve()
+        })
+      })
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      const entries: any[] = await new Promise((resolve) => {
+        reader.readEntries((ents: any[]) => resolve(ents))
+      })
+      for (const childEntry of entries) {
+        await traverseEntry(childEntry, path ? `${path}/${entry.name}` : entry.name)
+      }
+    }
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (item.kind === 'file') {
+      const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null
+      if (entry) {
+        await traverseEntry(entry, '')
+      } else {
+        const file = item.getAsFile()
+        if (file) result.push({ file, relPath: file.name })
+      }
+    }
+  }
+
+  return result
 }
 
 export default function GlobalContext() {
@@ -71,6 +97,7 @@ export default function GlobalContext() {
   const [reindexing, setReindexing] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   const fetchDocs = useCallback(async () => {
     try {
@@ -89,22 +116,29 @@ export default function GlobalContext() {
 
   useEffect(() => { fetchDocs() }, [fetchDocs])
 
-  const uploadFiles = async (files: File[]) => {
+  const uploadFiles = async (files: File[], relativePaths?: string[]) => {
     if (!files.length) return
     setUploading(true)
     const form = new FormData()
     files.forEach(f => form.append('files', f))
+    if (relativePaths && relativePaths.length) {
+      form.append('relative_paths', JSON.stringify(relativePaths))
+    }
     try {
       const res = await api.post('/global-context/upload', form, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
-      const { uploaded, skipped_duplicates } = res.data
+      const { uploaded, skipped_duplicates, skipped_unsupported } = res.data
       const embedded = uploaded.filter((u: any) => u.embedded).length
       const failed = uploaded.filter((u: any) => u.error).length
+      const skippedUnsuppCount = skipped_unsupported?.length || 0
+
       const msgs = []
       if (embedded > 0) msgs.push(`${embedded} document${embedded !== 1 ? 's' : ''} indexed`)
       if (skipped_duplicates > 0) msgs.push(`${skipped_duplicates} duplicate${skipped_duplicates !== 1 ? 's' : ''} skipped`)
+      if (skippedUnsuppCount > 0) msgs.push(`${skippedUnsuppCount} unsupported file${skippedUnsuppCount !== 1 ? 's' : ''} skipped`)
       if (failed > 0) msgs.push(`${failed} failed`)
+
       toast.success(msgs.join(', ') || 'Upload complete')
       await fetchDocs()
     } catch (e: any) {
@@ -115,9 +149,21 @@ export default function GlobalContext() {
     }
   }
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     setDragging(false)
+
+    const items = e.dataTransfer.items
+    if (items && items.length > 0) {
+      const fileEntries = await getFilesFromDataTransfer(items)
+      if (fileEntries.length > 0) {
+        const files = fileEntries.map(e => e.file)
+        const relPaths = fileEntries.map(e => e.relPath)
+        uploadFiles(files, relPaths)
+        return
+      }
+    }
+
     const files = Array.from(e.dataTransfer.files)
     uploadFiles(files)
   }, [])
@@ -125,6 +171,15 @@ export default function GlobalContext() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
     if (files.length) uploadFiles(files)
+    e.target.value = ''
+  }
+
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || [])
+    if (files.length) {
+      const relPaths = files.map(f => f.webkitRelativePath || f.name)
+      uploadFiles(files, relPaths)
+    }
     e.target.value = ''
   }
 
@@ -171,7 +226,7 @@ export default function GlobalContext() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1>Global Knowledge Base</h1>
           <p style={{ fontSize: '.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', fontWeight: 400, marginTop: '1px' }}>
-            Upload organization-wide documents that provide background context for all meetings
+            Upload organizational documents or import entire folders to provide background context for all meetings
           </p>
         </div>
         {docs.length > 0 && (
@@ -228,7 +283,6 @@ export default function GlobalContext() {
           onDragOver={e => { e.preventDefault(); setDragging(true) }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
           style={{
             borderRadius: 16,
             border: `2px dashed ${dragging ? 'hsl(260,85%,65%)' : 'hsl(var(--border))'}`,
@@ -238,7 +292,7 @@ export default function GlobalContext() {
             padding: '2.5rem',
             display: 'flex', flexDirection: 'column',
             alignItems: 'center', justifyContent: 'center',
-            gap: '0.75rem', cursor: 'pointer',
+            gap: '0.75rem',
             transition: 'all 0.2s ease',
             position: 'relative',
           }}
@@ -247,7 +301,7 @@ export default function GlobalContext() {
             <>
               <Loader size={32} className="spin" style={{ color: 'hsl(260,85%,65%)' }} />
               <p style={{ margin: 0, fontSize: '.9rem', color: 'hsl(var(--pencil))' }}>
-                Processing and indexing…
+                Processing, extracting & indexing documents...
               </p>
             </>
           ) : (
@@ -262,20 +316,55 @@ export default function GlobalContext() {
               </div>
               <div style={{ textAlign: 'center' }}>
                 <p style={{ margin: 0, fontSize: '.95rem', fontWeight: 600, color: 'hsl(var(--ink))' }}>
-                  Drag & drop files here
+                  Drag & drop files or entire folders here
                 </p>
                 <p style={{ margin: '4px 0 0', fontSize: '.8rem', color: 'hsl(var(--pencil))' }}>
-                  or click to browse · {ALLOWED_EXT_LABELS} · Max 50 MB
+                  Supports {ALLOWED_EXT_LABELS} · Max 50 MB per file
                 </p>
+              </div>
+
+              {/* Upload Buttons */}
+              <div style={{ display: 'flex', gap: '10px', marginTop: '.75rem' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ fontSize: '.84rem', padding: '.5rem 1.1rem' }}
+                >
+                  <Upload size={14} style={{ marginRight: '6px' }} /> Upload Files
+                </button>
+
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => folderInputRef.current?.click()}
+                  style={{ fontSize: '.84rem', padding: '.5rem 1.1rem' }}
+                >
+                  <FolderUp size={14} style={{ marginRight: '6px' }} /> Import Folder
+                </button>
               </div>
             </>
           )}
+
+          {/* Single/Multiple File Input */}
           <input
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
+            accept=".pdf,.docx,.doc,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
             onChange={handleFileSelect}
+            style={{ display: 'none' }}
+          />
+
+          {/* Folder Directory Input */}
+          <input
+            ref={folderInputRef}
+            type="file"
+            // @ts-expect-error webkitdirectory is standard in HTML5 directory pickers
+            webkitdirectory=""
+            directory=""
+            multiple
+            onChange={handleFolderSelect}
             style={{ display: 'none' }}
           />
         </div>
@@ -291,7 +380,7 @@ export default function GlobalContext() {
           <p style={{ margin: 0, fontSize: '.8rem', color: 'hsl(var(--pencil))', lineHeight: 1.5 }}>
             Documents uploaded here are retrieved by the <strong>Raw MoM pipeline</strong> to
             provide organizational context for any meeting. Ideal for: company glossaries,
-            project specs, product docs, process manuals, org charts.
+            project specs, product docs, process manuals, org charts. Relative subfolder paths are preserved for traceability.
           </p>
         </div>
 
@@ -308,7 +397,7 @@ export default function GlobalContext() {
           }}>
             <Database size={32} style={{ margin: '0 auto 12px', opacity: 0.35 }} />
             <p style={{ margin: 0, fontSize: '.9rem' }}>No documents yet.</p>
-            <p style={{ margin: '4px 0 0', fontSize: '.8rem' }}>Upload organizational documents to get started.</p>
+            <p style={{ margin: '4px 0 0', fontSize: '.8rem' }}>Upload organizational documents or folders to get started.</p>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -316,7 +405,7 @@ export default function GlobalContext() {
               fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--pencil))',
               textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '0.25rem',
             }}>
-              Knowledge Documents
+              Knowledge Documents ({docs.length})
             </div>
             {docs.map(doc => (
               <div key={doc.id} style={{
@@ -333,11 +422,25 @@ export default function GlobalContext() {
 
                 {/* Info */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: '.9rem', fontWeight: 600, color: 'hsl(var(--ink))',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                  }}>
-                    {doc.filename}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{
+                      fontSize: '.9rem', fontWeight: 600, color: 'hsl(var(--ink))',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {doc.filename}
+                    </span>
+
+                    {/* Relative path badge */}
+                    {doc.relative_path && doc.relative_path !== doc.filename && (
+                      <span style={{
+                        fontSize: '.72rem', color: 'hsl(var(--accent))',
+                        fontFamily: 'JetBrains Mono, monospace', background: 'hsl(var(--accent) / .08)',
+                        padding: '2px 7px', borderRadius: '4px', border: '1px solid hsl(var(--accent) / .2)',
+                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '320px',
+                      }} title={doc.relative_path}>
+                        📁 {doc.relative_path}
+                      </span>
+                    )}
                   </div>
                   <div style={{
                     fontSize: '.74rem', color: 'hsl(var(--pencil))', marginTop: 2,

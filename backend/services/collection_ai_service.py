@@ -63,22 +63,24 @@ def retrieve_collection_context(
     meeting_meta: Dict[str, Dict],
     query: str,
     user_id: str,
+    max_chunks: int = 10,
     k_per_meeting: int = 5,
     max_total_chars: int = 20000,
     include_global: bool = True,
 ) -> CollectionContext:
     """
     Query FAISS transcript stores for each meeting in the collection and
-    merge results into a ranked, budget-constrained context.
+    merge results into a ranked, deduplicated, score-sorted context capped at max_chunks.
 
     Parameters
     ----------
     meeting_ids    : List of recording IDs in the collection.
     meeting_meta   : Dict mapping recording_id -> {filename, created_at, ...}
-    query          : The user's question or topic.
+    query          : Search query string (or LLM retrieval plan).
     user_id        : Current user ID (for global context lookup).
-    k_per_meeting  : Max chunks to retrieve per meeting.
-    max_total_chars: Hard character budget for the assembled context.
+    max_chunks     : Maximum number of retrieved chunks to include in final context.
+    k_per_meeting  : Max chunks to retrieve per meeting store.
+    max_total_chars: Hard character budget for assembled context.
     include_global : Whether to include global context docs.
 
     Returns
@@ -146,11 +148,26 @@ def retrieve_collection_context(
         except Exception as e:
             logger.warning(f"[CollectionAI] Global context search failed: {e}")
 
-    # ── Rank by score and apply budget ────────────────────────────────────────
+    # ── Rank by similarity score descending ──────────────────────────────────
     all_chunks.sort(key=lambda c: c.score, reverse=True)
 
-    total_chars = 0
+    # ── Deduplicate identical chunks ──────────────────────────────────────────
+    deduped_chunks: List[MeetingChunk] = []
+    seen_signatures = set()
+
     for chunk in all_chunks:
+        # Signature based on meeting ID, start/end timestamps, and text prefix
+        sig = (chunk.meeting_id, round(chunk.start, 1), round(chunk.end, 1), chunk.text[:80])
+        if sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
+        deduped_chunks.append(chunk)
+
+    # ── Enforce max_chunks cap and character budget ────────────────────────────
+    total_chars = 0
+    for chunk in deduped_chunks:
+        if len(ctx.chunks) >= max_chunks:
+            break
         if total_chars + len(chunk.text) > max_total_chars:
             continue
         ctx.chunks.append(chunk)
@@ -159,9 +176,146 @@ def retrieve_collection_context(
     ctx.total_chars = total_chars
     logger.info(
         f"[CollectionAI] Retrieved {len(ctx.chunks)} chunks "
-        f"({total_chars} chars) from {len(meeting_ids)} meetings"
+        f"(max_chunks={max_chunks}, {total_chars} chars) from {len(meeting_ids)} meetings"
     )
     return ctx
+
+
+# ── Two-Stage Retrieval Orchestrator ─────────────────────────────────────────
+
+def generate_retrieval_plan(
+    question: str,
+    chat_history: List[Dict],
+) -> tuple[bool, str]:
+    """
+    Stage 1 — Context Planning & Triage:
+    Pass user question (without context) to LLM.
+    Returns (context_required: bool, detail: str).
+
+    If context_required is True: detail is the retrieval plan for vector search.
+    If context_required is False: detail is the final complete answer to the user question.
+    """
+    import json
+    import re
+    from services.ai_provider import _get_prompt, get_provider
+
+    template = _get_prompt("collection_planning")
+    if not template:
+        return True, question.strip()
+
+    history_text = ""
+    if chat_history:
+        recent = chat_history[-4:]
+        history_lines = ["PREVIOUS CONVERSATION:"]
+        for msg in recent:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "")
+            if len(content) > 300:
+                content = content[:300] + "..."
+            history_lines.append(f"{role}: {content}")
+        history_text = "\n".join(history_lines)
+
+    prompt = template.format(
+        conversation_history=history_text,
+        question=question,
+    )
+
+    try:
+        provider = get_provider()
+        raw_resp = provider._infer(prompt, max_new_tokens=300)
+        if raw_resp:
+            clean_resp = raw_resp.strip()
+            # Extract JSON block if surrounded by markdown codeblocks
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', clean_resp, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1).strip()
+            else:
+                # Find outer braces
+                first_brace = clean_resp.find('{')
+                last_brace = clean_resp.rfind('}')
+                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    json_str = clean_resp[first_brace:last_brace + 1]
+                else:
+                    json_str = clean_resp
+
+            try:
+                data = json.loads(json_str)
+                context_req = bool(data.get("context_required", True))
+                detail = str(data.get("detail", "")).strip()
+
+                if detail:
+                    logger.info(
+                        f"[CollectionAI Stage 1] Triage parsed — context_required={context_req}, "
+                        f"detail='{detail[:80]}...'"
+                    )
+                    return context_req, detail
+            except Exception:
+                logger.warning(f"[CollectionAI Stage 1] JSON parse failed for response: '{clean_resp[:100]}'")
+
+            # Fallback if text response wasn't valid JSON
+            return True, clean_resp
+    except Exception as e:
+        logger.warning(f"[CollectionAI Stage 1] Retrieval plan generation failed: {e}. Using raw query.")
+
+    return True, question.strip()
+
+
+def retrieve_collection_context_two_stage(
+    meeting_ids: List[str],
+    meeting_meta: Dict[str, Dict],
+    query: str,
+    user_id: str,
+    chat_history: List[Dict] | None = None,
+    max_context: int = 10,
+    k_per_meeting: int = 5,
+    max_total_chars: int = 20000,
+    include_global: bool = True,
+) -> tuple[CollectionContext, str, bool]:
+    """
+    Two-Stage Retrieval Pipeline:
+      Stage 1: Generate retrieval plan / triage decision via LLM.
+      Stage 2: Vector search with retrieval plan (if context_required==True).
+      Fallback: Retries search using raw user query if retrieval plan yields 0 chunks.
+
+    Returns (CollectionContext, detail_or_plan_used, context_required)
+    """
+    # Stage 1: Context Planning & Triage
+    context_required, detail = generate_retrieval_plan(query, chat_history or [])
+
+    if not context_required:
+        # Direct answer generated in Stage 1 — skip RAG vector search entirely
+        logger.info("[CollectionAI Stage 1] context_required=False. Skipping RAG retrieval.")
+        ctx = CollectionContext()
+        return ctx, detail, False
+
+    # Stage 2: Vector Search with Retrieval Plan
+    ctx = retrieve_collection_context(
+        meeting_ids=meeting_ids,
+        meeting_meta=meeting_meta,
+        query=detail,
+        user_id=user_id,
+        max_chunks=max_context,
+        k_per_meeting=k_per_meeting,
+        max_total_chars=max_total_chars,
+        include_global=include_global,
+    )
+
+    # Fallback to raw user query if retrieval plan yields 0 chunks
+    if not ctx.chunks and detail != query.strip():
+        logger.info("[CollectionAI Stage 2 Fallback] Retrieval plan produced 0 chunks. Retrying search with raw query...")
+        ctx = retrieve_collection_context(
+            meeting_ids=meeting_ids,
+            meeting_meta=meeting_meta,
+            query=query,
+            user_id=user_id,
+            max_chunks=max_context,
+            k_per_meeting=k_per_meeting,
+            max_total_chars=max_total_chars,
+            include_global=include_global,
+        )
+        return ctx, query.strip(), True
+
+    return ctx, detail, True
 
 
 def retrieve_meeting_context(
@@ -533,11 +687,31 @@ def _stream_ollama(
     import urllib.request
     import json
 
+    from services.ai_provider import QwenProvider, calculate_dynamic_num_ctx
+
+    system_content = (
+        "You are an expert enterprise meeting analyst. "
+        "Follow instructions exactly. Preserve all technical terminology."
+    )
+
+    dynamic_enabled = bool(cfg.get("ollama_dynamic_ctx", True))
+    manual_num_ctx = int(cfg.get("ollama_num_ctx", 32768))
+
+    est_input_tokens, calculated_num_ctx = calculate_dynamic_num_ctx(
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        safety_buffer=512,
+        system_content=system_content,
+        tokenizer=QwenProvider._tokenizer,
+    )
+
+    selected_num_ctx = calculated_num_ctx if dynamic_enabled else manual_num_ctx
+
     # Prepare options payload with validation defaults
     options = {
         "num_predict": max_new_tokens,
         "temperature": float(cfg["ollama_temperature"]),
-        "num_ctx": int(cfg["ollama_num_ctx"]),
+        "num_ctx": selected_num_ctx,
         "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
         "top_p": float(cfg["ollama_top_p"]),
         "top_k": int(cfg["ollama_top_k"]),
@@ -558,10 +732,7 @@ def _stream_ollama(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are an expert enterprise meeting analyst. "
-                    "Follow instructions exactly. Preserve all technical terminology."
-                ),
+                "content": system_content,
             },
             {"role": "user", "content": prompt},
         ],
@@ -577,21 +748,15 @@ def _stream_ollama(
     base_url = server_url.rstrip("/")
     url = f"{base_url}/api/chat"
 
-    # Pre-logging request options (exactly like ai_provider.py)
-    est_tokens = "N/A"
-    try:
-        from services.ai_provider import QwenProvider
-        if QwenProvider._tokenizer:
-            est_tokens = len(QwenProvider._tokenizer.encode(prompt))
-    except Exception:
-        pass
-
     logger.info(
         f"[CollectionAI] Sending Streaming Ollama Request:\n"
         f"  - Model: {model}\n"
         f"  - Server URL: {server_url}\n"
+        f"  - Dynamic Context Window: {'ENABLED (ON)' if dynamic_enabled else 'DISABLED (OFF)'}\n"
+        f"  - Estimated Input Tokens: {est_input_tokens}\n"
+        f"  - Max Output Tokens (num_predict): {max_new_tokens}\n"
+        f"  - Selected num_ctx: {selected_num_ctx} (calculated: {calculated_num_ctx}, manual setting: {manual_num_ctx})\n"
         f"  - Prompt Chars: {len(prompt)}\n"
-        f"  - Estimated Prompt Tokens: {est_tokens}\n"
         f"  - Options: {options}\n"
         f"  - Keep Alive: {payload.get('keep_alive', 'N/A')}"
     )

@@ -1,0 +1,286 @@
+{
+  "timestamp": 1784691596.5822883,
+  "status": {
+    "system": {
+      "os": "Windows 11 (10.0.26200)",
+      "python": "3.12.3 | packaged by conda-forge | (main, Apr 15 2024, 18:20:11) [MSC v.1938 64 bit (AMD64)]",
+      "cpu_percent": 100.0,
+      "cpu_cores_logical": 12,
+      "cpu_cores_physical": 8,
+      "ram_total": 16788930560,
+      "ram_used": 15048531968,
+      "ram_percent": 89.6,
+      "process_ram": 471879680,
+      "process_cpu": 0.0,
+      "uptime": 3.3801381587982178
+    },
+    "gpu": {
+      "cuda_available": false,
+      "name": "",
+      "utilization": 0.0,
+      "memory_used": 0.0,
+      "memory_total": 0.0,
+      "memory_free": 0.0,
+      "temperature": 0.0,
+      "power_draw": 0.0,
+      "driver_version": "",
+      "cuda_version": ""
+    },
+    "models": [
+      {
+        "name": "Transcription",
+        "key": "whisper",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Transcription Model"
+      },
+      {
+        "name": "Diarization",
+        "key": "diarization",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Diarization Model"
+      },
+      {
+        "name": "Speaker Identification",
+        "key": "ecapa",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Speaker ID Model"
+      },
+      {
+        "name": "Alignment Cache",
+        "key": "align",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Alignment Model"
+      },
+      {
+        "name": "Language Model",
+        "key": "local_llm",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "LLM Model"
+      },
+      {
+        "name": "Text Embeddings",
+        "key": "local_embeddings",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Embedding Model"
+      },
+      {
+        "name": "Overlap Classification",
+        "key": "overlap",
+        "status": "Offline",
+        "device": "CPU",
+        "size": "Overlap Model"
+      }
+    ],
+    "active_jobs": [],
+    "storage": {
+      "models": {
+        "size": 4404485522,
+        "files": 61
+      },
+      "uploads": {
+        "size": 2215954038,
+        "files": 87
+      },
+      "vector_store": {
+        "size": 848070,
+        "files": 20
+      },
+      "database": {
+        "size": 60207104,
+        "files": 1
+      },
+      "logs": {
+        "size": 1434911,
+        "files": 1
+      }
+    },
+    "database": {
+      "path": "E:\\projects\\Transcriber-meeting-initial\\backend\\voicesum.db",
+      "size": 60207104,
+      "tables": {
+        "users": 1,
+        "sessions": 82,
+        "login_attempts": 83,
+        "voice_profiles": 5,
+        "recordings": 77,
+        "recording_attachments": 7,
+        "global_context_documents": 6,
+        "dictionary": 0
+      }
+    },
+    "vector_store": {
+      "global_context": {
+        "count": 1,
+        "vectors": 2,
+        "size": 100
+      },
+      "meeting_context": {
+        "count": 4,
+        "vectors": 35,
+        "size": 241880
+      },
+      "transcript": {
+        "count": 5,
+        "vectors": 59,
+        "size": 606090
+      },
+      "total_size": 848070
+    },
+    "performance": {
+      "avg_total": 0.0,
+      "avg_transcription": 0.0,
+      "avg_alignment": 0.0,
+      "avg_diarization": 0.0,
+      "avg_identification": 0.0,
+      "avg_llm": 0.0,
+      "count": 0
+    },
+    "activity": [
+      {
+        "id": "cf07873c-5628-4ce3-80da-81bbd2f0ac0f",
+        "filename": "output2.wav",
+        "status": "done",
+        "timestamp": "2026-07-21T22:27:55.934002+00:00"
+      },
+      {
+        "id": "1d70d20d-e1c0-497b-8d2f-4ca8674b1580",
+        "filename": "output2.wav",
+        "status": "error",
+        "timestamp": "2026-07-21T22:12:41.376491+00:00"
+      },
+      {
+        "id": "5e323a0a-9c32-4ffe-a559-d2263ec8c347",
+        "filename": "king_c10999de-d910-4c5d-9030-94bdef836931.mp4",
+        "status": "error",
+        "timestamp": "2026-07-19T17:48:05.765224+00:00"
+      },
+      {
+        "id": "eb1f6f0a-6529-49bc-8bcc-cda9d49e41f1",
+        "filename": "english_podcast.mp3",
+        "status": "done",
+        "timestamp": "2026-07-19T17:33:55.715183+00:00"
+      },
+      {
+        "id": "90839022-a8cb-493e-adee-b5cc4752d722",
+        "filename": "english_podcast.mp3",
+        "status": "done",
+        "timestamp": "2026-07-19T16:51:31.612271+00:00"
+      },
+      {
+        "id": "243891b7-5a75-4869-a32f-276bf08d74f7",
+        "filename": "king_a088ccc2-a564-4200-b99b-2a01a29abb4e.mp4",
+        "status": "cancelled",
+        "timestamp": "2026-07-19T15:09:35.637624+00:00"
+      },
+      {
+        "id": "4118a004-0e57-43f9-9f4c-7684434d6ce5",
+        "filename": "recording.webm",
+        "status": "done",
+        "timestamp": "2026-07-16T11:25:57.860764+00:00"
+      },
+      {
+        "id": "13dc234b-d8e3-4f62-b811-c4dc4dd58841",
+        "filename": "output.wav",
+        "status": "done",
+        "timestamp": "2026-07-16T09:53:24.561189+00:00"
+      },
+      {
+        "id": "ba947d80-1033-4a4b-8500-6b43f09d5af6",
+        "filename": "output.wav",
+        "status": "error",
+        "timestamp": "2026-07-16T09:38:57.682845+00:00"
+      },
+      {
+        "id": "2f5f90b3-86ed-4d23-9f13-2937054e1b2d",
+        "filename": "king_95fdeb2c-c78c-47e4-a3a8-c55cf349fcf3.mp4",
+        "status": "error",
+        "timestamp": "2026-07-16T09:27:32.854609+00:00"
+      }
+    ],
+    "config": {
+      "chunk_size": 400,
+      "chunk_overlap": 50,
+      "k_global": 2,
+      "k_meeting": 3,
+      "k_transcript": 10,
+      "similarity_cutoff": 0.01,
+      "whisper_device": "auto",
+      "whisper_compute_type": "int8",
+      "llm_model": "LLM Model",
+      "embedding_model": "Embedding Model",
+      "speaker_threshold": 0.75,
+      "min_segment_dur": 1.5,
+      "audio_preprocess": true,
+      "offline_mode": true
+    },
+    "asyncio_tasks": 4
+  },
+  "recent_logs": [
+    {
+      "timestamp": "2026-07-22 09:09:53,972",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:53,994",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
+    },
+    {
+      "timestamp": "2026-07-22 09:09:54,209",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-42' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.218 seconds"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:54,873",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task finished name='Task-42' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.657 seconds"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:54,957",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:54,961",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 Found 2 chunks missing summaries. Triggering VRAM recovery and retry sequence..."
+    },
+    {
+      "timestamp": "2026-07-22 09:09:55,170",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-47' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.218 seconds"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:55,203",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
+    },
+    {
+      "timestamp": "2026-07-22 09:09:55,414",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-47' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.218 seconds"
+    },
+    {
+      "timestamp": "2026-07-22 09:09:56,059",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task finished name='Task-47' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.641 seconds"
+    }
+  ]
+}

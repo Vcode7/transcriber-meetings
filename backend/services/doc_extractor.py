@@ -285,21 +285,106 @@ def _extract_pdf(path: str) -> str:
             return ""
 
 
-def _extract_docx(path: str) -> str:
-    """Extract plain text and run OCR on embedded drawings/images inside paragraphs and tables."""
-    try:
-        from docx import Document
-        doc = Document(path)
-        parts = []
+def _format_table_matrix_to_markdown(matrix: list[list[str]], title: str = "Table") -> str:
+    r"""
+    Format a 2D matrix of cell strings into a clean, structured Markdown table.
+    Ensures:
+      - All rows have the same number of columns (padded with empty strings).
+      - Multi-line cell text (newlines) is converted to '<br>' to preserve single-line row structure.
+      - Pipe characters '|' in cell content are escaped as '\|'.
+      - Header separator row '| --- | --- | ... |' is generated.
+      - Completely empty rows are omitted.
+    """
+    if not matrix:
+        return ""
 
-        # 1. Paragraphs with embedded drawings
-        for para in doc.paragraphs:
-            para_parts = []
-            if para.text.strip():
-                para_parts.append(para.text.strip())
+    cleaned_rows: list[list[str]] = []
+    for row in matrix:
+        cleaned_row = []
+        for cell in row:
+            c_str = str(cell).strip() if cell is not None else ""
+            # Escape pipe characters
+            c_str = c_str.replace("|", "\\|")
+            # Replace internal newlines with <br>
+            c_str = re.sub(r'\r?\n', '<br>', c_str)
+            cleaned_row.append(c_str)
+        # Keep row if at least one cell has non-whitespace text
+        if any(c for c in cleaned_row):
+            cleaned_rows.append(cleaned_row)
 
-            # Look for drawings inside runs
-            for run in para.runs:
+    if not cleaned_rows:
+        return ""
+
+    num_cols = max(len(r) for r in cleaned_rows)
+    if num_cols == 0:
+        return ""
+
+    # Pad all rows to num_cols
+    for row in cleaned_rows:
+        while len(row) < num_cols:
+            row.append("")
+
+    lines = []
+    header_row = cleaned_rows[0]
+    lines.append(f"[{title}: {len(cleaned_rows)} rows x {num_cols} cols]")
+    lines.append("| " + " | ".join(header_row) + " |")
+    lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+    for row in cleaned_rows[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+
+    return "\n".join(lines)
+
+
+def _process_docx_paragraph(para, doc, parts_acc: list[str]) -> None:
+    """Extract paragraph text and OCR text from embedded drawings inside runs."""
+    para_parts = []
+    text = para.text.strip()
+    if text:
+        para_parts.append(text)
+
+    # Check for drawings inside runs
+    for run in para.runs:
+        try:
+            drawings = run._r.findall(
+                './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
+            )
+            for drawing in drawings:
+                embeds = drawing.findall(
+                    './/{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
+                )
+                for embed in embeds:
+                    rId = embed.get(
+                        '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+                    )
+                    if rId and hasattr(doc, "part") and rId in doc.part.related_parts:
+                        image_part = doc.part.related_parts[rId]
+                        image_bytes = image_part.blob
+                        ocr_text = _ocr_image_bytes(
+                            image_bytes, label=f"DOCX para embed rId={rId}"
+                        )
+                        if ocr_text and not _is_duplicate(text, ocr_text):
+                            para_parts.append(f"[Embedded Image OCR: {ocr_text}]")
+        except Exception:
+            pass
+
+    if para_parts:
+        parts_acc.append("\n".join(para_parts))
+
+
+def _process_docx_cell_text(cell, doc) -> str:
+    """Extract cell text including nested tables and paragraph OCR drawings."""
+    cell_parts = []
+    # Loop over block-level items inside cell XML
+    for elem in cell._tc:
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "p":
+            from docx.text.paragraph import Paragraph
+            p = Paragraph(elem, cell)
+            p_text = p.text.strip()
+            if p_text:
+                cell_parts.append(p_text)
+            # OCR drawings in paragraph
+            for run in p.runs:
                 try:
                     drawings = run._r.findall(
                         './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
@@ -312,58 +397,84 @@ def _extract_docx(path: str) -> str:
                             rId = embed.get(
                                 '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
                             )
-                            if rId and rId in doc.part.related_parts:
+                            if rId and hasattr(doc, "part") and rId in doc.part.related_parts:
                                 image_part = doc.part.related_parts[rId]
                                 image_bytes = image_part.blob
                                 ocr_text = _ocr_image_bytes(
-                                    image_bytes, label=f"DOCX para embed rId={rId}"
+                                    image_bytes, label=f"DOCX cell img {rId}"
                                 )
-                                if ocr_text and not _is_duplicate(para.text, ocr_text):
-                                    para_parts.append(f"[Embedded Image OCR: {ocr_text}]")
+                                if ocr_text and not _is_duplicate(p_text, ocr_text):
+                                    cell_parts.append(f"[Embedded Image OCR: {ocr_text}]")
                 except Exception:
                     pass
-            if para_parts:
-                parts.append("\n".join(para_parts))
+        elif tag == "tbl":
+            from docx.table import Table
+            nested_tbl = Table(elem, cell)
+            nested_md = _process_docx_table(nested_tbl, doc, is_nested=True)
+            if nested_md:
+                cell_parts.append(f"\n[Nested Table]\n{nested_md}\n")
 
-        # 2. Tables with embedded drawings
-        for table in doc.tables:
-            for row in table.rows:
-                cells_text = []
-                for cell in row.cells:
-                    cell_text = cell.text.strip()
-                    cell_parts = [cell_text] if cell_text else []
+    return "\n".join(cell_parts).strip()
 
-                    # Inspect cell paragraphs for runs with drawings
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            try:
-                                drawings = run._r.findall(
-                                    './/{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'
-                                )
-                                for drawing in drawings:
-                                    embeds = drawing.findall(
-                                        './/{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
-                                    )
-                                    for embed in embeds:
-                                        rId = embed.get(
-                                            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
-                                        )
-                                        if rId and rId in doc.part.related_parts:
-                                            image_part = doc.part.related_parts[rId]
-                                            image_bytes = image_part.blob
-                                            ocr_text = _ocr_image_bytes(
-                                                image_bytes,
-                                                label=f"DOCX table cell embed rId={rId}",
-                                            )
-                                            if ocr_text and not _is_duplicate(cell_text, ocr_text):
-                                                cell_parts.append(f"[Embedded Image OCR: {ocr_text}]")
-                            except Exception:
-                                pass
-                    if cell_parts:
-                        cells_text.append("\n".join(cell_parts))
-                row_text = " | ".join(cells_text)
-                if row_text.strip():
-                    parts.append(row_text)
+
+def _process_docx_table(table, doc, is_nested: bool = False) -> str:
+    """Extract table as a Markdown table matrix with merged cell handling."""
+    matrix = []
+    for row in table.rows:
+        row_cells = []
+        seen_tc = set()
+        for cell in row.cells:
+            tc_id = id(cell._tc)
+            # Horizontal merge in python-docx: adjacent cells in row.cells point to same _tc
+            if tc_id in seen_tc:
+                # Spanned cell (horizontally merged) — keep empty to maintain layout
+                row_cells.append("")
+                continue
+            seen_tc.add(tc_id)
+
+            c_text = _process_docx_cell_text(cell, doc)
+            row_cells.append(c_text)
+
+        if any(c for c in row_cells):
+            matrix.append(row_cells)
+
+    title = "Nested Table" if is_nested else "Table"
+    return _format_table_matrix_to_markdown(matrix, title=title)
+
+
+def _extract_docx(path: str) -> str:
+    """Extract plain text and tables in document flow order, with OCR on embedded drawings."""
+    try:
+        from docx import Document
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+
+        doc = Document(path)
+        parts = []
+
+        # Iterate over child elements of document body in native document order
+        for child in doc.element.body:
+            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if tag == "p":
+                para = Paragraph(child, doc)
+                _process_docx_paragraph(para, doc, parts)
+            elif tag == "tbl":
+                table = Table(child, doc)
+                tbl_md = _process_docx_table(table, doc)
+                if tbl_md:
+                    parts.append(tbl_md)
+            elif tag in ("sdt", "txbxContent"):
+                # Structured Document Tags or Text Boxes containing paragraphs & tables
+                for sub in child.iter():
+                    sub_tag = sub.tag.split("}")[-1] if "}" in sub.tag else sub.tag
+                    if sub_tag == "p":
+                        p = Paragraph(sub, doc)
+                        _process_docx_paragraph(p, doc, parts)
+                    elif sub_tag == "tbl":
+                        t = Table(sub, doc)
+                        t_md = _process_docx_table(t, doc)
+                        if t_md:
+                            parts.append(t_md)
 
         return "\n\n".join(parts)
     except Exception as e:
@@ -371,7 +482,7 @@ def _extract_docx(path: str) -> str:
         return ""
 
 
-def _process_pptx_shape(shape, slide_idx: int, slide_parts: List[str], extracted_set: Set[str]) -> None:
+def _process_pptx_shape(shape, slide_idx: int, slide_parts: list[str], extracted_set: set[str]) -> None:
     """Recursively extract content from a pptx shape."""
     # 1. Group shapes (recurse into sub-shapes)
     if hasattr(shape, "shapes"):
@@ -386,21 +497,32 @@ def _process_pptx_shape(shape, slide_idx: int, slide_parts: List[str], extracted
     if hasattr(shape, "has_table") and shape.has_table:
         try:
             table = shape.table
-            table_text_lines = []
+            matrix = []
             for row in table.rows:
                 row_cells = []
                 for cell in row.cells:
+                    is_spanned = False
+                    try:
+                        if hasattr(cell, "is_spanned") and cell.is_spanned:
+                            is_spanned = True
+                    except Exception:
+                        pass
+
                     cell_text = cell.text.strip() if hasattr(cell, "text") else ""
-                    if cell_text:
+                    if is_spanned:
+                        # Spanned cell in python-pptx — keep empty to maintain column alignment
+                        row_cells.append("")
+                    else:
                         row_cells.append(cell_text)
-                if row_cells:
-                    table_text_lines.append(" | ".join(row_cells))
-            if table_text_lines:
-                table_text = "[Table]\n" + "\n".join(table_text_lines)
-                norm = re.sub(r'\s+', ' ', table_text.lower())
+
+                matrix.append(row_cells)
+
+            tbl_md = _format_table_matrix_to_markdown(matrix, title=f"Table (Slide {slide_idx})")
+            if tbl_md:
+                norm = re.sub(r'\s+', ' ', tbl_md.lower())
                 if not any(norm in x or x in norm for x in extracted_set):
                     extracted_set.add(norm)
-                    slide_parts.append(table_text)
+                    slide_parts.append(tbl_md)
         except Exception as tbl_err:
             logger.warning(f"[DocExtractor] Failed extracting table on slide {slide_idx}: {tbl_err}")
         return
@@ -480,7 +602,7 @@ def _process_pptx_shape(shape, slide_idx: int, slide_parts: List[str], extracted
     # 5. Picture shape
     is_picture = False
     try:
-        if shape.shape_type == 13 or hasattr(shape, "image"):
+        if getattr(shape, "shape_type", None) == 13 or hasattr(shape, "image"):
             is_picture = True
     except Exception:
         pass
@@ -648,27 +770,79 @@ def _extract_spreadsheet(path: str, filename: str) -> str:
         return ""
 
 
+def _get_soffice_cmd() -> str | None:
+    """Return path or binary name for LibreOffice soffice command if available."""
+    import shutil
+    # 1. Check system PATH
+    soffice_path = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice_path:
+        return soffice_path
+
+    # 2. Check standard Windows installations
+    if sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ]
+        for cand in candidates:
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def _convert_legacy_doc_or_ppt(file_path: str, target_ext: str) -> str | None:
+    """
+    Convert legacy binary formats (.doc -> .docx, .ppt -> .pptx) using LibreOffice headless mode.
+    Returns the path to the temporary converted file, or None if conversion failed/unavailable.
+    """
+    soffice_cmd = _get_soffice_cmd()
+    if not soffice_cmd:
+        logger.warning(
+            f"[DocExtractor] LibreOffice (soffice) not found on system. "
+            f"Cannot convert legacy '{os.path.basename(file_path)}' to {target_ext}. "
+            "Please install LibreOffice or convert file to .docx/.pptx."
+        )
+        return None
+
+    import tempfile
+    temp_dir = tempfile.mkdtemp(prefix="voicesum_doc_conv_")
+    try:
+        cmd = [
+            soffice_cmd,
+            "--headless",
+            "--convert-to",
+            target_ext.lstrip("."),
+            "--outdir",
+            temp_dir,
+            file_path,
+        ]
+        kw = {}
+        if sys.platform == "win32":
+            kw["creationflags"] = _CREATE_NO_WINDOW
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, **kw)
+        if proc.returncode == 0:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            converted_path = os.path.join(temp_dir, base_name + target_ext)
+            if os.path.isfile(converted_path):
+                return converted_path
+    except Exception as exc:
+        logger.warning(f"[DocExtractor] Legacy document conversion failed for {file_path}: {exc}")
+
+    return None
+
+
 SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".pptx", ".txt", ".md",
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md",
     ".png", ".jpg", ".jpeg", ".webp",
     ".xlsx", ".xls", ".csv",
 }
 
-UNSUPPORTED_EXTENSIONS = {
-    ".doc", ".ppt",
-}
+UNSUPPORTED_EXTENSIONS: set[str] = set()
 
 
 def extract_text_from_file(file_path: str, filename: str) -> str:
     """Extract plain text from a document, image, or spreadsheet file."""
     ext = os.path.splitext(filename.lower())[1]
-
-    if ext in UNSUPPORTED_EXTENSIONS:
-        logger.warning(
-            f"[DocExtractor] Unsupported format '{ext}' for '{filename}'. "
-            "For .doc use .docx; for .ppt use .pptx."
-        )
-        return ""
 
     if ext == ".pdf":
         text = _extract_pdf(file_path)
@@ -676,6 +850,32 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
         text = _extract_docx(file_path)
     elif ext == ".pptx":
         text = _extract_pptx(file_path)
+    elif ext == ".doc":
+        converted = _convert_legacy_doc_or_ppt(file_path, ".docx")
+        if converted and os.path.isfile(converted):
+            try:
+                text = _extract_docx(converted)
+            finally:
+                try:
+                    os.remove(converted)
+                    os.rmdir(os.path.dirname(converted))
+                except Exception:
+                    pass
+        else:
+            text = ""
+    elif ext == ".ppt":
+        converted = _convert_legacy_doc_or_ppt(file_path, ".pptx")
+        if converted and os.path.isfile(converted):
+            try:
+                text = _extract_pptx(converted)
+            finally:
+                try:
+                    os.remove(converted)
+                    os.rmdir(os.path.dirname(converted))
+                except Exception:
+                    pass
+        else:
+            text = ""
     elif ext in (".txt", ".md"):
         text = _extract_text(file_path)
     elif ext in (".png", ".jpg", ".jpeg", ".webp"):

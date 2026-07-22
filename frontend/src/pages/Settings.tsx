@@ -28,11 +28,14 @@ interface UserSettings {
   rag_retrieval_k_global?: number
   rag_retrieval_k_meeting?: number
   rag_retrieval_k_transcript?: number
+  rag_max_collection_context?: number
   rag_relative_score_cutoff?: number
   generate_mom_auto?: boolean
+  embedding_model?: string
 
   // New Ollama settings
   ollama_num_ctx?: number
+  ollama_dynamic_ctx?: boolean
   ollama_temperature?: number
   ollama_top_p?: number
   ollama_top_k?: number
@@ -80,9 +83,20 @@ interface PromptTemplate {
   updated_at: string | null
 }
 
+interface EmbeddingModelOption {
+  id: string
+  name: string
+  description: string
+  dim?: number | null
+  quantization?: string
+  installed: boolean
+  path?: string | null
+}
+
 export default function SettingsPage() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [settings, setSettings] = useState<UserSettings | null>(null)
+  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([])
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editLabel, setEditLabel] = useState('')
@@ -118,16 +132,20 @@ export default function SettingsPage() {
 
   const loadData = async () => {
     try {
-      const [pRes, sRes, prRes, ptRes] = await Promise.all([
+      const [pRes, sRes, prRes, ptRes, emRes] = await Promise.all([
         api.get('/voice/profiles'),
         api.get('/settings'),
         api.get('/prompt/global'),
         api.get('/prompt-templates'),
+        api.get('/settings/embedding-models').catch(() => ({ data: { models: [] } })),
       ])
       setProfiles(pRes.data)
       setSettings(sRes.data)
       setGlobalPrompt(prRes.data?.prompt || '')
       setPrompts(ptRes.data)
+      if (emRes.data?.models) {
+        setEmbeddingModels(emRes.data.models)
+      }
     } catch (err) {
       toast.error('Failed to load settings data')
     } finally {
@@ -901,6 +919,68 @@ export default function SettingsPage() {
                   <h3 style={{ fontSize: '0.92rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '1.25rem' }}>
                     Ollama Advanced Generation Parameters
                   </h3>
+
+                  {/* Dynamic Context Window Toggle */}
+                  <div style={{
+                    marginBottom: '1.25rem',
+                    padding: '0.9rem 1.1rem',
+                    borderRadius: '10px',
+                    background: 'hsl(var(--ink) / .03)',
+                    border: '1.5px solid hsl(var(--border) / .4)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Dynamic Context Window (num_ctx)
+                        <span style={{
+                          fontSize: '.72rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
+                          background: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,50% / .15)' : 'hsl(var(--pencil) / .15)',
+                          color: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,35%)' : 'hsl(var(--pencil))',
+                          border: `1px solid ${(settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,50% / .3)' : 'hsl(var(--pencil) / .3)'}`
+                        }}>
+                          {(settings.ollama_dynamic_ctx ?? true) ? 'ON (Auto-calculated)' : 'OFF (Manual num_ctx)'}
+                        </span>
+                      </div>
+                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: '4px 0 0', lineHeight: 1.45 }}>
+                        {(settings.ollama_dynamic_ctx ?? true)
+                          ? 'ON: Before every Ollama request, estimates prompt tokens + max_output_tokens + 512 safety buffer, selecting the smallest suitable standard num_ctx (2048, 4096, 8192, 16384, ...).'
+                          : 'OFF: Uses the manually configured num_ctx value below exactly as specified.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => upd('ollama_dynamic_ctx', !(settings.ollama_dynamic_ctx ?? true))}
+                      style={{
+                        flexShrink: 0,
+                        width: '48px', height: '26px',
+                        borderRadius: '999px',
+                        border: 'none',
+                        background: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,45%)' : 'hsl(var(--ink) / .18)',
+                        cursor: 'pointer',
+                        position: 'relative',
+                        transition: 'background .25s',
+                        outline: 'none',
+                        boxShadow: (settings.ollama_dynamic_ctx ?? true) ? '0 0 0 3px hsl(180,90%,50% / .2)' : 'none',
+                      }}
+                      title={(settings.ollama_dynamic_ctx ?? true) ? 'Click to disable Dynamic Context Window' : 'Click to enable Dynamic Context Window'}
+                    >
+                      <span style={{
+                        position: 'absolute',
+                        top: '3px',
+                        left: (settings.ollama_dynamic_ctx ?? true) ? '25px' : '3px',
+                        width: '20px', height: '20px',
+                        borderRadius: '50%',
+                        background: 'white',
+                        transition: 'left .25s cubic-bezier(.4,0,.2,1)',
+                        boxShadow: '0 1px 4px rgba(0,0,0,.25)',
+                        display: 'block',
+                      }} />
+                    </button>
+                  </div>
+
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
                     
                     {/* Context Size */}
@@ -1422,6 +1502,94 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          {/* ─── Text Embedding Model Settings ─── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
+            <div style={{
+              width: '36px', height: '36px', borderRadius: '9px',
+              background: 'hsl(280,80%,60% / .15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '1.5px solid hsl(280,80%,60% / .3)',
+            }}>
+              <Database size={18} style={{ color: 'hsl(280,80%,60%)' }} />
+            </div>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+              Text Embedding Model Selection
+            </h2>
+          </div>
+
+          <div style={{
+            padding: '1.75rem',
+            background: 'hsl(var(--card))',
+            border: '1.5px solid hsl(var(--ink) / .1)',
+            borderRadius: '12px',
+            display: 'flex', flexDirection: 'column', gap: '1.5rem'
+          }}>
+            <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0, lineHeight: 1.5 }}>
+              Select the active text embedding model used to generate vector embeddings for global context documents, meeting attachments, and transcript chunks.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+              {embeddingModels.map((m) => {
+                const isSelected = (settings.embedding_model || 'Qwen3-Embedding-0.6B') === m.id
+                return (
+                  <div
+                    key={m.id}
+                    onClick={() => upd('embedding_model', m.id)}
+                    style={{
+                      padding: '1.1rem 1.25rem',
+                      borderRadius: '10px',
+                      border: `2px solid ${isSelected ? 'hsl(var(--accent))' : 'hsl(var(--ink) / .1)'}`,
+                      background: isSelected ? 'hsl(var(--accent) / .06)' : 'hsl(var(--background))',
+                      cursor: 'pointer',
+                      transition: 'all .2s ease',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      gap: '8px',
+                      boxShadow: isSelected ? '0 0 0 1px hsl(var(--accent))' : 'none',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
+                        {m.name}
+                      </div>
+                      <span style={{
+                        fontSize: '.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
+                        background: m.installed ? 'hsl(142,70%,45% / .15)' : 'hsl(45,90%,50% / .15)',
+                        color: m.installed ? 'hsl(142,70%,30%)' : 'hsl(45,90%,35%)',
+                        border: `1px solid ${m.installed ? 'hsl(142,70%,45% / .3)' : 'hsl(45,90%,50% / .3)'}`
+                      }}>
+                        {m.installed ? 'Installed' : 'Not Downloaded'}
+                      </span>
+                    </div>
+
+                    <p style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.45 }}>
+                      {m.description}
+                    </p>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '4px', fontSize: '.75rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace' }}>
+                      {m.dim && <span>Dimension: {m.dim}d</span>}
+                      {m.quantization && <span>Format: {m.quantization}</span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div style={{
+              fontSize: '.8rem',
+              color: 'hsl(45, 90%, 35%)',
+              background: 'hsl(45, 90%, 50% / .1)',
+              border: '1px solid hsl(45, 90%, 50% / .25)',
+              padding: '.75rem 1rem',
+              borderRadius: '8px',
+              fontFamily: 'Inter, sans-serif',
+              lineHeight: 1.5,
+            }}>
+              💡 <strong>Note:</strong> Changing the active embedding model unloads the current model from memory. Vector indexes will automatically re-embed using the newly selected model when vector search or document indexing runs.
+            </div>
+          </div>
+
           {/* ─── AI Task Output Settings ─── */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
             <div style={{
@@ -1469,7 +1637,8 @@ export default function SettingsPage() {
                 { key: 'max_tokens_speaker_summary', label: 'Speaker Summary', desc: 'Max tokens for summarizing a speaker\'s overall contributions.' },
                 { key: 'max_tokens_speaker_key_points', label: 'Speaker Key Points', desc: 'Max tokens for extracting speaker-specific highlights.' },
                 { key: 'max_tokens_speaker_action_items', label: 'Speaker Action Items', desc: 'Max tokens for extracting tasks assigned to specific speakers.' },
-                { key: 'max_tokens_collection_chat', label: 'Collection Chat', desc: 'Max output tokens for collection-level RAG questions.' },
+                { key: 'max_tokens_collection_chat', label: 'Collection Chat Max Tokens', desc: 'Max output tokens for collection-level RAG questions.' },
+                { key: 'rag_max_collection_context', label: 'Max Collection Context Chunks', desc: 'Default maximum number of retrieved context chunks sent to LLM during Collection Chat.' },
                 { key: 'max_tokens_collection_compare', label: 'Collection Comparison', desc: 'Max tokens for comparing two full meetings.' },
                 { key: 'max_tokens_collection_topic_growth', label: 'Collection Topic Growth', desc: 'Max tokens for tracking how a topic grows over time.' },
                 { key: 'max_tokens_vocab_extractor', label: 'Vocabulary Extractor', desc: 'Max tokens for AI-assisted glossary/vocab extraction.' },

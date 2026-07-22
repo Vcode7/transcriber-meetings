@@ -20,14 +20,15 @@ export async function streamChat(
   collectionId: string,
   message: string,
   onChunk: (text: string) => void,
-  onMeta?: (meta: { cited_meetings?: string[]; meeting_names?: Record<string, string> }) => void,
+  onMeta?: (meta: { cited_meetings?: string[]; meeting_names?: Record<string, string>; retrieval_plan?: string; max_context?: number }) => void,
   onError?: (error: string) => void,
   onDone?: () => void,
   signal?: AbortSignal,
+  maxContext?: number,
 ): Promise<void> {
   return _streamSSE(
     `${BASE_URL}/collections/${collectionId}/ai/chat`,
-    { message },
+    { message, max_context: maxContext },
     onChunk,
     onMeta,
     onError,

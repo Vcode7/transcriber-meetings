@@ -204,25 +204,29 @@ export default function HistoryDetail() {
   }, [id])
 
   useEffect(() => {
-    if (!id || !rec?.file_path) return
+    if (!id || !rec) return
     let isActive = true
-    const blobUrlRef = { current: null as string | null }
+    let createdUrl: string | null = null
+
     api.get(`/history/${id}/audio`, { responseType: 'blob' })
       .then((response) => {
         if (!isActive) return
         const url = URL.createObjectURL(response.data)
-        blobUrlRef.current = url
+        createdUrl = url
         setAudioUrl(url)
       })
-      .catch(() => { if (isActive) setAudioUrl(null) })
+      .catch((err) => {
+        console.warn('[HistoryDetail] Failed to load audio:', err)
+        if (isActive) setAudioUrl(null)
+      })
+
     return () => {
       isActive = false
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current)
-        blobUrlRef.current = null
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl)
       }
     }
-  }, [id, rec?.file_path])
+  }, [id, rec?.id])
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: '1rem' }}>

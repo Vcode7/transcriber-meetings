@@ -61,6 +61,11 @@ class RetrieveRequest(BaseModel):
     timeline_stride_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     high_confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     recording_duration: float = Field(default=0.0, ge=0.0)
+    retrieve_by_timeline: bool = False
+    # Retrieval mode: "agenda_wise" (default) or "chunk_wise"
+    retrieval_mode: str = Field(default="agenda_wise")
+    # Maximum agendas a single chunk can be assigned to in chunk-wise mode
+    max_overlap_chunks: int = Field(default=2, ge=1, le=20)
 
 
 class AgendaEvidenceItem(BaseModel):
@@ -225,6 +230,9 @@ async def retrieve_evidence_endpoint(
                 timeline_stride_seconds=body.timeline_stride_seconds,
                 high_confidence_threshold=body.high_confidence_threshold,
                 recording_duration=body.recording_duration,
+                retrieve_by_timeline=body.retrieve_by_timeline,
+                retrieval_mode=body.retrieval_mode,
+                max_overlap_chunks=body.max_overlap_chunks,
             ),
         )
 
@@ -304,6 +312,11 @@ class RetrieveAgendaRequest(BaseModel):
     timeline_stride_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     high_confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     recording_duration: float = Field(default=0.0, ge=0.0)
+    retrieve_by_timeline: bool = False
+    # Retrieval mode: "agenda_wise" (default) or "chunk_wise"
+    # Note: chunk_wise requires all agendas, so per-agenda endpoint ignores this
+    # and always uses agenda_wise for single-agenda retrieval.
+    retrieval_mode: str = Field(default="agenda_wise")
 
 
 @router.post("/{recording_id}/retrieve-agenda")
@@ -353,6 +366,7 @@ async def retrieve_single_agenda_endpoint(
                 timeline_stride_seconds=body.timeline_stride_seconds,
                 high_confidence_threshold=body.high_confidence_threshold,
                 recording_duration=body.recording_duration,
+                retrieve_by_timeline=body.retrieve_by_timeline,
             ),
         )
     except FileNotFoundError as e:
@@ -425,6 +439,88 @@ async def extract_file_text_endpoint(
     }
 
 
+# ── POST validate-agenda-similarity ──────────────────────────────────────────
+
+class SimilarityPointInput(BaseModel):
+    agenda_idx: int
+    disc_idx: int
+    point: str
+
+
+class AgendaSimilarityRequest(BaseModel):
+    agenda_topics: List[str]
+    points: List[SimilarityPointInput]
+
+
+@router.post("/{recording_id}/validate-agenda-similarity")
+async def validate_agenda_similarity_endpoint(
+    recording_id: str,
+    body: AgendaSimilarityRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Compute cosine similarity between every discussion point and every agenda topic.
+
+    Uses the same embedding model as the RAG pipeline.  No disk I/O — everything
+    is in-memory.  Returns a matrix so the frontend can determine suggested moves.
+    """
+    await _get_recording_or_404(recording_id, current_user["id"])
+
+    if not body.agenda_topics or not body.points:
+        raise HTTPException(status_code=400, detail="agenda_topics and points must not be empty")
+
+    import asyncio
+    import numpy as np
+    from services.rag_pipeline import _get_embedder
+
+    def _compute() -> dict:
+        embedder = _get_embedder()
+
+        # Embed agenda topics
+        agenda_embeddings = [
+            embedder.encode(topic) for topic in body.agenda_topics
+        ]  # list of 1-D numpy arrays
+
+        # Stack into matrix (num_agendas × dim)
+        A = np.stack(agenda_embeddings, axis=0)  # shape: (num_agendas, dim)
+        # L2-normalise rows for cosine similarity via dot product
+        A_norms = np.linalg.norm(A, axis=1, keepdims=True)
+        A_norms[A_norms == 0] = 1e-9
+        A_norm = A / A_norms
+
+        matrix_rows = []
+        for pt in body.points:
+            p_emb = embedder.encode(pt.point)  # 1-D array
+            p_norm_val = np.linalg.norm(p_emb)
+            if p_norm_val == 0:
+                p_norm_val = 1e-9
+            p_emb_norm = p_emb / p_norm_val
+
+            # Cosine similarities: dot product with each agenda row
+            sims = (A_norm @ p_emb_norm).tolist()  # list of floats, one per agenda
+
+            matrix_rows.append({
+                "agenda_idx": pt.agenda_idx,
+                "disc_idx": pt.disc_idx,
+                "point": pt.point,
+                "similarities": [round(s, 4) for s in sims],
+            })
+
+        return {
+            "embeddings_computed": len(body.agenda_topics) + len(body.points),
+            "matrix": matrix_rows,
+        }
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _compute)
+    except Exception as e:
+        logger.error(f"[RawMoM] validate-agenda-similarity failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Similarity computation failed: {e}")
+
+    return result
+
+
 # ── POST generate (from pre-assembled evidence) ───────────────────────────────
 
 @router.post("/{recording_id}/generate")
@@ -471,6 +567,38 @@ async def generate_from_evidence_endpoint(
 
     logger.info(f"[RawMoM] Saved evidence-based raw_mom for recording {recording_id}")
     return raw_mom
+
+
+# ── PUT / POST save raw_mom ───────────────────────────────────────────────────
+
+class SaveRawMomRequest(BaseModel):
+    raw_mom: dict
+
+
+@router.put("/{recording_id}")
+@router.post("/{recording_id}/save")
+async def save_raw_mom_endpoint(
+    recording_id: str,
+    body: SaveRawMomRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Save / update the stored raw_mom JSON in DB for a recording.
+    """
+    user_id = current_user["id"]
+    await _get_recording_or_404(recording_id, user_id)
+
+    raw_mom_json = json.dumps(body.raw_mom, ensure_ascii=False, default=str)
+    async with get_db() as db:
+        await db.execute(
+            text("UPDATE recordings SET raw_mom = :raw_mom WHERE id = :id AND user_id = :uid"),
+            {"raw_mom": raw_mom_json, "id": recording_id, "uid": user_id},
+        )
+        await db.commit()
+
+    logger.info(f"[RawMoM] Manually updated raw_mom saved for recording {recording_id}")
+    return {"status": "ok", "message": "Raw MoM saved to database"}
+
 
 
 # ── POST generate-final-mom (Raw MoM → Final MoM, independent pipeline) ──────
@@ -931,11 +1059,24 @@ def _run_retrieve_pipeline(
     timeline_stride_seconds: float = 60.0,
     high_confidence_threshold: float = 0.70,
     recording_duration: float = 0.0,
+    retrieve_by_timeline: bool = False,
+    # Retrieval mode
+    retrieval_mode: str = "agenda_wise",
+    max_overlap_chunks: int = 2,
 ) -> dict:
-    """Synchronous retrieval-only pipeline (no LLM)."""
+    """Synchronous retrieval-only pipeline (no LLM).
+
+    Supports two retrieval modes:
+    - agenda_wise  (default): For each agenda, retrieve top-K transcript chunks
+                              by semantic similarity to the agenda topic.
+    - chunk_wise            : For each transcript chunk, compare it against ALL
+                              agendas and assign it to those within the relative
+                              similarity threshold of the best-scoring agenda.
+    """
     from services.rag_pipeline import (
         embed_transcript, embed_meeting_context,
-        retrieve_evidence_raw, _transcript_embedded, _meeting_context_embedded,
+        retrieve_evidence_raw, retrieve_evidence_chunkwise,
+        _transcript_embedded, _meeting_context_embedded,
         _mark_transcript_embedded, _mark_meeting_context_embedded,
         get_or_create_agenda_items,
     )
@@ -968,36 +1109,56 @@ def _run_retrieve_pipeline(
 
         total_agendas = len(agenda_items)
 
-        # Step 4: Retrieve raw chunks per agenda item
-        agendas_with_chunks = []
-        for idx, item in enumerate(agenda_items):
-            topic = item.get("topic", "")
-            if not topic:
-                continue
-            chunks = retrieve_evidence_raw(
-                agenda_topic=topic,
+        # Step 4: Retrieve chunks — branch by retrieval mode
+        if retrieval_mode == "chunk_wise":
+            logger.info(f"[RawMoM] Running chunk-wise retrieval for {total_agendas} agendas (max_overlap_chunks={max_overlap_chunks})")
+            agendas_with_chunks = retrieve_evidence_chunkwise(
                 recording_id=recording_id,
                 user_id=user_id,
+                agenda_items=agenda_items,
                 k_global=k_global,
                 k_meeting=k_meeting,
                 k_transcript=k_transcript,
                 relative_cutoff=relative_cutoff,
                 char_limit=char_limit,
-                # Hybrid params
-                agenda_index=idx,
-                total_agendas=total_agendas,
                 recording_duration=recording_duration,
                 timeline_stride=timeline_stride_seconds,
                 high_confidence_threshold=high_confidence_threshold,
+                retrieve_by_timeline=retrieve_by_timeline,
+                max_overlap_chunks=max_overlap_chunks,
             )
-            agendas_with_chunks.append({
-                "topic": topic,
-                "speaker": item.get("speaker"),
-                "is_procedural": chunks["is_procedural"],
-                "transcript_chunks": chunks["transcript"],
-                "meeting_chunks": chunks["meeting"],
-                "global_chunks": chunks["global"],
-            })
+        else:
+            # Default: agenda-wise retrieval (existing behaviour)
+            logger.info(f"[RawMoM] Running agenda-wise retrieval for {total_agendas} agendas")
+            agendas_with_chunks = []
+            for idx, item in enumerate(agenda_items):
+                topic = item.get("topic", "")
+                if not topic:
+                    continue
+                chunks = retrieve_evidence_raw(
+                    agenda_topic=topic,
+                    recording_id=recording_id,
+                    user_id=user_id,
+                    k_global=k_global,
+                    k_meeting=k_meeting,
+                    k_transcript=k_transcript,
+                    relative_cutoff=relative_cutoff,
+                    char_limit=char_limit,
+                    agenda_index=idx,
+                    total_agendas=total_agendas,
+                    recording_duration=recording_duration,
+                    timeline_stride=timeline_stride_seconds,
+                    high_confidence_threshold=high_confidence_threshold,
+                    retrieve_by_timeline=retrieve_by_timeline,
+                )
+                agendas_with_chunks.append({
+                    "topic": topic,
+                    "speaker": item.get("speaker"),
+                    "is_procedural": chunks["is_procedural"],
+                    "transcript_chunks": chunks["transcript"],
+                    "meeting_chunks": chunks["meeting"],
+                    "global_chunks": chunks["global"],
+                })
 
         return {
             "agendas": agendas_with_chunks,
@@ -1010,6 +1171,7 @@ def _run_retrieve_pipeline(
                 "timeline_stride_seconds": timeline_stride_seconds,
                 "high_confidence_threshold": high_confidence_threshold,
                 "recording_duration": recording_duration,
+                "retrieval_mode": retrieval_mode,
             },
         }
     finally:
@@ -1038,6 +1200,7 @@ def _run_retrieve_single_agenda(
     timeline_stride_seconds: float,
     high_confidence_threshold: float,
     recording_duration: float,
+    retrieve_by_timeline: bool = False,
 ) -> dict:
     """Synchronous retrieval for a single agenda item. Embeds if needed."""
     from services.rag_pipeline import (
@@ -1074,6 +1237,7 @@ def _run_retrieve_single_agenda(
             recording_duration=recording_duration,
             timeline_stride=timeline_stride_seconds,
             high_confidence_threshold=high_confidence_threshold,
+            retrieve_by_timeline=retrieve_by_timeline,
         )
 
         return {
@@ -1195,44 +1359,50 @@ def _build_docx(raw_mom_data: dict, recording_name: str) -> bytes:
         doc.add_paragraph("No agenda items found.")
     else:
         # Table headers
-        table = doc.add_table(rows=1, cols=6)
+        table = doc.add_table(rows=1, cols=4)
         table.style = "Table Grid"
-        hdr = table.rows[0].cells
-        for i, header in enumerate(["#", "Agenda", "Speaker", "Discussion Points", "Actions", "Deadline / Owner"]):
-            hdr[i].text = header
-            run = hdr[i].paragraphs[0].runs[0]
-            run.bold = True
 
-        row_num = 1
+        headers = ["Agenda ID", "Agenda", "Point", "Action"]
+        hdr = table.rows[0].cells
+        for i, header in enumerate(headers):
+            hdr[i].text = header
+            hdr[i].paragraphs[0].runs[0].bold = True
+
+        agenda_id = 1
+
         for agenda in agendas:
             topic = agenda.get("agenda_topic", "")
-            speaker = agenda.get("agenda_speaker") or ""
+            default_speaker = agenda.get("agenda_speaker")
             discussion = agenda.get("discussion", [])
 
             if not discussion:
                 row = table.add_row().cells
-                row[0].text = str(row_num)
+                row[0].text = str(agenda_id)
                 row[1].text = topic
-                row[2].text = speaker
-                row[3].text = ""
-                row[4].text = ""
-                row[5].text = ""
-                row_num += 1
+                row[2].text = ""
+                row[3].text = "For Information"
             else:
+                first_row = True
+
                 for entry in discussion:
                     row = table.add_row().cells
-                    row[0].text = str(row_num)
-                    row[1].text = topic
-                    row[2].text = str(entry.get("speaker") or speaker or "")
-                    row[3].text = str(entry.get("point", ""))
-                    action = entry.get("action", {}) or {}
-                    action_desc = str(action.get("description") or "")
-                    row[4].text = action_desc
-                    deadline = str(action.get("deadline") or "")
-                    owner = str(action.get("owner") or "")
-                    row[5].text = f"{owner} / {deadline}".strip(" /") if (owner or deadline) else ""
-                    row_num += 1
 
+                    # Show Agenda ID and Agenda only on the first row
+                    if first_row:
+                        row[0].text = str(agenda_id)
+                        row[1].text = topic
+                        first_row = False
+
+                    row[2].text = str(entry.get("point") or "")
+
+                    speaker = (
+                        entry.get("speaker")
+                        or default_speaker
+                        or "For Information"
+                    )
+                    row[3].text = str(speaker)
+
+            agenda_id += 1
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)

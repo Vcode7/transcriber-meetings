@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Prompt Templates — one per task, purpose-built for Qwen3
 # ══════════════════════════════════════════════════════════════
 
+
 EXECUTIVE_SUMMARY_PROMPT = """\
 You are an expert enterprise meeting analyst. Analyze the following meeting transcript and write a professional Executive Summary.
 
@@ -526,6 +527,266 @@ AGENDA DOCUMENT:
 JSON:"""
 
 
+AGENDA_COMPRESS_WITH_CONTEXT_PROMPT = """\
+You are an expert meeting agenda parser.
+
+Your task is to extract ONLY the actual meeting agenda items from the document.
+
+=== SECTION 1: AGENDA DOCUMENT (PRIMARY SOURCE) ===
+
+This is the ONLY source you may use to:
+- Generate agenda titles
+- Determine agenda items
+- Establish agenda hierarchy and ordering
+- Define the number of agenda items
+
+IMPORTANT:
+Do NOT immediately start extracting agenda items.
+
+Instead, complete the task in the following stages.
+
+STEP 1 - IDENTIFY THE AGENDA SECTION
+First identify where the actual meeting agenda begins and ends.
+
+Agenda sections commonly appear after introductory information such as:
+
+- Organization name
+- Meeting title
+- Meeting date
+- Meeting time
+- Meeting location
+- Committee members
+- Staff information
+- Contact details
+- Public comment instructions
+- Zoom/Webinar information
+- Accessibility information
+- General meeting instructions
+- Headers
+- Footers
+- Page numbers
+
+Ignore all of the above.
+
+The agenda section usually contains discussion topics that will actually be covered during the meeting.
+
+Examples include:
+
+- Call to Order
+- Roll Call
+- Approval of Minutes
+- Public Comment
+- Consent Agenda
+- Discussion Items
+- Briefings
+- Presentations
+- Reports
+- Proposed Ordinances
+- Proposed Motions
+- Project Updates
+- Technical Reviews
+- Design Reviews
+- Other Business
+- Adjournment
+
+STEP 2 - DETECT THE AGENDA STRUCTURE
+Agenda items may appear in many different formats.
+
+Examples:
+
+1.
+2.
+3.
+
+A.
+B.
+C.
+
+•
+•
+
+Roman numerals
+
+Tables
+
+Indented lists
+
+Nested sections
+
+Paragraphs
+
+Do NOT assume a specific layout.
+
+Understand the document structure before extracting.
+
+If the agenda is presented in a table, identify the columns first.
+
+Typical columns include:
+
+- Agenda ID
+- Item Number
+- Agenda Title
+- Topic
+- Subject
+- Presenter
+- Presented By
+- Speaker
+- Lead
+- Owner
+- Responsible Person
+- Department
+- Duration
+
+If an agenda item contains a title followed by one or more descriptive
+paragraphs, they belong to the SAME agenda item.
+
+The title and its description should be merged into a single topic.
+
+Do not split a single agenda item into multiple topics.
+
+STEP 3 - IDENTIFY THE PRESENTER
+For every agenda item determine whether a presenter is explicitly associated with it.
+
+Possible labels include (but are not limited to):
+
+- Presenter
+- Presented By
+- Speaker
+- Agenda Presenter
+- Lead
+- Owner
+- Responsible
+- Presented by
+- Council Staff
+- Staff
+- Department Lead
+- Project Lead
+- Facilitator
+- Chair
+- Vice Chair
+
+The presenter's name may appear:
+
+- in the same row
+- below the agenda item
+- above the agenda item
+- in an adjacent table column
+- immediately after the topic
+
+When extracting an agenda item, search the nearby text before and after
+the topic.
+
+If a presenter, council staff, presenter, presented by, project lead,
+staff lead, briefing by or similar information is found immediately
+before or after the agenda item, associate that person with the agenda item.
+
+If none of them is explicitly associated with the agenda item, return:
+
+null
+
+Do NOT guess.
+
+Do NOT use committee members listed at the beginning of the document unless they are explicitly associated with that agenda item.
+
+
+STEP 4 - EXTRACT THE AGENDA
+
+After identifying the agenda section:
+
+Extract every agenda item.
+
+Rules:
+
+- Copy the agenda topic exactly as written whenever possible.
+- Do NOT summarize.
+- Do NOT rewrite.
+- Do NOT shorten.
+- If the title spans multiple lines, combine them into one topic.
+- Do NOT include administrative information.
+- Do NOT include contact information.
+- Do NOT include webinar instructions.
+- Do NOT include meeting metadata.
+- Do NOT include organization information.
+- Do NOT include committee member lists.
+- Do NOT include page headers or page footers.
+
+If no agenda section exists, return:
+
+[]
+
+also extract
+
+details
+- Include ALL remaining information that belongs to this agenda item but is not part of the topic.
+- Examples include:
+    - agenda description
+    - ordinance description
+    - motion description
+    - proposal description
+    - objective
+    - supporting information
+    - sponsor
+    - department
+    - project information
+    - references
+    - document numbers
+    - any explanatory text directly associated with this agenda item
+- Preserve the wording as closely as possible.
+- Do NOT summarize.
+- Do NOT remove technical details.
+- Do NOT include information belonging to another agenda item.
+- If there are multiple paragraphs describing the same agenda item, combine them into a single details string.
+
+If an agenda item consists of a title followed by descriptive paragraphs, they represent ONE agenda item.
+
+
+For every agenda item extract:
+
+{{
+    "topic": "...",
+    "speaker": "..."
+    "details": "..."
+}}
+
+Rules:
+
+1. Copy the agenda topic exactly as written whenever possible.
+2. Do not summarize.
+3. Do not merge multiple agenda items.
+4. If an agenda item spans multiple lines, combine them into a single topic.
+5. If a presenter, owner, lead, chair, council staff, presenter, speaker or responsible person is explicitly associated with that agenda item, extract their name.
+6. If no presenter is explicitly associated with the agenda item, return null.
+7. Never invent a speaker.
+8. Return ONLY valid JSON.
+9. If no agenda items are found, return an empty JSON array [].
+
+
+AGENDA DOCUMENT:
+{text}
+
+
+=== SECTION 2: GLOBAL CONTEXT (SUPPORTING INFORMATION ONLY) ===
+
+The following information has been retrieved from the organization's Global Context knowledge base.
+
+PURPOSE: Use this ONLY to improve your understanding of terminology, abbreviations, project names, department names, organization names, and technical background mentioned in the Agenda Document above.
+
+CRITICAL RULES — READ CAREFULLY:
+- Do NOT create additional agenda items from this section.
+- Do NOT add topics that appear in Global Context but are absent from the Agenda Document.
+- Do NOT modify the agenda structure in any way.
+- Do NOT merge or combine topics based on Global Context.
+- Do NOT change the number of agenda items.
+- The Agenda Document in Section 1 is the SOLE authority for all agenda items.
+- If the Agenda Document contains 5 items, your output must contain exactly 5 items — no more, no less.
+- Global Context exists only to help you understand what the agenda items mean, not to create new ones.
+
+GLOBAL CONTEXT:
+{global_context}
+
+JSON:"""
+
+
 REFERENCE_COMPRESS_PROMPT = """\
 You are a technical analyst preparing background knowledge for a meeting. Given the reference/context document below, extract the most relevant information in concise bullet points.
 
@@ -583,26 +844,81 @@ RAW_MOM_EXTRACTION_PROMPT = """\
 You are a precise information extractor for meeting records. Your ONLY job is structured extraction — not summarization.
 
 You will receive evidence retrieved from the transcript, presentation slides, and organizational documents for ONE agenda topic.
+The evidence is divided into clearly labelled sections:
+  - TRANSCRIPT sections: actual spoken discussion from the meeting recording
+  - MEETING CONTEXT / AGENDA CONTEXT sections: uploaded documents (slides, specs, plans)
+  - GLOBAL CONTEXT section: organizational knowledge documents
+  - AGENDA-SPECIFIC CONTEXT: additional per-agenda reference material
 
-Before extracting information, first understand the meaning and purpose of the agenda topic.
+The transcript text includes timeline headers in the format: [HH:MM:SS - HH:MM:SS] Speaker Name
+For every Transcript entry:
 
-The retrieved evidence may contain unrelated information because semantic retrieval is not perfect. Do NOT assume that every retrieved sentence belongs to the current agenda.
+- Read the timeline directly from the transcript headers.
+- If the discussion spans multiple consecutive transcript blocks, use the earliest start time and latest end time.
+- Never invent, estimate, or modify timestamps.
+- Never use timestamps from another discussion.
+- The timeline must correspond exactly to the transcript used to produce the point.
 
-Your task is to extract ONLY the factual information that is directly relevant to the current agenda topic.
+The retrieved evidence may contain discussion from multiple agenda topics because semantic retrieval is not perfect.
 
-Core Extraction Requirements:
-1. FOCUS ON FACTUAL DETAILS: Capture every important factual detail. Do not summarize or synthesize.
-2. MAXIMUM OF 5 DISCUSSION ENTRIES: Return a maximum of 5 discussion entries for each agenda.
-3. INFORMATION-DENSE ENTRIES: Each discussion entry must be information-dense. Combine all related facts into comprehensive points instead of splitting them into multiple small points.
-4. DO NOT OMIT IMPORTANT FACTS: Do not omit important facts simply to reduce the number of points. Merge related discussions into comprehensive points while keeping all factual details.
-5. PRESERVE SPECIFIC DETAILS: Ensure every point preserves:
+Do NOT discard transcript discussion simply because it appears unrelated to the supplied agenda.
+
+If a transcript section contains factual discussion, extract it faithfully with its correct speaker and timeline.
+
+Never rewrite or modify discussion so that it appears to match the agenda.
+
+Your task is to extract ALL factual information that is directly relevant to the current agenda topic.
+
+---
+CORE EXTRACTION REQUIREMENTS:
+
+1. EXTRACT ALL MEANINGFUL POINTS — no artificial limit. Capture every:
+   - Decision made
+   - Discussion point or topic covered
+   - Question raised and answer provided
+   - Concern or risk identified
+   - Resolution or agreement reached
+   - Follow-up item or pending action
+   - Action item with owner/deadline
+   - Milestone or deadline reference
+   - Dependency noted
+   Merge duplicate ideas into professional concise points. Do NOT truncate or omit content to reduce count.
+
+2. DISCUSSION SEGMENTATION:
+Extract discussion as a sequence of individual discussion points, similar to meeting minutes.
+- Create a new discussion entry whenever the conversation shifts to a new idea, question, response, decision, concern, proposal, clarification, action item, or significant fact.
+- Do NOT combine multiple independent discussion topics into a single entry, even if they occur within the same transcript segment.
+- Keep each entry focused on one coherent discussion point.
+- If several sentences expand or explain the same idea, combine them into one entry.
+- If the speaker moves to a different topic, create a new entry.
+- Preserve the natural flow of the meeting by keeping discussion points in chronological order.
+
+3. DO NOT OMIT IMPORTANT FACTS: Preserve every important factual detail including:
    - Dates, deadlines, effective dates, approval dates, extensions, and timelines.
    - Decisions, amendments, motions, votes, and outcomes.
    - Financial values, quantities, locations, ordinance numbers, property details, and technical information.
    - Questions raised, responses provided, concerns discussed, and follow-up requests.
    - Action items with owner, deadline, and status when available.
+
+4. SOURCE ATTRIBUTION — every entry MUST include:
+   - "source_type": one of "Transcript", "Meeting Context", "Agenda Context", "Global Context"
+   - "timeline": {{"start": <seconds as float>, "end": <seconds as float>}} if from transcript; null otherwise
+   - "source_reference": the timestamp range "HH:MM:SS - HH:MM:SS" if from transcript; the document filename if from context; "Global Context" if from global knowledge
+
+5. CONTEXT-ONLY INFORMATION: If information comes ONLY from Meeting Context, Agenda Context, or Global Context and was NOT explicitly discussed in the transcript, set "type" to "reference" and include a note like "(For Information)" at the start of the "point" field. Do NOT present it as if it was discussed in the meeting.
+
 6. NO SUMMARIES: Do not generate introductions, conclusions, or summaries. Perform factual extraction only.
 
+For Transcript entries:
+
+- Extract ONLY information explicitly stated in the transcript.
+- Never infer missing facts.
+- Never combine facts from different transcript sections unless they are clearly discussing the same topic.
+- Never replace transcript facts with similar information from context documents.
+- Every transcript entry MUST be traceable to one or more transcript lines.
+- If multiple timeline blocks belong to the same discussion, merge them and include the complete timeline covering all supporting transcript blocks.
+- Preserve chronological order exactly as spoken.
+---
 Return ONLY a valid JSON object matching this exact schema:
 
 {{
@@ -610,9 +926,12 @@ Return ONLY a valid JSON object matching this exact schema:
   "agenda_speaker": "{agenda_speaker}",
   "discussion": [
     {{
-      "type": "decision|action|discussion|clarification|risk|milestone|dependency",
+      "type": "decision|action|discussion|clarification|risk|milestone|dependency|reference",
       "speaker": "Speaker name or null if unknown",
-      "point": "Comprehensive information-dense fact or statement preserving all details (dates, numbers, decisions, questions/answers, etc.)",
+      "point": "One complete discussion point. Preserve all important details relevant to that point, including dates, numbers, decisions, questions, answers, technical terms, and outcomes. If the discussion moves to a different topic or idea, create a new discussion entry instead of extending this one.",
+      "source_type": "Transcript|Meeting Context|Agenda Context|Global Context",
+      "timeline": {{"start": 123.4, "end": 145.6}},
+      "source_reference": "HH:MM:SS - HH:MM:SS or filename.pdf or Global Context",
       "dates": [
         {{"value": "date/time value", "purpose": "what this date is for"}}
       ],
@@ -627,11 +946,14 @@ Return ONLY a valid JSON object matching this exact schema:
 }}
 
 Rules for discussion entries:
-- Maximum of 5 entries total in the "discussion" array.
+- Extract ALL meaningful points — there is NO maximum limit. Completeness is the goal.
 - Group related facts together so each entry contains a complete, cohesive subset of discussion details.
 - "dates" array: include ONLY if the entry involves a specific date/deadline/milestone.
 - "action": fill ONLY if the entry is an action item; set all fields to null otherwise.
-- "type" must be one of: decision, action, discussion, clarification, risk, milestone, dependency.
+- "type" must be one of: decision, action, discussion, clarification, risk, milestone, dependency, reference.
+- "source_type" is REQUIRED on every entry. Use "Transcript" only for entries from the TRANSCRIPT section.
+- "timeline" is REQUIRED for Transcript entries. Parse the [HH:MM:SS - HH:MM:SS] header from the evidence text. Set to null for non-transcript entries.
+- "source_reference" is REQUIRED. For Transcript: use "HH:MM:SS - HH:MM:SS". For context docs: use the filename. For global: use "Global Context".
 - Preserve all technical terms, acronyms, numbers, system names, and project names exactly.
 
 AGENDA TOPIC: {agenda_topic}
@@ -653,16 +975,19 @@ Schema requirements:
 - Do NOT hallucinate missing information.
 - Keep all fields, speaker attributions, text statements, dates, and action items exactly as they appear in the original text.
 - Only repair JSON syntax, escaping, commas, brackets, quotes, and schema formatting.
-
+  
 Expected Schema:
 {{
   "agenda_topic": "Topic text",
   "agenda_speaker": "Presenter name or null",
   "discussion": [
     {{
-      "type": "decision|action|discussion|clarification|risk|milestone|dependency",
+      "type": "decision|action|discussion|clarification|risk|milestone|dependency|reference",
       "speaker": "Speaker name or null",
       "point": "Text statement",
+      "source_type": "Transcript|Meeting Context|Agenda Context|Global Context",
+      "timeline": {"start": 123.4, "end": 145.6},
+      "source_reference": "HH:MM:SS - HH:MM:SS or filename or Global Context",
       "dates": [
         {{"value": "date/time", "purpose": "purpose"}}
       ],
@@ -887,6 +1212,33 @@ TRANSCRIPT (only {speaker}'s lines):
 # Collection AI Chat Prompts — used by Collection AI feature
 # ══════════════════════════════════════════════════════════════
 
+COLLECTION_PLANNING_PROMPT = """\
+You are an expert AI triage and retrieval planner for an enterprise meeting analysis system.
+Analyze the user's question and recent conversation history, then decide if meeting context from vector store is needed to answer.
+
+You MUST respond with valid JSON strictly following this schema:
+```json
+{{
+  "context_required": true | false,
+  "detail": "string"
+}}
+```
+
+Rules:
+1. If the question requires information from meetings, transcripts, decisions, action items, or project context:
+   - Set "context_required": true
+   - Set "detail": A concise, targeted retrieval plan string containing key search terms, entities, technical concepts, topics, speaker names, or time constraints needed for vector search. Do NOT answer the user's question at this stage.
+
+2. If the question is general conversation, greeting (e.g., "Hello", "How are you"), meta-question (e.g., "What can you do?"), or basic knowledge that does NOT require meeting context:
+   - Set "context_required": false
+   - Set "detail": The complete, polite, and helpful final answer to the user's question. No retrieval should be performed.
+
+{conversation_history}
+
+USER QUESTION: {question}
+
+JSON RESPONSE:"""
+
 COLLECTION_CHAT_PROMPT = """\
 You are an expert meeting analyst assistant. You have access to transcripts and notes from multiple meetings within a collection.
 
@@ -1018,6 +1370,7 @@ def _get_prompt(key: str) -> str:
         "raw_mom_to_mom": RAW_MOM_TO_MOM_PROMPT,
         "raw_mom_extraction": RAW_MOM_EXTRACTION_PROMPT,
         "agenda_compress": AGENDA_COMPRESS_PROMPT,
+        "agenda_compress_with_context": AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
         "reference_compress": REFERENCE_COMPRESS_PROMPT,
         "agenda_from_summary": AGENDA_FROM_SUMMARY_PROMPT,
         "executive_summary": EXECUTIVE_SUMMARY_PROMPT,
@@ -1031,6 +1384,7 @@ def _get_prompt(key: str) -> str:
         "speaker_key_points": SPEAKER_KEY_POINTS_PROMPT,
         "speaker_action_items": SPEAKER_ACTION_ITEMS_PROMPT,
         "raw_mom_repair": RAW_MOM_REPAIR_PROMPT,
+        "collection_planning": COLLECTION_PLANNING_PROMPT,
         "collection_chat": COLLECTION_CHAT_PROMPT,
         "collection_compare": COLLECTION_COMPARE_PROMPT,
         "collection_topic_growth": COLLECTION_TOPIC_GROWTH_PROMPT,
@@ -1183,9 +1537,50 @@ class AIProvider(ABC):
     def generate_agenda_from_summary(self, summary: str) -> List[Dict]: ...
 
 
-# ══════════════════════════════════════════════════════════════
-# Qwen3 4B Instruct Provider — single offline AI engine
-# ══════════════════════════════════════════════════════════════
+STANDARD_CTX_SIZES = (2048, 4096, 8192, 16384, 32768, 65536, 131072)
+
+
+def calculate_dynamic_num_ctx(
+    prompt: str,
+    max_new_tokens: int,
+    safety_buffer: int = 512,
+    system_content: Optional[str] = None,
+    tokenizer=None,
+) -> tuple[int, int]:
+    """
+    Calculate required context size and select smallest suitable standard num_ctx value.
+
+    Returns:
+        (est_input_tokens, selected_num_ctx)
+    """
+    full_text = prompt
+    if system_content:
+        full_text = f"{system_content}\n{prompt}"
+
+    est_input_tokens = 0
+    if tokenizer:
+        try:
+            est_input_tokens = len(tokenizer.encode(full_text))
+        except Exception:
+            est_input_tokens = 0
+
+    if est_input_tokens <= 0:
+        est_input_tokens = max(1, len(full_text) // 3)
+
+    needed = est_input_tokens + max_new_tokens + safety_buffer
+
+    selected_num_ctx = None
+    for size in STANDARD_CTX_SIZES:
+        if size >= needed:
+            selected_num_ctx = size
+            break
+
+    if selected_num_ctx is None:
+        import math
+        selected_num_ctx = 2 ** math.ceil(math.log2(needed))
+
+    return est_input_tokens, selected_num_ctx
+
 
 class QwenProvider(AIProvider):
     """
@@ -1410,6 +1805,7 @@ class QwenProvider(AIProvider):
             "ollama_port": getattr(settings, "OLLAMA_PORT", 11434),
             "ollama_model_priority": getattr(settings, "OLLAMA_MODEL_PRIORITY", "gemma,qwen,llama,deepseek,mistral"),
             "ollama_num_ctx": 32768,
+            "ollama_dynamic_ctx": True,
             "ollama_temperature": 0.0,
             "ollama_top_p": 0.9,
             "ollama_top_k": 40,
@@ -1552,11 +1948,29 @@ class QwenProvider(AIProvider):
 
         cfg = cls._get_active_settings()
         
+        system_content = (
+            "You are an expert enterprise meeting analyst. "
+            "Follow instructions exactly. Preserve all technical terminology."
+        )
+
+        dynamic_enabled = bool(cfg.get("ollama_dynamic_ctx", True))
+        manual_num_ctx = int(cfg.get("ollama_num_ctx", 32768))
+
+        est_input_tokens, calculated_num_ctx = calculate_dynamic_num_ctx(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            safety_buffer=512,
+            system_content=system_content,
+            tokenizer=cls._tokenizer,
+        )
+
+        selected_num_ctx = calculated_num_ctx if dynamic_enabled else manual_num_ctx
+
         # Prepare options payload with validation defaults
         options = {
             "num_predict": max_new_tokens,
             "temperature": float(cfg["ollama_temperature"]),
-            "num_ctx": int(cfg["ollama_num_ctx"]),
+            "num_ctx": selected_num_ctx,
             "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
             "top_p": float(cfg["ollama_top_p"]),
             "top_k": int(cfg["ollama_top_k"]),
@@ -1577,10 +1991,7 @@ class QwenProvider(AIProvider):
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are an expert enterprise meeting analyst. "
-                        "Follow instructions exactly. Preserve all technical terminology."
-                    ),
+                    "content": system_content,
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -1596,20 +2007,15 @@ class QwenProvider(AIProvider):
         base_url = server_url.rstrip("/")
         url = f"{base_url}/api/chat"
 
-        # Log detailed request configuration
-        est_tokens = "N/A"
-        try:
-            if cls._tokenizer:
-                est_tokens = len(cls._tokenizer.encode(prompt))
-        except Exception:
-            pass
-
         logger.info(
             f"[QwenAI] Sending Ollama Request:\n"
             f"  - Model: {model}\n"
             f"  - Server URL: {server_url}\n"
+            f"  - Dynamic Context Window: {'ENABLED (ON)' if dynamic_enabled else 'DISABLED (OFF)'}\n"
+            f"  - Estimated Input Tokens: {est_input_tokens}\n"
+            f"  - Max Output Tokens (num_predict): {max_new_tokens}\n"
+            f"  - Selected num_ctx: {selected_num_ctx} (calculated: {calculated_num_ctx}, manual setting: {manual_num_ctx})\n"
             f"  - Prompt Chars: {len(prompt)}\n"
-            f"  - Estimated Prompt Tokens: {est_tokens}\n"
             f"  - Options: {options}\n"
             f"  - Keep Alive: {payload.get('keep_alive', 'N/A')}"
         )
@@ -1622,7 +2028,7 @@ class QwenProvider(AIProvider):
                 headers={"Content-Type": "application/json"}
             )
             # Timeout set to 90 seconds for long generation tasks
-            with urllib.request.urlopen(req, timeout=90.0) as response:
+            with urllib.request.urlopen(req) as response:
                 status_code = response.status
                 raw_body = response.read().decode('utf-8')
                 logger.debug(f"[QwenAI] Raw Ollama response: {raw_body}")
@@ -2280,6 +2686,98 @@ class QwenProvider(AIProvider):
             logger.warning(f"[QwenAI] Agenda parsing failed: {e} — raw: {raw[:200]}")
             return []
 
+    def parse_agenda_items_with_context(
+        self,
+        agenda_text: str,
+        global_context: str,
+    ) -> List[Dict]:
+        """
+        Parse an agenda document into a list of {topic, speaker} dicts, using
+        Global Context as supplementary understanding material.
+
+        The agenda document (Section 1) is the SOLE authority for agenda generation.
+        The global context (Section 2) may only improve the model's understanding
+        of terminology, project names, and organizational background — it must NOT
+        be used to create, modify, add, or remove agenda items.
+
+        Falls back to parse_agenda_items() if global_context is empty.
+
+        Parameters
+        ----------
+        agenda_text     : Raw text of the uploaded agenda document.
+        global_context  : Retrieved global context chunks as a formatted string.
+
+        Returns
+        -------
+        List of dicts: [{"topic": str, "speaker": str|None}]
+        Empty list if parsing fails or no items found.
+        """
+        if not agenda_text or not agenda_text.strip():
+            return []
+
+        # Fall back to standard parsing if no context is available
+        if not global_context or not global_context.strip():
+            return self.parse_agenda_items(agenda_text)
+
+        raw = self._infer(
+            _get_prompt("agenda_compress_with_context").format(
+                text=agenda_text.strip(),
+                global_context=global_context.strip(),
+            ),
+            max_new_tokens=1024,
+            task_key="agenda_compress",
+        )
+        if not raw:
+            return []
+
+        # Strip markdown fences
+        raw = raw.strip()
+        if raw.startswith("```json"):
+            raw = raw[7:]
+        elif raw.startswith("```"):
+            raw = raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        try:
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                raise ValueError("Expected JSON array")
+            result = []
+            for item in items:
+                if isinstance(item, dict) and item.get("topic"):
+                    result.append({
+                        "topic": str(item["topic"]).strip(),
+                        "speaker": str(item["speaker"]).strip() if item.get("speaker") else None,
+                    })
+            logger.info(f"[QwenAI] Parsed {len(result)} agenda items (with global context)")
+            return result
+        except Exception as e:
+            # Attempt to extract JSON array from the raw output
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                try:
+                    items = json.loads(match.group())
+                    if isinstance(items, list):
+                        return [
+                            {
+                                "topic": str(i.get("topic", "")).strip(),
+                                "speaker": str(i.get("speaker", "")).strip() or None,
+                            }
+                            for i in items
+                            if isinstance(i, dict) and i.get("topic")
+                        ]
+                except Exception:
+                    pass
+            logger.warning(
+                f"[QwenAI] Agenda parsing with context failed: {e} — "
+                f"falling back to standard parsing"
+            )
+            # Final fallback: parse without context
+            return self.parse_agenda_items(agenda_text)
+
+
     def extract_raw_mom_for_agenda(
         self,
         agenda_topic: str,
@@ -2321,7 +2819,7 @@ class QwenProvider(AIProvider):
                 agenda_speaker=agenda_speaker or "Not specified",
                 evidence=evidence.strip(),
             ),
-            max_new_tokens=1024,
+            max_new_tokens=4096,
             task_key="raw_mom_extraction",
         )
 
@@ -2357,7 +2855,10 @@ class QwenProvider(AIProvider):
             logger.info(f"[QwenAI] Initial Raw MoM JSON parsing failed. Triggering automatic JSON repair fallback...")
             try:
                 repaired_raw = self._infer(
-                    _get_prompt("raw_mom_repair").format(raw_json=raw),
+                    # Use str.replace instead of .format() because raw JSON contains
+                    # literal curly braces that Python's str.format() mistakes for
+                    # named format specifiers, causing a KeyError.
+                    _get_prompt("raw_mom_repair").replace("{raw_json}", raw),
                     max_new_tokens=1024,
                     task_key="raw_mom_repair",
                 )
@@ -2389,7 +2890,8 @@ class QwenProvider(AIProvider):
             if not isinstance(discussion, list):
                 discussion = []
 
-            # Normalize each discussion entry
+            # Normalize each discussion entry, preserving all fields including
+            # new source attribution fields (source_type, timeline, source_reference)
             normalized = []
             for entry in discussion:
                 if not isinstance(entry, dict):
@@ -2400,10 +2902,28 @@ class QwenProvider(AIProvider):
                 action = entry.get("action", {})
                 if not isinstance(action, dict):
                     action = {}
+
+                # Validate timeline: must be {start: float, end: float} or None
+                raw_timeline = entry.get("timeline")
+                if isinstance(raw_timeline, dict):
+                    try:
+                        timeline = {
+                            "start": float(raw_timeline.get("start", 0)),
+                            "end": float(raw_timeline.get("end", 0)),
+                        }
+                    except (TypeError, ValueError):
+                        timeline = None
+                else:
+                    timeline = None
+
                 normalized.append({
                     "type": str(entry.get("type", "discussion")),
                     "speaker": entry.get("speaker") or None,
                     "point": str(entry.get("point", "")).strip(),
+                    # Source attribution fields
+                    "source_type": str(entry.get("source_type") or "Transcript"),
+                    "timeline": timeline,
+                    "source_reference": entry.get("source_reference") or None,
                     "dates": [
                         {"value": str(d.get("value", "")), "purpose": str(d.get("purpose", ""))}
                         for d in dates

@@ -18,11 +18,14 @@ class UserSettings(BaseModel):
     rag_retrieval_k_global: int = Field(default=2, ge=0, le=50)
     rag_retrieval_k_meeting: int = Field(default=3, ge=0, le=50)
     rag_retrieval_k_transcript: int = Field(default=10, ge=0, le=50)
+    rag_max_collection_context: int = Field(default=10, ge=1, le=50)
     rag_relative_score_cutoff: float = Field(default=0.01, ge=0.0, le=1.0)
     generate_mom_auto: bool = True
+    embedding_model: str = "Qwen3-Embedding-0.6B"
     
     # New Ollama specific settings
     ollama_num_ctx: int = Field(default=32768, ge=512, le=131072)
+    ollama_dynamic_ctx: bool = Field(default=True)
     ollama_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     ollama_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     ollama_top_k: int = Field(default=40, ge=0)
@@ -76,11 +79,14 @@ class UserSettingsUpdate(BaseModel):
     rag_retrieval_k_global: int | None = Field(default=None, ge=0, le=50)
     rag_retrieval_k_meeting: int | None = Field(default=None, ge=0, le=50)
     rag_retrieval_k_transcript: int | None = Field(default=None, ge=0, le=50)
+    rag_max_collection_context: int | None = Field(default=None, ge=1, le=50)
     rag_relative_score_cutoff: float | None = Field(default=None, ge=0.0, le=1.0)
     generate_mom_auto: bool | None = None
+    embedding_model: str | None = None
     
     # New Ollama settings
     ollama_num_ctx: int | None = Field(default=None, ge=512, le=131072)
+    ollama_dynamic_ctx: bool | None = None
     ollama_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     ollama_top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     ollama_top_k: int | None = Field(default=None, ge=0)

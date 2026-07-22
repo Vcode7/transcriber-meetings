@@ -136,50 +136,92 @@ function EmbeddedPlayer({
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [error, setError] = useState(false);
   const scrubRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
+    setError(false);
+
+    const updateMetadata = () => {
+      if (Number.isFinite(audio.duration) && !isNaN(audio.duration)) {
+        setDuration(audio.duration);
+      }
+    };
+
     const onTime = () => {
       setCurrentTime(audio.currentTime);
-      setProgress(audio.duration ? (audio.currentTime / audio.duration) * 100 : 0);
+      const dur = Number.isFinite(audio.duration) && !isNaN(audio.duration) ? audio.duration : 0;
+      setProgress(dur > 0 ? (audio.currentTime / dur) * 100 : 0);
     };
-    const onDur = () => setDuration(audio.duration);
+
     const onEnd = () => setPlaying(false);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    const onError = () => {
+      console.warn("[EmbeddedPlayer] Failed to load audio stream");
+      setError(true);
+      setPlaying(false);
+    };
+
     audio.addEventListener("timeupdate", onTime);
-    audio.addEventListener("durationchange", onDur);
+    audio.addEventListener("durationchange", updateMetadata);
+    audio.addEventListener("loadedmetadata", updateMetadata);
     audio.addEventListener("ended", onEnd);
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
+    audio.addEventListener("error", onError);
+
+    if (Number.isFinite(audio.duration) && !isNaN(audio.duration) && audio.duration > 0) {
+      setDuration(audio.duration);
+    }
+
     return () => {
       audio.removeEventListener("timeupdate", onTime);
-      audio.removeEventListener("durationchange", onDur);
+      audio.removeEventListener("durationchange", updateMetadata);
+      audio.removeEventListener("loadedmetadata", updateMetadata);
       audio.removeEventListener("ended", onEnd);
       audio.removeEventListener("play", onPlay);
       audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("error", onError);
     };
-  }, [audioRef]);
+  }, [audioRef, src]);
 
   const togglePlay = () => {
     const audio = audioRef.current;
-    if (!audio) return;
-    if (playing) audio.pause();
-    else audio.play();
+    if (!audio || error) return;
+    if (playing) {
+      audio.pause();
+    } else {
+      audio.play().catch((err) => {
+        console.warn("[EmbeddedPlayer] Play failure:", err);
+        setPlaying(false);
+      });
+    }
   };
 
   const handleScrub = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const audio = audioRef.current;
       const bar = scrubRef.current;
-      if (!audio || !bar || !audio.duration) return;
+      const dur = Number.isFinite(audio?.duration) ? (audio?.duration || 0) : 0;
+      if (!audio || !bar || dur <= 0) return;
       const pct = Math.max(0, Math.min(1, (e.clientX - bar.getBoundingClientRect().left) / bar.getBoundingClientRect().width));
-      audio.currentTime = pct * audio.duration;
+      audio.currentTime = pct * dur;
     },
     [audioRef]
   );
+
+  if (error) {
+    return (
+      <div className="custom-audio-player" style={{ margin: "0 0 12px", opacity: 0.8 }}>
+        <span style={{ fontSize: "0.8rem", color: "hsl(var(--destructive))", padding: "0.4rem 0.6rem" }}>
+          Audio stream unavailable for playback
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="custom-audio-player" style={{ margin: "0 0 12px" }}>
@@ -254,8 +296,28 @@ export default function TranscriptViewer({
   const seekTo = useCallback((start: number) => {
     const audio = audioRef.current;
     if (!audio) return;
-    audio.currentTime = start;
-    audio.play();
+
+    const playAndSeek = () => {
+      try {
+        audio.currentTime = start;
+      } catch (e) {
+        console.warn("[TranscriptViewer] Seek failed:", e);
+      }
+      audio.play().catch((err) => {
+        console.warn("[TranscriptViewer] Play failed:", err);
+      });
+    };
+
+    if (audio.readyState >= 1) {
+      playAndSeek();
+    } else {
+      const onLoaded = () => {
+        playAndSeek();
+        audio.removeEventListener("loadedmetadata", onLoaded);
+      };
+      audio.addEventListener("loadedmetadata", onLoaded);
+      audio.load();
+    }
   }, []);
 
   const handleEditStart = (idx: number) => {
@@ -295,13 +357,16 @@ export default function TranscriptViewer({
 
   if (!segments || segments.length === 0) {
     return (
-      <div style={{ color: "hsl(var(--pencil))", textAlign: "center", padding: "3.5rem 2rem", fontSize: "0.95rem", fontFamily: "Inter, sans-serif", display: "flex", flexDirection: "column", alignItems: "center", gap: "1.25rem" }}>
-        <div style={{ width: "72px", height: "72px", borderRadius: "50%", background: "hsl(var(--accent) / .08)", border: "2px dashed hsl(var(--accent) / .22)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "2rem" }} className="animate-float">
-          🎤
-        </div>
-        <div>
-          <p style={{ fontWeight: 700, marginBottom: ".4rem", color: "hsl(var(--ink))", fontSize: "1rem" }}>No transcript yet</p>
-          <p style={{ fontSize: ".85rem", opacity: 0.65, lineHeight: 1.5 }}>Record or upload audio to get started</p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0" }}>
+        {audioUrl && <EmbeddedPlayer src={audioUrl} audioRef={audioRef} />}
+        <div style={{ color: "hsl(var(--pencil))", textAlign: "center", padding: "3.5rem 2rem", fontSize: "0.95rem", fontFamily: "Inter, sans-serif", display: "flex", flexDirection: "column", alignItems: "center", gap: "1.25rem" }}>
+          <div style={{ width: "72px", height: "72px", borderRadius: "50%", background: "hsl(var(--accent) / .08)", border: "2px dashed hsl(var(--accent) / .22)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "2rem" }} className="animate-float">
+            🎤
+          </div>
+          <div>
+            <p style={{ fontWeight: 700, marginBottom: ".4rem", color: "hsl(var(--ink))", fontSize: "1rem" }}>No transcript yet</p>
+            <p style={{ fontSize: ".85rem", opacity: 0.65, lineHeight: 1.5 }}>Record or upload audio to get started</p>
+          </div>
         </div>
       </div>
     );

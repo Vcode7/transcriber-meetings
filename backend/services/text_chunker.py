@@ -21,6 +21,25 @@ import re
 from typing import List, Dict, Any, Tuple
 
 
+# ── Timestamp formatter ───────────────────────────────────────────────────────
+
+def _fmt_time(secs: float) -> str:
+    """
+    Format seconds as HH:MM:SS.
+
+    Examples
+    --------
+    _fmt_time(0)      → '00:00:00'
+    _fmt_time(75.3)   → '00:01:15'
+    _fmt_time(3662.0) → '01:01:02'
+    """
+    total = int(secs)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 # ── Sentence splitter ─────────────────────────────────────────────────────────
 
 def _split_sentences(text: str) -> List[str]:
@@ -106,6 +125,33 @@ def chunk_text(
 
 # ── Transcript chunker ────────────────────────────────────────────────────────
 
+def _merge_consecutive_speaker_lines(
+    lines: List[Tuple[str, str, float, float]]
+) -> List[Tuple[str, str, float, float]]:
+    """
+    Merge consecutive segments from the same speaker into a single block,
+    combining their text and extending the start/end timestamps.
+
+    Example
+    -------
+    [("A", "Hello", 0.0, 1.0), ("A", "world.", 1.1, 2.0), ("B", "Hi.", 2.5, 3.0)]
+    → [("A", "Hello world.", 0.0, 2.0), ("B", "Hi.", 2.5, 3.0)]
+    """
+    if not lines:
+        return []
+    merged: List[Tuple[str, str, float, float]] = []
+    cur_speaker, cur_text, cur_start, cur_end = lines[0]
+    for speaker, text, start, end in lines[1:]:
+        if speaker == cur_speaker:
+            cur_text = cur_text.rstrip() + " " + text
+            cur_end = end
+        else:
+            merged.append((cur_speaker, cur_text, cur_start, cur_end))
+            cur_speaker, cur_text, cur_start, cur_end = speaker, text, start, end
+    merged.append((cur_speaker, cur_text, cur_start, cur_end))
+    return merged
+
+
 def chunk_transcript(
     transcript: List[Dict[str, Any]],
     chunk_size: int = 400,
@@ -116,7 +162,14 @@ def chunk_transcript(
 
     Each segment has: {"speaker_label": str, "text": str, "start": float, "end": float, ...}
 
-    Preserves speaker labels in the chunk text (format: "Speaker: text").
+    Each speaker block in the chunk text is formatted as:
+
+        [HH:MM:SS - HH:MM:SS] Speaker Name
+        Transcript text for that block...
+
+    Consecutive segments from the same speaker are merged before formatting
+    so each block has a single consolidated timeline header.
+
     Stores start/end timestamps of the first and last segment in each chunk.
 
     Parameters
@@ -140,18 +193,29 @@ def chunk_transcript(
         if not text:
             continue
         speaker = seg.get("speaker_label") or "Unknown"
-        start = seg.get("start") or 0.0
-        end = seg.get("end") or 0.0
+        start = float(seg.get("start") or 0.0)
+        end = float(seg.get("end") or 0.0)
         lines.append((speaker, text, start, end))
 
     if not lines:
         return []
+
+    # Merge consecutive same-speaker segments (preserves timestamps)
+    lines = _merge_consecutive_speaker_lines(lines)
 
     chunks: List[Dict[str, Any]] = []
     current_lines: List[Tuple[str, str, float, float]] = []
     current_words = 0
     chunk_index = 0
     overlap_lines: List[Tuple[str, str, float, float]] = []
+
+    def _build_chunk_text(all_lns: List[Tuple[str, str, float, float]]) -> str:
+        """Format merged-speaker lines with timeline headers."""
+        parts = []
+        for spk, txt, st, en in all_lns:
+            header = f"[{_fmt_time(st)} - {_fmt_time(en)}] {spk}"
+            parts.append(f"{header}\n{txt}")
+        return "\n\n".join(parts)
 
     for line in lines:
         speaker, text, start, end = line
@@ -161,7 +225,7 @@ def chunk_transcript(
 
         if current_words >= chunk_size:
             all_lines = overlap_lines + current_lines
-            chunk_text_str = "\n".join(f"{s}: {t}" for s, t, _, _ in all_lines)
+            chunk_text_str = _build_chunk_text(all_lines)
             all_speakers = list(dict.fromkeys(s for s, _, _, _ in all_lines))
             chunk_start = all_lines[0][2]
             chunk_end = all_lines[-1][3]
@@ -192,7 +256,7 @@ def chunk_transcript(
     # Flush remaining
     if current_lines:
         all_lines = overlap_lines + current_lines
-        chunk_text_str = "\n".join(f"{s}: {t}" for s, t, _, _ in all_lines)
+        chunk_text_str = _build_chunk_text(all_lines)
         all_speakers = list(dict.fromkeys(s for s, _, _, _ in all_lines))
         chunk_start = all_lines[0][2]
         chunk_end = all_lines[-1][3]

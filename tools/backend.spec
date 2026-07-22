@@ -50,7 +50,7 @@ metadata_packages = [
     "optimum_quanto", "gammatone", "pesq", "piq", "pystoi",
     "torchmetrics", "pyannote-audio",
     # Additional packages
-    "python-pptx", "pptx", "pytesseract", "pypdf",
+    "python-pptx", "pptx", "pytesseract", "pypdf", "faiss", "faiss-cpu", "pydantic-settings",
 ]
 
 collected_metadata = []
@@ -230,6 +230,10 @@ a = Analysis(
         "pptx",
         "pytesseract",
         "pypdf",
+        # FAISS vector store & Pydantic settings
+        "faiss",
+        "faiss.swigfaiss",
+        "pydantic_settings",
         # Extra utils from requirements.txt
         "multipart",
         "dotenv",
@@ -251,6 +255,8 @@ a = Analysis(
         "routers.raw_mom_router",
         "routers.dashboard_router",
         "routers.prompt_templates_router",
+        "routers.collections_router",
+        "routers.collection_ai_router",
         # App modules — services
         "services.diarization",
         "services.embedding",
@@ -274,6 +280,7 @@ a = Analysis(
         "services.text_chunker",
         "services.text_embedding_service",
         "services.vector_store",
+        "services.collection_ai_service",
         # App modules — utils & core
         "utils.audio_utils",
         "utils.storage",

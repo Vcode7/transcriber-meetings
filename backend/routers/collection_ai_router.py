@@ -31,6 +31,7 @@ router = APIRouter(prefix="/collections/{collection_id}/ai", tags=["collection-a
 
 class ChatRequest(BaseModel):
     message: str
+    max_context: Optional[int] = 10
 
 class CompareRequest(BaseModel):
     meeting_id_a: str
@@ -196,6 +197,8 @@ async def collection_chat(
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
+    max_context = body.max_context or 10
+
     # Fetch collection meetings
     meetings = await _get_collection_meetings(collection_id)
     if not meetings:
@@ -227,7 +230,7 @@ async def collection_chat(
         def _run_inference():
             from services.collection_ai_service import (
                 ensure_meetings_are_embedded,
-                retrieve_collection_context,
+                retrieve_collection_context_two_stage,
                 build_chat_prompt,
                 run_collection_ai_inference_streaming,
             )
@@ -235,46 +238,58 @@ async def collection_chat(
             # Ensure all meetings in collection are embedded in FAISS
             ensure_meetings_are_embedded(meeting_ids, user_id)
 
-            # RAG retrieval
-            ctx = retrieve_collection_context(
+            # Two-Stage RAG retrieval & Triage (Stage 1 Context Planning -> Stage 2 Vector Search + Fallback)
+            ctx, plan_or_direct, context_required = retrieve_collection_context_two_stage(
                 meeting_ids=meeting_ids,
                 meeting_meta=meeting_meta,
                 query=message,
                 user_id=user_id,
+                chat_history=chat_history,
+                max_context=max_context,
                 k_per_meeting=5,
                 max_total_chars=20000,
             )
 
-            # Build prompt
-            prompt = build_chat_prompt(
-                question=message,
-                context=ctx,
-                chat_history=chat_history,
-            )
+            if not context_required:
+                # Direct answer returned from Stage 1 (e.g. general greeting/knowledge) — skip Stage 2 RAG
+                full_response = plan_or_direct
+                chunks_collected = [full_response]
+                cited = []
+                meeting_names = {}
+                plan_used = "No context required (Direct Answer)"
+            else:
+                # Build prompt with retrieved context
+                prompt = build_chat_prompt(
+                    question=message,
+                    context=ctx,
+                    chat_history=chat_history,
+                )
 
-            # Collect cited meetings
-            cited = list({c.meeting_id for c in ctx.chunks if c.meeting_id != "global"})
-            meeting_names = {c.meeting_id: c.meeting_name for c in ctx.chunks if c.meeting_id != "global"}
+                # Collect cited meetings
+                cited = list({c.meeting_id for c in ctx.chunks if c.meeting_id != "global"})
+                meeting_names = {c.meeting_id: c.meeting_name for c in ctx.chunks if c.meeting_id != "global"}
 
-            # Run inference (collects full response for saving)
-            chunks_collected = []
+                # Run inference (collects full response for saving)
+                chunks_collected = []
 
-            def on_chunk(text_chunk):
-                chunks_collected.append(text_chunk)
+                def on_chunk(text_chunk):
+                    chunks_collected.append(text_chunk)
 
-            run_collection_ai_inference_streaming(
-                prompt=prompt,
-                max_new_tokens=1500,
-                chunk_callback=on_chunk,
-                task_key="collection_chat",
-            )
+                run_collection_ai_inference_streaming(
+                    prompt=prompt,
+                    max_new_tokens=1500,
+                    chunk_callback=on_chunk,
+                    task_key="collection_chat",
+                )
 
-            full_response = "".join(chunks_collected)
-            return full_response, chunks_collected, cited, meeting_names
+                full_response = "".join(chunks_collected)
+                plan_used = plan_or_direct
+
+            return full_response, chunks_collected, cited, meeting_names, plan_used
 
         loop = asyncio.get_event_loop()
         try:
-            full_response, chunks, cited, meeting_names = await loop.run_in_executor(
+            full_response, chunks, cited, meeting_names, plan_used = await loop.run_in_executor(
                 None, _run_inference
             )
 
@@ -286,6 +301,8 @@ async def collection_chat(
             meta = {
                 "cited_meetings": cited,
                 "meeting_names": meeting_names,
+                "retrieval_plan": plan_used,
+                "max_context": max_context,
             }
             yield _sse_event(json.dumps(meta), "metadata")
 

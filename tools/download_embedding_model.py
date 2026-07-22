@@ -1,23 +1,25 @@
 """
 download_embedding_model.py
 ===========================
-Downloads and caches the Qwen3-Embedding-0.6B model into the application's runtime/embeddings/ directory.
-Supports downloading from ModelScope (default, recommended for users in China or when HF is unresponsive)
-and HuggingFace Hub.
+Downloads and caches the Qwen3-Embedding models into the application's runtime/embeddings/ directory.
+If the 4B model is requested, it automatically quantizes it to INT8 in-place using optimum-quanto.
+Supports downloading from ModelScope (default) and HuggingFace Hub.
 
 Run once (with internet access) before deploying offline:
 
     python tools/download_embedding_model.py --provider modelscope
 
-All downloads are idempotent: existing files are verified and skipped.
+All downloads are idempotent: existing files and quantized status are verified and skipped.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
+import os  
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 
 logging.basicConfig(
@@ -41,13 +43,103 @@ def _resolve_embeddings_dir() -> Path:
 
 _EMBEDDINGS_DIR = _resolve_embeddings_dir()
 
+def _quantize_model_inplace(dest_path: Path) -> None:
+    """Quantize the downloaded unquantized float16 weights of Qwen3-Embedding-4B into INT8 in-place."""
+    logger.info("Starting INT8 quantization using optimum-quanto...")
+    
+    # Check/install dependencies
+    try:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError:
+        logger.error("Missing standard dependencies. Installing torch, transformers, and accelerate via pip...")
+        import subprocess
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "torch", "transformers", "accelerate"], check=True)
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except Exception as ex:
+            logger.error(f"Failed to install dependencies: {ex}. Please install manually.")
+            sys.exit(1)
+
+    try:
+        from optimum.quanto import freeze, qint8, quantize
+    except ImportError:
+        logger.info("optimum-quanto is not installed. Installing via pip...")
+        import subprocess
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "optimum-quanto"], check=True)
+            from optimum.quanto import freeze, qint8, quantize
+        except Exception as ex:
+            logger.error(f"Failed to install optimum-quanto: {ex}. Please install manually with: pip install optimum-quanto")
+            sys.exit(1)
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="quantize_temp_"))
+    try:
+        logger.info("Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(dest_path),
+            local_files_only=True,
+            trust_remote_code=True,
+        )
+
+        logger.info("Loading model weights into CPU RAM (using float32 for quantization math)...")
+        model = AutoModel.from_pretrained(
+            str(dest_path),
+            local_files_only=True,
+            trust_remote_code=True,
+            torch_dtype=torch.float32,
+        )
+
+        logger.info("Quantizing linear layers to INT8...")
+        quantize(model, weights=qint8)
+
+        logger.info("Freezing model weights...")
+        freeze(model)
+
+        logger.info(f"Saving quantized model temporarily to: {temp_dir}")
+        model.save_pretrained(str(temp_dir))
+        tokenizer.save_pretrained(str(temp_dir))
+
+        # Copy non-weight config and metadata files that transformers doesn't serialize
+        logger.info("Copying sidecar config and tokenizer config files...")
+        for item in dest_path.iterdir():
+            if item.is_file() and item.suffix not in [".bin", ".safetensors", ".pt", ".pth"]:
+                dest_file = temp_dir / item.name
+                if not dest_file.exists():
+                    shutil.copy2(item, dest_file)
+
+        logger.info("Replacing unquantized weights with INT8 quantized weights in-place...")
+        # Remove original float16 weight files
+        for item in dest_path.iterdir():
+            if item.is_file() and item.suffix in [".bin", ".safetensors", ".pt", ".pth"]:
+                item.unlink()
+
+        # Copy all files from temp directory back to dest_path
+        for item in temp_dir.iterdir():
+            if item.is_file():
+                shutil.move(str(item), str(dest_path / item.name))
+
+        # Remove temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Write marker file
+        (dest_path / ".quantized_int8").write_text("success")
+        logger.info("[SUCCESS] Model quantized to INT8 successfully! ✓")
+
+    except Exception as e:
+        logger.error(f"[ERROR] Quantization failed: {e}", exc_info=True)
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        sys.exit(1)
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Download a Qwen embedding model for offline RAG use."
     )
     parser.add_argument(
         "--model",
-        default="Qwen3-Embedding-4B-Instruct-INT8",
+        default="Qwen3-Embedding-0.6B",
         choices=["Qwen3-Embedding-0.6B", "Qwen3-Embedding-4B-Instruct-INT8"],
         help="Embedding model to download (default: Qwen3-Embedding-0.6B)",
     )
@@ -94,9 +186,16 @@ def main() -> None:
         dest / "config.json",
         dest / "tokenizer.json",
     ]
-    missing = [p for p in required_files if not p.exists()]
-    if not missing:
-        logger.info(f"[SKIP] {model_name} is already present at {dest}")
+    
+    has_weights = any(
+        f.suffix in [".safetensors", ".bin", ".pt"]
+        for f in dest.iterdir()
+    ) if dest.is_dir() else False
+    needs_quantization = model_name.endswith("-INT8")
+    is_already_quantized = (dest / ".quantized_int8").exists()
+
+    if all(p.exists() for p in required_files) and has_weights and (not needs_quantization or is_already_quantized):
+        logger.info(f"[SKIP] {model_name} is already fully downloaded, quantized, and present at {dest} ✓")
         sys.exit(0)
 
     # Resolve repo IDs dynamically based on the model map
@@ -152,6 +251,10 @@ def main() -> None:
         except Exception as e:
             logger.error(f"[ERROR] Failed to download model from HuggingFace: {e}")
             sys.exit(1)
+
+    # Perform quantization if requested
+    if needs_quantization:
+        _quantize_model_inplace(dest)
 
 if __name__ == "__main__":
     main()

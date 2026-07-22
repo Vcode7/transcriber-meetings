@@ -1,26 +1,25 @@
 """
-text_embedding_service.py — Offline text embedding using Qwen3-Embedding-0.6B.
+text_embedding_service.py — Offline text embedding using Qwen embedding models.
 
 Architecture
 ------------
 - Isolated behind a clean interface so the model can be swapped later
-  (e.g. Qwen3-Embedding-8B) without changing the rest of the RAG pipeline.
+  without changing the rest of the RAG pipeline.
 - Model is loaded ONCE per process and cached as a module-level singleton.
 - Always loads from the local runtime directory; NEVER downloads from the internet.
-- If the model directory is missing, raises a FileNotFoundError with a clear message.
+- Direct Hugging Face model loading via AutoModel and AutoTokenizer.
+- Automatic 8-bit BitsAndBytes quantization when CUDA is available.
+- Fallback to CPU inference when CUDA is not available.
 
 Model path (development):
     <project_root>/Application/runtime/embeddings/Qwen3-Embedding-0.6B/
 
 Model path (production / PyInstaller):
     <exe_parent>/../runtime/embeddings/Qwen3-Embedding-0.6B/
-
-The model directory name is controlled by settings.QWEN_EMBEDDING_MODEL_NAME
-so upgrading to a larger model only requires changing one .env variable and
-re-running the embedding pipeline (all vectors must be regenerated on model change).
 """
 from __future__ import annotations
 
+import gc
 import logging
 import numpy as np
 from pathlib import Path
@@ -34,7 +33,7 @@ _embedder: Optional["TextEmbeddingService"] = None
 
 class TextEmbeddingService:
     """
-    Offline text embedding service backed by Qwen3-Embedding-0.6B.
+    Offline text embedding service backing vector retrieval for RAG.
 
     Public API
     ----------
@@ -51,12 +50,13 @@ class TextEmbeddingService:
         self._dim: Optional[int] = None
         self._loaded = False
         self._device: str = "cpu"
+        self._use_8bit: bool = False
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
     def load(self) -> None:
         """
-        Load the Qwen embedding model from the local runtime directory.
+        Load the embedding model from the local runtime directory.
 
         Raises
         ------
@@ -80,7 +80,6 @@ class TextEmbeddingService:
                 "The application will NOT download models from the internet."
             )
 
-        # Verify the directory contains some model files
         model_files = list(model_dir.iterdir())
         if not model_files:
             raise FileNotFoundError(
@@ -88,23 +87,20 @@ class TextEmbeddingService:
                 f"Please populate it with the {settings.EMBEDDING_MODEL} model files."
             )
 
-        logger.info(
-            f"[TextEmbedding] Loading {settings.EMBEDDING_MODEL} "
-            f"from {model_dir} ..."
-        )
+        logger.info(f"[TextEmbedding] Loading {settings.EMBEDDING_MODEL} from {model_dir}...")
+
+        import os
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+        import torch
+        from transformers import AutoTokenizer, AutoModel
+
+        has_cuda = torch.cuda.is_available()
+        self._device = "cuda" if has_cuda else "cpu"
+        self._use_8bit = False
 
         try:
-            import os
-            # Enforce offline behavior
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
-            import torch
-            from transformers import AutoTokenizer, AutoModel
-
-            self._device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info(f"[TextEmbedding] Using device: {self._device}")
-
             self._tokenizer = AutoTokenizer.from_pretrained(
                 str(model_dir),
                 local_files_only=True,
@@ -113,39 +109,56 @@ class TextEmbeddingService:
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token
 
-            torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
+            if has_cuda:
+                loaded_with_bnb = False
+                try:
+                    from transformers import BitsAndBytesConfig
+                    quant_config = BitsAndBytesConfig(load_in_8bit=True)
+                    logger.info("[TextEmbedding] Configuring BitsAndBytes 8-bit quantization for CUDA GPU...")
+                    self._model = AutoModel.from_pretrained(
+                        str(model_dir),
+                        local_files_only=True,
+                        trust_remote_code=True,
+                        quantization_config=quant_config,
+                        device_map="auto",
+                        # NOTE: do NOT pass torch_dtype here.
+                        # Combining load_in_8bit=True with torch_dtype triggers a
+                        # "Cannot copy out of meta tensor" error on larger models
+                        # (e.g. 4B+) because BitsAndBytes uses meta-tensor sharding
+                        # and cannot apply a dtype copy afterwards.
+                        # BitsAndBytes manages its own internal precision (int8 + fp16
+                        # outliers) without needing an explicit dtype.
+                    )
+                    self._use_8bit = True
+                    loaded_with_bnb = True
+                except Exception as bnb_err:
+                    logger.warning(
+                        f"[TextEmbedding] BitsAndBytes 8-bit load failed on CUDA ({bnb_err}). "
+                        "Falling back to standard float16 load..."
+                    )
 
-            try:
-                # Try loading with device_map="auto" if cuda is available
-                if self._device == "cuda":
+                if not loaded_with_bnb:
                     self._model = AutoModel.from_pretrained(
                         str(model_dir),
                         local_files_only=True,
                         trust_remote_code=True,
-                        torch_dtype=torch_dtype,
-                        device_map="auto"
+                        torch_dtype=torch.float16,
+                        device_map="auto",
                     )
-                else:
-                    self._model = AutoModel.from_pretrained(
-                        str(model_dir),
-                        local_files_only=True,
-                        trust_remote_code=True,
-                        torch_dtype=torch_dtype
-                    )
-                    self._model = self._model.to(self._device)
-            except Exception as e:
-                logger.warning(f"[TextEmbedding] Failed loading with standard AutoModel: {e}. Retrying without device_map / custom args.")
-                # Fallback load
+                    self._use_8bit = False
+            else:
+                logger.info("[TextEmbedding] CUDA not available. Loading model in float32 for CPU inference...")
                 self._model = AutoModel.from_pretrained(
                     str(model_dir),
                     local_files_only=True,
-                    trust_remote_code=True
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
                 )
-                self._model = self._model.to(self._device)
+                self._model = self._model.to("cpu")
+                self._use_8bit = False
 
             self._model.eval()
 
-            # Determine embedding dimension dynamically
             if hasattr(self._model, "config") and hasattr(self._model.config, "hidden_size"):
                 self._dim = self._model.config.hidden_size
             else:
@@ -153,15 +166,30 @@ class TextEmbeddingService:
 
             self._loaded = True
 
+            gpu_mem_info = "N/A (CPU Mode)"
+            if has_cuda:
+                try:
+                    allocated_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                    reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+                    gpu_mem_info = f"Allocated={allocated_mb:.1f} MB, Reserved={reserved_mb:.1f} MB"
+                except Exception:
+                    gpu_mem_info = "CUDA Memory Info Unavailable"
+
             logger.info(
-                f"[TextEmbedding] {settings.EMBEDDING_MODEL} loaded "
-                f"(device={self._device}, dim={self._dim}) ✓"
+                f"[TextEmbedding] Model loaded successfully ✓\n"
+                f"  - Model Path: {model_dir}\n"
+                f"  - Device: {self._device.upper()}\n"
+                f"  - BitsAndBytes 8-bit Quantization: {'ENABLED' if self._use_8bit else 'DISABLED'}\n"
+                f"  - Embedding Dimension: {self._dim}\n"
+                f"  - GPU Memory Usage: {gpu_mem_info}"
             )
 
         except Exception as e:
             self._tokenizer = None
             self._model = None
             self._loaded = False
+            self._dim = None
+            self._use_8bit = False
             raise RuntimeError(
                 f"[TextEmbedding] Failed to load embedding model from {model_dir}: {e}"
             ) from e
@@ -184,9 +212,6 @@ class TextEmbeddingService:
         """
         import torch
 
-        # Qwen3-Embedding uses a special instruction prefix for retrieval tasks.
-        # For document embeddings (asymmetric retrieval), no prefix is needed.
-        # For query embeddings, the same approach is used here (symmetric search).
         inputs = self._tokenizer(
             texts,
             padding=True,
@@ -196,7 +221,8 @@ class TextEmbeddingService:
         )
 
         if self._device == "cuda":
-            inputs = {k: v.cuda() for k, v in inputs.items()}
+            target_device = getattr(self._model, "device", torch.device("cuda"))
+            inputs = {k: v.to(target_device) for k, v in inputs.items()}
 
         with torch.no_grad():
             outputs = self._model(**inputs)
@@ -240,23 +266,41 @@ class TextEmbeddingService:
         Returns
         -------
         np.ndarray of shape (n, dim) — L2-normalized float32.
+
+        Notes
+        -----
+        Empty or whitespace-only strings are replaced with a zero vector rather
+        than being filtered out. This preserves the 1-to-1 correspondence between
+        ``texts`` and the returned rows, so callers can safely zip texts with
+        embeddings without index mismatches.
         """
         self._ensure_loaded()
-        if not texts:
+        n = len(texts)
+        if n == 0:
             return np.zeros((0, self._dim), dtype=np.float32)
 
-        all_embeddings = []
-        for i in range(0, len(texts), batch_size):
-            batch = [t.strip() for t in texts[i: i + batch_size] if t.strip()]
-            if not batch:
-                continue
-            embs = self._encode_raw(batch)
-            all_embeddings.append(embs)
+        # Pre-allocate the full result array. Zero rows are returned for empty inputs.
+        result = np.zeros((n, self._dim), dtype=np.float32)
 
-        if not all_embeddings:
-            return np.zeros((0, self._dim), dtype=np.float32)
+        # Collect (original_index, cleaned_text) for non-empty strings only.
+        non_empty_items = [
+            (i, texts[i].strip()) for i in range(n) if texts[i].strip()
+        ]
 
-        return np.vstack(all_embeddings).astype(np.float32)
+        if not non_empty_items:
+            return result  # all inputs were empty
+
+        # Process non-empty texts in mini-batches.
+        for batch_start in range(0, len(non_empty_items), batch_size):
+            batch_items = non_empty_items[batch_start: batch_start + batch_size]
+            orig_indices = [item[0] for item in batch_items]
+            batch_texts = [item[1] for item in batch_items]
+
+            embs = self._encode_raw(batch_texts)  # shape (batch, dim)
+            for out_pos, orig_idx in enumerate(orig_indices):
+                result[orig_idx] = embs[out_pos]
+
+        return result
 
     def embedding_dim(self) -> int:
         """Return the vector dimension of this embedding model."""
@@ -274,7 +318,7 @@ class TextEmbeddingService:
         self._tokenizer = None
         self._loaded = False
         self._dim = None
-        import gc
+        self._use_8bit = False
         gc.collect()
         try:
             import torch
@@ -282,7 +326,7 @@ class TextEmbeddingService:
                 torch.cuda.empty_cache()
         except Exception:
             pass
-        logger.info("[TextEmbedding] Embedding model unloaded.")
+        logger.info("[TextEmbedding] Embedding model unloaded and CUDA memory released.")
 
     # ── Compatibility Aliases ──────────────────────────────────────────────────
 
@@ -331,4 +375,3 @@ def embed_chunks(texts: List[str], batch_size: int = 32) -> np.ndarray:
 def embed_query(text: str) -> np.ndarray:
     """Module-level wrapper for embed_query."""
     return get_text_embedder().embed_query(text)
-

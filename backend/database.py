@@ -126,9 +126,12 @@ async def connect_db():
                 rag_retrieval_k_global INTEGER NOT NULL DEFAULT 2,
                 rag_retrieval_k_meeting INTEGER NOT NULL DEFAULT 3,
                 rag_retrieval_k_transcript INTEGER NOT NULL DEFAULT 10,
+                rag_max_collection_context INTEGER NOT NULL DEFAULT 10,
                 rag_relative_score_cutoff REAL NOT NULL DEFAULT 0.01,
                 generate_mom_auto INTEGER NOT NULL DEFAULT 1,
+                embedding_model TEXT NOT NULL DEFAULT 'Qwen3-Embedding-0.6B',
                 ollama_num_ctx INTEGER NOT NULL DEFAULT 32768,
+                ollama_dynamic_ctx INTEGER NOT NULL DEFAULT 1,
                 ollama_temperature REAL NOT NULL DEFAULT 0.0,
                 ollama_top_p REAL NOT NULL DEFAULT 0.9,
                 ollama_top_k INTEGER NOT NULL DEFAULT 40,
@@ -310,9 +313,11 @@ async def connect_db():
             ("rag_retrieval_k_global", "INTEGER NOT NULL DEFAULT 2"),
             ("rag_retrieval_k_meeting", "INTEGER NOT NULL DEFAULT 3"),
             ("rag_retrieval_k_transcript", "INTEGER NOT NULL DEFAULT 10"),
+            ("rag_max_collection_context", "INTEGER NOT NULL DEFAULT 10"),
             ("rag_relative_score_cutoff", "REAL NOT NULL DEFAULT 0.01"),
             ("generate_mom_auto", "INTEGER NOT NULL DEFAULT 1"),
             ("ollama_num_ctx", "INTEGER NOT NULL DEFAULT 32768"),
+            ("ollama_dynamic_ctx", "INTEGER NOT NULL DEFAULT 1"),
             ("ollama_temperature", "REAL NOT NULL DEFAULT 0.0"),
             ("ollama_top_p", "REAL NOT NULL DEFAULT 0.9"),
             ("ollama_top_k", "INTEGER NOT NULL DEFAULT 40"),
@@ -344,6 +349,7 @@ async def connect_db():
             ("max_tokens_collection_compare", "INTEGER NOT NULL DEFAULT 1500"),
             ("max_tokens_collection_topic_growth", "INTEGER NOT NULL DEFAULT 1500"),
             ("max_tokens_vocab_extractor", "INTEGER NOT NULL DEFAULT 512"),
+            ("embedding_model", "TEXT NOT NULL DEFAULT 'Qwen3-Embedding-0.6B'"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
@@ -429,6 +435,7 @@ async def connect_db():
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 filename TEXT NOT NULL,
+                relative_path TEXT DEFAULT '',
                 file_path TEXT NOT NULL,
                 file_hash TEXT NOT NULL,
                 embedded INTEGER NOT NULL DEFAULT 0,
@@ -440,6 +447,11 @@ async def connect_db():
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_global_ctx_user ON global_context_documents(user_id)"
         ))
+
+        try:
+            await conn.execute(text("ALTER TABLE global_context_documents ADD COLUMN relative_path TEXT DEFAULT ''"))
+        except Exception:
+            pass  # column already exists
 
         # ── RAG pipeline columns on recordings (idempotent migrations) ───────────
         # raw_mom                   — JSON output of the Raw MoM pipeline

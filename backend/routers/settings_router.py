@@ -58,9 +58,12 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rag_retrieval_k_global": 2,
         "rag_retrieval_k_meeting": 3,
         "rag_retrieval_k_transcript": 10,
+        "rag_max_collection_context": 10,
         "rag_relative_score_cutoff": 0.01,
         "generate_mom_auto": True,
+        "embedding_model": "Qwen3-Embedding-0.6B",
         "ollama_num_ctx": 32768,
+        "ollama_dynamic_ctx": True,
         "ollama_temperature": 0.0,
         "ollama_top_p": 0.9,
         "ollama_top_k": 40,
@@ -104,6 +107,14 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
 
     res["use_ollama"] = bool(res["use_ollama"])
     res["generate_mom_auto"] = bool(res["generate_mom_auto"])
+    res["ollama_dynamic_ctx"] = bool(res["ollama_dynamic_ctx"])
+
+    if res.get("embedding_model"):
+        from config import settings
+        if settings.EMBEDDING_MODEL != res["embedding_model"]:
+            settings.EMBEDDING_MODEL = res["embedding_model"]
+            settings.QWEN_EMBEDDING_MODEL_NAME = res["embedding_model"]
+
     return res
 
 
@@ -128,6 +139,22 @@ async def update_settings(
         patch["use_ollama"] = 1 if patch["use_ollama"] else 0
     if "generate_mom_auto" in patch:
         patch["generate_mom_auto"] = 1 if patch["generate_mom_auto"] else 0
+    if "ollama_dynamic_ctx" in patch:
+        patch["ollama_dynamic_ctx"] = 1 if patch["ollama_dynamic_ctx"] else 0
+
+    # Sync embedding model setting with runtime config & unload existing text embedder if changed
+    if "embedding_model" in patch and patch["embedding_model"]:
+        new_model = str(patch["embedding_model"]).strip()
+        if new_model:
+            from config import settings
+            if settings.EMBEDDING_MODEL != new_model:
+                settings.EMBEDDING_MODEL = new_model
+                settings.QWEN_EMBEDDING_MODEL_NAME = new_model
+                try:
+                    from services.text_embedding_service import unload_text_embedder
+                    unload_text_embedder()
+                except Exception:
+                    pass
 
     # Build SET clause dynamically from provided fields
     set_parts = [f"{k} = :{k}" for k in patch]
@@ -149,8 +176,8 @@ async def update_settings(
                     INSERT INTO user_settings (user_id, speaker_similarity_threshold, word_conf_low,
                         word_conf_mid, min_segment_duration, use_ollama, ollama_server_url, ollama_port, ollama_model_priority,
                         rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, rag_retrieval_k_meeting,
-                        rag_retrieval_k_transcript, rag_relative_score_cutoff, generate_mom_auto,
-                        ollama_num_ctx, ollama_temperature, ollama_top_p, ollama_top_k, ollama_repeat_penalty,
+                        rag_retrieval_k_transcript, rag_max_collection_context, rag_relative_score_cutoff, generate_mom_auto, embedding_model,
+                        ollama_num_ctx, ollama_dynamic_ctx, ollama_temperature, ollama_top_p, ollama_top_k, ollama_repeat_penalty,
                         ollama_seed, ollama_stop, ollama_keep_alive, ollama_num_thread, ollama_num_gpu,
                         max_tokens_mom, max_tokens_mom_merge, max_tokens_raw_mom_to_mom, max_tokens_raw_mom_extraction, max_tokens_raw_mom_repair,
                         max_tokens_agenda_compress, max_tokens_reference_compress, max_tokens_agenda_from_summary,
@@ -161,8 +188,8 @@ async def update_settings(
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
-                        :rag_retrieval_k_transcript, :rag_relative_score_cutoff, :generate_mom_auto,
-                        :ollama_num_ctx, :ollama_temperature, :ollama_top_p, :ollama_top_k, :ollama_repeat_penalty,
+                        :rag_retrieval_k_transcript, :rag_max_collection_context, :rag_relative_score_cutoff, :generate_mom_auto, :embedding_model,
+                        :ollama_num_ctx, :ollama_dynamic_ctx, :ollama_temperature, :ollama_top_p, :ollama_top_k, :ollama_repeat_penalty,
                         :ollama_seed, :ollama_stop, :ollama_keep_alive, :ollama_num_thread, :ollama_num_gpu,
                         :max_tokens_mom, :max_tokens_mom_merge, :max_tokens_raw_mom_to_mom, :max_tokens_raw_mom_extraction, :max_tokens_raw_mom_repair,
                         :max_tokens_agenda_compress, :max_tokens_reference_compress, :max_tokens_agenda_from_summary,
@@ -187,9 +214,12 @@ async def update_settings(
                     "rag_retrieval_k_global": patch.get("rag_retrieval_k_global", 2),
                     "rag_retrieval_k_meeting": patch.get("rag_retrieval_k_meeting", 3),
                     "rag_retrieval_k_transcript": patch.get("rag_retrieval_k_transcript", 10),
+                    "rag_max_collection_context": patch.get("rag_max_collection_context", 10),
                     "rag_relative_score_cutoff": patch.get("rag_relative_score_cutoff", 0.01),
                     "generate_mom_auto": patch.get("generate_mom_auto", 1),
+                    "embedding_model": patch.get("embedding_model", "Qwen3-Embedding-0.6B"),
                     "ollama_num_ctx": patch.get("ollama_num_ctx", 32768),
+                    "ollama_dynamic_ctx": patch.get("ollama_dynamic_ctx", 1),
                     "ollama_temperature": patch.get("ollama_temperature", 0.0),
                     "ollama_top_p": patch.get("ollama_top_p", 0.9),
                     "ollama_top_k": patch.get("ollama_top_k", 40),
@@ -301,5 +331,81 @@ async def test_ollama_connection(
         "running_models": running_models,
         "message": f"Successfully connected to Ollama server at {server_url}.",
     }
+
+
+@router.get("/embedding-models")
+async def get_embedding_models(current_user: dict = Depends(get_current_user)):
+    """
+    List supported text embedding models along with their local installation status.
+    """
+    from pathlib import Path
+    from config import settings, BASE_DIR, RUNTIME_DIR
+
+    known_models = [
+        {
+            "id": "Qwen3-Embedding-0.6B",
+            "name": "Qwen3-Embedding-0.6B",
+            "description": "Fast & lightweight 0.6B model (Recommended for CPU & low VRAM)",
+            "dim": 1024,
+            "quantization": "float16 / float32",
+        },
+        {
+            "id": "Qwen3-Embedding-4B-Instruct-INT8",
+            "name": "Qwen3-Embedding-4B-Instruct-INT8",
+            "description": "High-performance 4B Instruct model (INT8 Quantized for GPU)",
+            "dim": 2560,
+            "quantization": "int8",
+        },
+        {
+            "id": "Qwen3-Embedding-4B-Instruct",
+            "name": "Qwen3-Embedding-4B-Instruct",
+            "description": "Full FP16 4B Instruct model (Maximum retrieval accuracy)",
+            "dim": 2560,
+            "quantization": "float16",
+        },
+    ]
+
+    search_dirs = [
+        BASE_DIR.parent / "Application" / "runtime" / "embeddings",
+        RUNTIME_DIR / "embeddings",
+    ]
+
+    installed_map = {}
+    for d in search_dirs:
+        if d.exists() and d.is_dir():
+            for child in d.iterdir():
+                if child.is_dir() and any(child.iterdir()):
+                    installed_map[child.name] = str(child)
+
+    models_res = []
+    seen_ids = set()
+
+    for km in known_models:
+        mid = km["id"]
+        seen_ids.add(mid)
+        installed = mid in installed_map
+        models_res.append({
+            **km,
+            "installed": installed,
+            "path": installed_map.get(mid),
+        })
+
+    for name, path in installed_map.items():
+        if name not in seen_ids:
+            models_res.append({
+                "id": name,
+                "name": name,
+                "description": "Custom local embedding model",
+                "dim": None,
+                "quantization": "unknown",
+                "installed": True,
+                "path": path,
+            })
+
+    return {
+        "active_model": settings.EMBEDDING_MODEL,
+        "models": models_res,
+    }
+
 
 

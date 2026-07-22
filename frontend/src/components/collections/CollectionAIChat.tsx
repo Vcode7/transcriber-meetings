@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   MessageSquare, GitCompare, TrendingUp, Send, Loader, Bot,
-  Trash2, Copy, Check, Download, ChevronDown, Sparkles, X
+  Trash2, Copy, Check, Download, ChevronDown, Sparkles, X, SlidersHorizontal
 } from 'lucide-react'
 import type { CollectionMeeting, ChatMessage } from '../../types/recording'
 import {
@@ -36,6 +36,10 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
 
   // Clear confirmation
   const [confirmClear, setConfirmClear] = useState(false)
+
+  // Advanced options / Max Context setting
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [maxContext, setMaxContext] = useState(10)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -143,6 +147,7 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
           setStreaming(false)
         },
         controller.signal,
+        maxContext,
       )
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -159,7 +164,7 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
       setStreamedText('')
       setStreaming(false)
     }
-  }, [input, streaming, collectionId])
+  }, [input, streaming, collectionId, maxContext])
 
   const handleCompare = useCallback(async () => {
     if (!meetingA || !meetingB || streaming) return
@@ -371,12 +376,63 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
                 </button>
               )
             )}
+            <button className="icon-btn" onClick={() => setShowAdvanced(!showAdvanced)}
+              title="Advanced Options (Max Context)"
+              style={{
+                width: '32px', height: '32px',
+                color: showAdvanced ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                background: showAdvanced ? 'hsl(var(--accent) / .12)' : 'transparent',
+                borderRadius: '8px',
+              }}>
+              <SlidersHorizontal size={14} />
+            </button>
+
             <button className="icon-btn" onClick={onClose}
               style={{ width: '32px', height: '32px', color: 'hsl(var(--pencil))' }}>
               <X size={16} />
             </button>
           </div>
         </div>
+
+        {/* ═══════ Advanced Options Drawer (Max Context) ═══════ */}
+        {showAdvanced && (
+          <div style={{
+            marginBottom: '.75rem',
+            padding: '.75rem 1rem',
+            borderRadius: '10px',
+            background: 'hsl(var(--card))',
+            border: '1px solid hsl(var(--border) / .15)',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '.4rem' }}>
+              <span style={{ fontSize: '.8rem', fontWeight: 600, color: 'hsl(var(--ink))' }}>
+                Max Context (Retrieved Chunks)
+              </span>
+              <span style={{
+                fontSize: '.78rem', fontWeight: 700,
+                color: 'hsl(var(--accent))',
+                background: 'hsl(var(--accent) / .1)',
+                padding: '.15rem .5rem', borderRadius: '6px',
+              }}>
+                {maxContext} {maxContext === 1 ? 'chunk' : 'chunks'}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={50}
+              step={1}
+              value={maxContext}
+              onChange={e => setMaxContext(Number(e.target.value))}
+              style={{ width: '100%', accentColor: 'hsl(var(--accent))', cursor: 'pointer' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '.68rem', color: 'hsl(var(--pencil))', marginTop: '.25rem' }}>
+              <span>1 chunk (Focused)</span>
+              <span>10 (Default)</span>
+              <span>50 chunks (Broad)</span>
+            </div>
+          </div>
+        )}
 
         {/* ═══════ Mode Tabs ═══════ */}
         <div style={{

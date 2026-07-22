@@ -16,13 +16,14 @@ GET    /global-context/status           — Embedding model info + stats
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import text
 
 from database import get_db, dt_to_str
@@ -35,7 +36,7 @@ router = APIRouter(prefix="/global-context", tags=["global-context"])
 GLOBAL_CONTEXT_SUBDIR = "global_context"
 MAX_FILE_SIZE_MB = 50
 ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".pptx", ".txt", ".md",
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md",
     ".png", ".jpg", ".jpeg", ".webp",
     ".xlsx", ".xls", ".csv",
 }
@@ -56,6 +57,7 @@ def _row_to_dict(row) -> dict:
     return {
         "id": row["id"],
         "filename": row["filename"],
+        "relative_path": row.get("relative_path") or row["filename"],
         "file_hash": row["file_hash"],
         "embedded": bool(row["embedded"]),
         "chunk_count": row.get("chunk_count") or 0,
@@ -69,10 +71,11 @@ def _row_to_dict(row) -> dict:
 @router.post("/upload")
 async def upload_global_context(
     files: List[UploadFile] = File(...),
+    relative_paths: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Upload one or more organizational documents.
+    Upload one or more organizational documents or entire folder structure.
 
     Documents are immediately extracted, chunked, embedded, and stored
     in the per-user FAISS global context index.
@@ -80,27 +83,41 @@ async def upload_global_context(
     user_id = current_user["id"]
     dest_dir = _global_context_dir()
     uploaded = []
-    skipped = 0
+    skipped_duplicates = 0
+    skipped_unsupported = []
 
-    for upload in files:
+    rel_paths_list: list = []
+    if relative_paths:
+        try:
+            rel_paths_list = json.loads(relative_paths)
+        except Exception as e:
+            logger.warning(f"[GlobalCtx] Failed to parse relative_paths: {e}")
+            rel_paths_list = []
+    else:
+        logger.info(f"[GlobalCtx] No relative_paths provided in form data")
+
+    for idx, upload in enumerate(files):
         filename = upload.filename or "upload"
+        rel_path = rel_paths_list[idx] if idx < len(rel_paths_list) else filename
         ext = os.path.splitext(filename.lower())[1]
 
         if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unsupported file type '{ext}' for '{filename}'. "
-                    f"Supported: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
-                ),
-            )
+            skipped_unsupported.append({
+                "filename": filename,
+                "relative_path": rel_path,
+                "reason": f"Unsupported format '{ext}'"
+            })
+            logger.info(f"[GlobalCtx] Skipping unsupported file '{rel_path}'")
+            continue
 
         data = await upload.read()
         if len(data) > MAX_FILE_SIZE_MB * 1024 * 1024:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File '{filename}' exceeds {MAX_FILE_SIZE_MB} MB limit.",
-            )
+            skipped_unsupported.append({
+                "filename": filename,
+                "relative_path": rel_path,
+                "reason": f"Exceeds {MAX_FILE_SIZE_MB}MB limit"
+            })
+            continue
 
         file_hash = _compute_hash(data)
 
@@ -114,12 +131,21 @@ async def upload_global_context(
                 {"uid": user_id, "hash": file_hash},
             )
             if r.fetchone():
-                logger.info(f"[GlobalCtx] Skipping duplicate '{filename}' (hash={file_hash[:8]})")
-                skipped += 1
+                logger.info(f"[GlobalCtx] Skipping duplicate '{rel_path}' (hash={file_hash[:8]})")
+                skipped_duplicates += 1
                 continue
 
-        # Save file to disk
-        safe_name = f"{uuid.uuid4().hex}_{filename}"
+        # Save file to disk.
+        # When uploading a folder the browser may send upload.filename as a
+        # relative path (e.g. "SubFolder/file.pdf" or "SubFolder\file.pdf").
+        # Using that as-is in os.path.join() creates a path with subdirectories
+        # that don't exist yet, causing FileNotFoundError.
+        # We extract only the basename for the physical on-disk name; the full
+        # relative path is already stored separately in rel_path for display.
+        basename = os.path.basename(filename.replace("\\", "/"))
+        if not basename:
+            basename = filename.replace("\\", "/").replace("/", "_") or "upload"
+        safe_name = f"{uuid.uuid4().hex}_{basename}"
         file_path = os.path.join(dest_dir, safe_name)
         with open(file_path, "wb") as f:
             f.write(data)
@@ -131,13 +157,14 @@ async def upload_global_context(
             await db.execute(
                 text(
                     "INSERT INTO global_context_documents "
-                    "(id, user_id, filename, file_path, file_hash, embedded, chunk_count, created_at, updated_at) "
-                    "VALUES (:id, :uid, :filename, :file_path, :file_hash, 0, 0, :now, :now)"
+                    "(id, user_id, filename, relative_path, file_path, file_hash, embedded, chunk_count, created_at, updated_at) "
+                    "VALUES (:id, :uid, :filename, :rel_path, :file_path, :file_hash, 0, 0, :now, :now)"
                 ),
                 {
                     "id": doc_id,
                     "uid": user_id,
-                    "filename": filename,
+                    "filename": basename,
+                    "rel_path": rel_path,
                     "file_path": file_path,
                     "file_hash": file_hash,
                     "now": now,
@@ -154,11 +181,11 @@ async def upload_global_context(
         try:
             chunk_count = await _loop.run_in_executor(
                 None,
-                lambda: _embed_doc(doc_id, file_path, filename, user_id),
+                lambda: _embed_doc(doc_id, file_path, basename, user_id, rel_path),
             )
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"[GlobalCtx] Embedding failed for '{filename}': {e}")
+            logger.error(f"[GlobalCtx] Embedding failed for '{rel_path}': {e}")
 
         # Update embedded status
         async with get_db() as db:
@@ -179,12 +206,13 @@ async def upload_global_context(
 
         uploaded.append({
             "id": doc_id,
-            "filename": filename,
+            "filename": basename,
+            "relative_path": rel_path,
             "embedded": chunk_count > 0,
             "chunk_count": chunk_count,
             "error": error_msg,
         })
-        logger.info(f"[GlobalCtx] Uploaded and embedded '{filename}' ({chunk_count} chunks)")
+        logger.info(f"[GlobalCtx] Uploaded and embedded '{rel_path}' ({chunk_count} chunks)")
 
     # Unload embedding model to free GPU memory
     if uploaded:
@@ -196,13 +224,17 @@ async def upload_global_context(
         except Exception as e:
             logger.warning(f"[GlobalCtx] Failed to unload text embedder: {e}")
 
-    return {"uploaded": uploaded, "skipped_duplicates": skipped}
+    return {
+        "uploaded": uploaded,
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_unsupported": skipped_unsupported,
+    }
 
 
-def _embed_doc(doc_id: str, file_path: str, filename: str, user_id: str) -> int:
+def _embed_doc(doc_id: str, file_path: str, filename: str, user_id: str, relative_path: Optional[str] = None) -> int:
     """Synchronous helper: extract text → chunk → embed → store in FAISS."""
     from services.rag_pipeline import embed_global_context_doc
-    return embed_global_context_doc(doc_id, file_path, filename, user_id)
+    return embed_global_context_doc(doc_id, file_path, filename, user_id, relative_path=relative_path)
 
 
 # ── List ──────────────────────────────────────────────────────────────────────
@@ -297,7 +329,7 @@ async def reindex_global_context(
     async with get_db() as db:
         r = await db.execute(
             text(
-                "SELECT id, filename, file_path FROM global_context_documents "
+                "SELECT id, filename, relative_path, file_path FROM global_context_documents "
                 "WHERE user_id = :uid ORDER BY created_at ASC"
             ),
             {"uid": user_id},
@@ -320,6 +352,7 @@ async def reindex_global_context(
         doc_id = doc["id"]
         file_path = doc["file_path"]
         filename = doc["filename"]
+        rel_path = doc.get("relative_path") or filename
 
         if not os.path.exists(file_path):
             results.append({"id": doc_id, "filename": filename, "status": "file_missing"})
@@ -329,7 +362,7 @@ async def reindex_global_context(
         try:
             chunk_count = await _loop.run_in_executor(
                 None,
-                lambda: _embed_doc(doc_id, file_path, filename, user_id),
+                lambda d_id=doc_id, f_p=file_path, f_n=filename, r_p=rel_path: _embed_doc(d_id, f_p, f_n, user_id, relative_path=r_p),
             )
             now = dt_to_str(datetime.now(timezone.utc))
             async with get_db() as db:

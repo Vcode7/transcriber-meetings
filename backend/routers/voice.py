@@ -2,8 +2,10 @@
 import logging
 import uuid
 from datetime import datetime, timezone
+import os
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
 from sqlalchemy import text
 
 from database import get_db, dt_to_str, to_json, from_json
@@ -179,6 +181,188 @@ async def add_voice_profile(
         "profile_id": profile_id,
         "label": label,
         "embedding_count": len(embeddings),
+    }
+
+
+# ── Bulk Folder Import for Voice Profiles ──────────────────────
+@router.post("/bulk-folder-import")
+async def bulk_folder_import_voices(
+    files: List[UploadFile] = File(...),
+    relative_paths: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Import an entire root folder containing speaker subfolders.
+    Folder structure:
+      Root/
+        Speaker1/
+          sample1.wav
+          sample2.wav
+        Speaker2/
+          sample1.wav
+    Subfolder name is treated as the speaker label.
+    """
+    user_id = current_user["id"]
+    import json as _json
+    import tempfile
+    import shutil
+    from pathlib import Path
+    from services.embedding import extract_embedding_from_file
+
+    try:
+        rel_paths = _json.loads(relative_paths)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid relative_paths JSON string.")
+
+    if len(files) != len(rel_paths):
+        raise HTTPException(status_code=400, detail="Mismatch between files and relative_paths counts.")
+
+    supported_exts = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".webm"}
+
+    # Speaker -> list of temp file paths
+    speaker_samples: dict[str, list[str]] = {}
+    skipped_files: list[dict] = []
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="voice_bulk_"))
+
+    try:
+        for idx, upload in enumerate(files):
+            rel_path = rel_paths[idx]
+            filename = upload.filename or "sample.wav"
+            parts = [p.strip() for p in rel_path.replace("\\", "/").split("/") if p.strip()]
+
+            # In HTML5 webkitRelativePath, paths are e.g. "RootFolder/Speaker1/sample.wav" (3+ parts)
+            # Loose files directly under RootFolder have 2 parts ("RootFolder/sample.wav") and are skipped
+            if len(parts) >= 3:
+                speaker_label = parts[-2]
+            else:
+                skipped_files.append({
+                    "filename": filename,
+                    "relative_path": rel_path,
+                    "reason": "File is directly in root folder without a speaker subfolder"
+                })
+                continue
+
+            ext = os.path.splitext(filename.lower())[1]
+            if ext not in supported_exts:
+                skipped_files.append({
+                    "filename": filename,
+                    "relative_path": rel_path,
+                    "reason": f"Unsupported audio format '{ext}'"
+                })
+                continue
+
+            # Save sample to temp file
+            data = await upload.read()
+            safe_speaker_dir = temp_dir / "".join(c for c in speaker_label if c.isalnum() or c in (" ", "_", "-")).strip()
+            safe_speaker_dir.mkdir(parents=True, exist_ok=True)
+
+            sample_file = safe_speaker_dir / f"{uuid.uuid4().hex}_{filename}"
+            with open(sample_file, "wb") as f:
+                f.write(data)
+
+            if speaker_label not in speaker_samples:
+                speaker_samples[speaker_label] = []
+            speaker_samples[speaker_label].append(str(sample_file))
+
+        speaker_results: list[dict] = []
+        now = datetime.now(timezone.utc)
+
+        for speaker_label, sample_paths in speaker_samples.items():
+            embeddings = []
+            for sample_path in sample_paths:
+                emb = extract_embedding_from_file(sample_path)
+                if emb is not None:
+                    embeddings.append(emb.tolist())
+
+            if not embeddings:
+                speaker_results.append({
+                    "speaker": speaker_label,
+                    "status": "failed",
+                    "error": "No clear voice embeddings could be extracted from audio samples",
+                    "samples_trained": 0,
+                })
+                continue
+
+            # Save or update profile in DB
+            async with get_db() as db:
+                r = await db.execute(
+                    text("SELECT id, embeddings FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
+                    {"uid": user_id, "label": speaker_label},
+                )
+                existing = r.mappings().fetchone()
+
+                if existing:
+                    profile_id = existing["id"]
+                    existing_embs = from_json(existing["embeddings"], [])
+                    if existing_embs and embeddings:
+                        new_dim = len(embeddings[0])
+                        compatible = [e for e in existing_embs if len(e) == new_dim]
+                        merged = compatible + embeddings
+                    else:
+                        merged = existing_embs + embeddings
+
+                    await db.execute(
+                        text("""
+                            UPDATE voice_profiles
+                            SET embeddings = :embeddings, sample_count = :count, updated_at = :updated_at
+                            WHERE id = :id AND user_id = :uid
+                        """),
+                        {
+                            "embeddings": to_json(merged),
+                            "count": len(merged),
+                            "updated_at": dt_to_str(now),
+                            "id": profile_id,
+                            "uid": user_id,
+                        },
+                    )
+                    await db.commit()
+                    speaker_results.append({
+                        "speaker": speaker_label,
+                        "status": "success",
+                        "profile_id": profile_id,
+                        "samples_trained": len(embeddings),
+                        "action": "updated",
+                    })
+                else:
+                    profile_id = str(uuid.uuid4())
+                    await db.execute(
+                        text("""
+                            INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
+                            VALUES (:id, :user_id, :label, :embeddings, :count, 0, :created_at, :updated_at)
+                        """),
+                        {
+                            "id": profile_id,
+                            "user_id": user_id,
+                            "label": speaker_label,
+                            "embeddings": to_json(embeddings),
+                            "count": len(embeddings),
+                            "created_at": dt_to_str(now),
+                            "updated_at": dt_to_str(now),
+                        },
+                    )
+                    await db.commit()
+                    speaker_results.append({
+                        "speaker": speaker_label,
+                        "status": "success",
+                        "profile_id": profile_id,
+                        "samples_trained": len(embeddings),
+                        "action": "created",
+                    })
+
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    successful = [s for s in speaker_results if s["status"] == "success"]
+    failed = [s for s in speaker_results if s["status"] == "failed"]
+
+    return {
+        "total_speakers": len(speaker_samples),
+        "successful_speakers": len(successful),
+        "failed_speakers": len(failed),
+        "speaker_results": speaker_results,
+        "skipped_files": skipped_files,
     }
 
 

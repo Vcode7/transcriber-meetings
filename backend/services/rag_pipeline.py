@@ -144,6 +144,7 @@ def embed_global_context_doc(
     file_path: str,
     filename: str,
     user_id: str,
+    relative_path: Optional[str] = None,
 ) -> int:
     """
     Extract text from a document, chunk it, embed it, and store in the
@@ -151,10 +152,11 @@ def embed_global_context_doc(
 
     Parameters
     ----------
-    doc_id    : UUID of the global_context_documents record.
-    file_path : Absolute path to the uploaded file.
-    filename  : Original filename (used for format detection).
-    user_id   : Owner user ID (indexes are per-user).
+    doc_id        : UUID of the global_context_documents record.
+    file_path     : Absolute path to the uploaded file.
+    filename      : Original filename (used for format detection).
+    user_id       : Owner user ID (indexes are per-user).
+    relative_path : Preserved relative directory path if imported from folder.
 
     Returns
     -------
@@ -165,7 +167,7 @@ def embed_global_context_doc(
     from services.vector_store import get_global_context_store
     from config import settings
 
-    logger.info(f"[RAG] Embedding global context doc: {filename} (doc_id={doc_id})")
+    logger.info(f"[RAG] Embedding global context doc: {filename} (doc_id={doc_id}, rel_path={relative_path})")
 
     text = extract_text_from_file(file_path, filename)
     if not text or not text.strip():
@@ -195,12 +197,13 @@ def embed_global_context_doc(
         from database import get_db
         async with get_db() as db:
             return await list_shortcuts(db, user_id)
+    import asyncio
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        shortcuts = loop.run_until_complete(_fetch_shortcuts())
-    except RuntimeError:
+        # Use asyncio.run() which always creates a fresh event loop — safe to call
+        # from executor threads where the main asyncio loop is already running.
         shortcuts = asyncio.run(_fetch_shortcuts())
+    except Exception:
+        shortcuts = []
 
     from services.dictionary_service import expand_terms_in_chunks
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
@@ -213,6 +216,7 @@ def embed_global_context_doc(
         {
             "doc_id": doc_id,
             "filename": filename,
+            "relative_path": relative_path or filename,
             "chunk_index": c["chunk_index"],
             "source": "global_context",
             "user_id": user_id,
@@ -309,12 +313,12 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
             from database import get_db
             async with get_db() as db:
                 return await list_shortcuts(db, user_id)
+        import asyncio
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            shortcuts = loop.run_until_complete(_fetch_shortcuts())
-        except RuntimeError:
+            # Use asyncio.run() — safe from executor threads (creates a fresh loop).
             shortcuts = asyncio.run(_fetch_shortcuts())
+        except Exception:
+            shortcuts = []
 
         from services.dictionary_service import expand_terms_in_chunks
         expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
@@ -382,23 +386,40 @@ def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) ->
         from database import get_db
         async with get_db() as db:
             return await list_shortcuts(db, user_id)
+    import asyncio
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        shortcuts = loop.run_until_complete(_fetch_shortcuts())
-    except RuntimeError:
+        # Use asyncio.run() — safe from executor threads (creates a fresh loop).
         shortcuts = asyncio.run(_fetch_shortcuts())
+    except Exception:
+        shortcuts = []
 
     from services.dictionary_service import expand_terms_in_chunks
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
 
-    # Strip speaker labels (e.g. "Speaker 1: ") from the text used to generate embeddings
+    # Strip timeline headers and speaker labels from the text used to generate embeddings.
+    # Chunk text is now formatted as:
+    #   [HH:MM:SS - HH:MM:SS] Speaker Name
+    #   Transcript text...
+    #
+    # We keep only the transcript text lines (not the header lines) so that
+    # embedding vectors capture semantic content without positional noise.
+    import re as _re
+    _timeline_header_re = _re.compile(
+        r'^\[\d{2}:\d{2}:\d{2}\s*-\s*\d{2}:\d{2}:\d{2}\]\s*.+$'
+    )
     cleaned_expanded_texts = []
     for text in expanded_texts:
         cleaned_lines = []
         for line in text.split("\n"):
-            parts = line.split(": ", 1)
-            if len(parts) > 1:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip timeline header lines
+            if _timeline_header_re.match(stripped):
+                continue
+            # Skip legacy "Speaker: text" header lines (backward compat)
+            parts = stripped.split(": ", 1)
+            if len(parts) > 1 and not stripped.startswith("["):
                 cleaned_lines.append(parts[1])
             else:
                 cleaned_lines.append(line)
@@ -523,7 +544,10 @@ def retrieve_evidence_for_agenda(
                 t_results = _filter_by_relative_similarity(t_results, db_score_cutoff, "transcript")
                 section_lines = []
                 for res in t_results:
-                    text = res.get("_text", "").strip()
+                    # Bug fix: VectorStore stores raw text under "_text"; timeline chunks
+                    # (built from store metadata in retrieve_transcript_hybrid) use "text".
+                    # Support both keys so no chunk is silently dropped.
+                    text = (res.get("_text") or res.get("text") or "").strip()
                     if text:
                         if total_chars + len(text) > char_limit:
                             break
@@ -605,6 +629,7 @@ def retrieve_transcript_hybrid(
     high_confidence_threshold: float = 0.70,
     timeline_stride: float = 60.0,
     relative_cutoff: float = 0.01,
+    retrieve_by_timeline: bool = True,
 ) -> List[Dict]:
     """
     Hybrid transcript retrieval combining timeline-window and full semantic search.
@@ -652,7 +677,7 @@ def retrieve_transcript_hybrid(
 
     # ── 1. Timeline window chunks (metadata scan) ──────────────────────────────
     timeline_chunks_by_index: dict = {}
-    if recording_duration > 0 and total_agendas > 0:
+    if retrieve_by_timeline and recording_duration > 0 and total_agendas > 0:
         slot_size = recording_duration / total_agendas
         win_start = max(0.0, agenda_index * slot_size - timeline_stride)
         win_end = min(recording_duration, (agenda_index + 1) * slot_size + timeline_stride)
@@ -707,20 +732,24 @@ def retrieve_transcript_hybrid(
             logger.warning(f"[RAG] Semantic transcript search failed: {e}")
 
     # ── 3. Filter out timeline duplicates and construct additional transcript evidence ──
-    final_semantic: dict = {}
-    semantic_only_count = 0
+    # Sort semantic candidates by score descending to pick top-K highest similarity chunks
+    candidates = sorted(
+        semantic_by_index.values(),
+        key=lambda c: c.get("score", 0.0),
+        reverse=True,
+    )
 
-    for cidx, chunk in sorted(semantic_by_index.items()):
+    final_semantic: dict = {}
+    for chunk in candidates:
+        cidx = chunk.get("chunk_index")
         # Exclude chunks already present in the timeline transcript
         if cidx in timeline_chunks_by_index:
             continue
 
-        # Include if it passes the high-confidence threshold or if within k limit
-        if chunk.get("score", 0.0) >= high_confidence_threshold:
-            final_semantic[cidx] = chunk
-        elif semantic_only_count < k_transcript:
-            final_semantic[cidx] = chunk
-            semantic_only_count += 1
+        if k_transcript > 0 and len(final_semantic) >= k_transcript:
+            break
+
+        final_semantic[cidx] = chunk
 
     # Sort chronologically by start time
     result = sorted(final_semantic.values(), key=lambda c: c.get("start", 0.0))
@@ -749,6 +778,7 @@ def retrieve_evidence_raw(
     recording_duration: float = 0.0,
     timeline_stride: float = 60.0,
     high_confidence_threshold: float = 0.70,
+    retrieve_by_timeline: bool = True,
 ) -> Dict:
     """
     Retrieve evidence for one agenda topic and return raw chunk dicts with
@@ -817,6 +847,7 @@ def retrieve_evidence_raw(
             high_confidence_threshold=high_confidence_threshold,
             timeline_stride=timeline_stride,
             relative_cutoff=relative_cutoff,
+            retrieve_by_timeline=retrieve_by_timeline,
         )
         for i, res in enumerate(hybrid_results):
             text = res.get("text", "").strip()
@@ -897,6 +928,249 @@ def retrieve_evidence_raw(
         "global": global_chunks,
         "is_procedural": is_procedural,
     }
+
+
+# ── Chunk-wise Retrieval ──────────────────────────────────────────────────────
+
+def retrieve_evidence_chunkwise(
+    recording_id: str,
+    user_id: str,
+    agenda_items: List[Dict],
+    k_global: int,
+    k_meeting: int,
+    k_transcript: int = 10,
+    relative_cutoff: float = 0.05,
+    char_limit: int = 15000,
+    recording_duration: float = 0.0,
+    timeline_stride: float = 60.0,
+    high_confidence_threshold: float = 0.70,
+    retrieve_by_timeline: bool = False,
+    max_overlap_chunks: int = 2,
+) -> List[Dict]:
+    """
+    Chunk-wise retrieval strategy.
+
+    Instead of agendas searching for transcript chunks, each transcript chunk
+    is compared against ALL agenda embeddings. The chunk is assigned to the
+    best-matching agenda and to every other agenda whose similarity falls within
+    the configured Relative Similarity Threshold of the best score.
+
+    This allows overlapping discussions to be preserved naturally.
+
+    Returns
+    -------
+    A list of agenda result dicts — same structure as agenda-wise retrieval:
+    [
+        {
+            "topic": str,
+            "speaker": str|None,
+            "is_procedural": bool,
+            "transcript_chunks": [...],
+            "meeting_chunks": [...],
+            "global_chunks": [...],
+        },
+        ...
+    ]
+    """
+    from services.vector_store import (
+        get_global_context_store,
+        get_meeting_context_store,
+        get_transcript_store,
+    )
+    import numpy as np
+
+    if not agenda_items:
+        return []
+
+    embedder = _get_embedder()
+    dim = embedder.embedding_dim()
+
+    # ── 1. Embed all agenda topics ────────────────────────────────────────────
+    procedural_keywords = [
+        "call to order", "roll call", "apologies", "adjournment", "adjourn",
+        "welcome", "introductions", "approval of minutes", "opening remarks",
+        "procedural"
+    ]
+
+    agenda_embeddings = []
+    is_procedural_flags = []
+    for item in agenda_items:
+        topic = item.get("topic", "")
+        emb = embedder.encode(topic)
+        agenda_embeddings.append(emb)
+        is_proc = any(kw in topic.lower() for kw in procedural_keywords)
+        is_procedural_flags.append(is_proc)
+
+    total_agendas = len(agenda_items)
+
+    # ── 2. Initialise per-agenda result buckets ───────────────────────────────
+    # transcript_chunks_by_agenda[i] = list of chunk dicts assigned to agenda i
+    transcript_chunks_by_agenda: List[List[Dict]] = [[] for _ in range(total_agendas)]
+    meeting_chunks_by_agenda: List[List[Dict]] = [[] for _ in range(total_agendas)]
+    global_chunks_by_agenda: List[List[Dict]] = [[] for _ in range(total_agendas)]
+
+    def _make_chunk_id(source: str, idx: int) -> str:
+        return f"{source[0]}-{idx}"
+
+    # ── 3. Chunk-wise transcript assignment ───────────────────────────────────
+    try:
+        t_store = get_transcript_store(recording_id, dim)
+        if t_store.exists():
+            t_store.load_or_create()
+            # Iterate every stored transcript chunk.
+            # Use enumerate() so faiss_pos tracks the physical FAISS vector position,
+            # which always matches the index into _meta but may differ from the logical
+            # chunk_index (e.g. after an index rebuild via delete_by_filter).
+            for faiss_pos, meta_entry in enumerate(t_store._meta):
+                chunk_idx = meta_entry.get("chunk_index", -1)
+                text = meta_entry.get("_text", "").strip()
+                if not text or chunk_idx < 0:
+                    continue
+
+                # Retrieve chunk vector from FAISS by its physical position in the index.
+                # faiss_pos (not chunk_idx) is the correct argument to reconstruct().
+                try:
+                    chunk_vector = t_store._index.reconstruct(faiss_pos)
+                except Exception:
+                    # Fallback: re-embed the text on any FAISS error
+                    chunk_vector = embedder.encode(text)
+
+                # Compute similarity against every agenda embedding
+                scores = []
+                for agenda_emb in agenda_embeddings:
+                    # Cosine similarity via dot product (vectors are normalised)
+                    sim = float(np.dot(chunk_vector, agenda_emb) /
+                                (np.linalg.norm(chunk_vector) * np.linalg.norm(agenda_emb) + 1e-10))
+                    scores.append(sim)
+
+                best_score = max(scores)
+                threshold = best_score - relative_cutoff
+
+                chunk_start = meta_entry.get("start", 0.0) or 0.0
+                chunk_end = meta_entry.get("end", 0.0) or 0.0
+                chunk_speakers = meta_entry.get("speakers", [])
+
+                qualifying_agendas = []
+                for agenda_idx, score in enumerate(scores):
+                    # Skip procedural agendas entirely
+                    if is_procedural_flags[agenda_idx]:
+                        continue
+                    if score >= threshold:
+                        qualifying_agendas.append((agenda_idx, score))
+
+                # Sort qualifying agendas by score descending
+                qualifying_agendas.sort(key=lambda x: x[1], reverse=True)
+
+                # Cap to max_overlap_chunks if configured (> 0)
+                if max_overlap_chunks > 0:
+                    qualifying_agendas = qualifying_agendas[:max_overlap_chunks]
+
+                for agenda_idx, score in qualifying_agendas:
+                    transcript_chunks_by_agenda[agenda_idx].append({
+                        "chunk_id": _make_chunk_id("transcript", chunk_idx),
+                        "source": "transcript",
+                        "score": round(score, 4),
+                        "text": text,
+                        "speakers": chunk_speakers,
+                        "start": chunk_start,
+                        "end": chunk_end,
+                        "chunk_index": chunk_idx,
+                        "word_count": len(text.split()),
+                        "char_count": len(text),
+                        "from_timeline": False,
+                        "from_semantic": True,
+                    })
+    except Exception as e:
+        logger.warning(f"[RAG] Chunk-wise transcript retrieval failed: {e}")
+
+    # Sort each agenda's transcript chunks by score descending, then cap to k_transcript
+    for idx in range(total_agendas):
+        chunks = transcript_chunks_by_agenda[idx]
+        # Sort by score desc, then by start time asc
+        chunks.sort(key=lambda c: (-c["score"], c["start"]))
+        if k_transcript > 0:
+            chunks = chunks[:k_transcript]
+        transcript_chunks_by_agenda[idx] = chunks
+
+    # ── 4. Meeting context — per-agenda semantic search (unchanged) ───────────
+    if k_meeting > 0:
+        for agenda_idx, item in enumerate(agenda_items):
+            if is_procedural_flags[agenda_idx]:
+                continue
+            topic = item.get("topic", "")
+            query_emb = agenda_embeddings[agenda_idx]
+            try:
+                m_store = get_meeting_context_store(recording_id, dim)
+                if m_store.exists():
+                    m_results = m_store.search(query_emb, k=k_meeting)
+                    if m_results:
+                        m_results = _filter_by_relative_similarity(m_results, relative_cutoff, "meeting")
+                        for i, res in enumerate(m_results):
+                            text = res.get("_text", "").strip()
+                            if not text:
+                                continue
+                            meeting_chunks_by_agenda[agenda_idx].append({
+                                "chunk_id": _make_chunk_id("meeting", i),
+                                "source": "meeting",
+                                "score": round(res.get("score", 0.0), 4),
+                                "text": text,
+                                "filename": res.get("filename", ""),
+                                "page": res.get("page"),
+                                "chunk_index": res.get("chunk_index", i),
+                                "char_count": len(text),
+                            })
+            except Exception as e:
+                logger.warning(f"[RAG] Chunk-wise meeting retrieval failed for agenda {agenda_idx}: {e}")
+
+    # ── 5. Global context — per-agenda semantic search (unchanged) ────────────
+    if k_global > 0:
+        for agenda_idx, item in enumerate(agenda_items):
+            if is_procedural_flags[agenda_idx]:
+                continue
+            query_emb = agenda_embeddings[agenda_idx]
+            try:
+                g_store = get_global_context_store(user_id, dim)
+                if g_store.exists():
+                    g_results = g_store.search(query_emb, k=k_global)
+                    if g_results:
+                        g_results = _filter_by_relative_similarity(g_results, relative_cutoff, "global_context")
+                        for i, res in enumerate(g_results):
+                            text = res.get("_text", "").strip()
+                            if not text:
+                                continue
+                            global_chunks_by_agenda[agenda_idx].append({
+                                "chunk_id": _make_chunk_id("global", i),
+                                "source": "global",
+                                "score": round(res.get("score", 0.0), 4),
+                                "text": text,
+                                "filename": res.get("filename", ""),
+                                "chunk_index": res.get("chunk_index", i),
+                                "char_count": len(text),
+                            })
+            except Exception as e:
+                logger.warning(f"[RAG] Chunk-wise global retrieval failed for agenda {agenda_idx}: {e}")
+
+    # ── 6. Assemble final result list ─────────────────────────────────────────
+    results = []
+    for agenda_idx, item in enumerate(agenda_items):
+        topic = item.get("topic", "")
+        t_chunks = transcript_chunks_by_agenda[agenda_idx]
+        m_chunks = meeting_chunks_by_agenda[agenda_idx]
+        g_chunks = global_chunks_by_agenda[agenda_idx]
+        logger.info(
+            f"[RAG] Chunk-wise result for '{topic[:50]}': "
+            f"{len(t_chunks)}T / {len(m_chunks)}M / {len(g_chunks)}G chunks"
+        )
+        results.append({
+            "topic": topic,
+            "speaker": item.get("speaker"),
+            "is_procedural": is_procedural_flags[agenda_idx],
+            "transcript_chunks": t_chunks,
+            "meeting_chunks": m_chunks,
+            "global_chunks": g_chunks,
+        })
+
+    return results
 
 
 
@@ -1068,7 +1342,11 @@ def generate_raw_mom(
 # ── DB flag helpers (async-to-sync wrappers) ──────────────────────────────────
 
 def _transcript_embedded(recording_id: str) -> bool:
-    """Check if transcript has been embedded (sync wrapper)."""
+    """Check if transcript has been embedded (sync wrapper).
+
+    Uses asyncio.run() which creates a brand-new event loop — safe to call from
+    FastAPI's thread executor where the main loop is already running.
+    """
     import asyncio
     async def _check():
         from database import get_db
@@ -1079,19 +1357,19 @@ def _transcript_embedded(recording_id: str) -> bool:
                 {"id": recording_id},
             )
             row = r.fetchone()
-            return row and row[0] == 1
+            return bool(row and row[0] == 1)
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We're in an async context — cannot block; assume not embedded
-            return False
-        return loop.run_until_complete(_check())
+        return asyncio.run(_check())
     except Exception:
         return False
 
 
 def _meeting_context_embedded(recording_id: str) -> bool:
-    """Check if meeting context has been embedded (sync wrapper)."""
+    """Check if meeting context has been embedded (sync wrapper).
+
+    Uses asyncio.run() which creates a brand-new event loop — safe to call from
+    FastAPI's thread executor where the main loop is already running.
+    """
     import asyncio
     async def _check():
         from database import get_db
@@ -1102,12 +1380,9 @@ def _meeting_context_embedded(recording_id: str) -> bool:
                 {"id": recording_id},
             )
             row = r.fetchone()
-            return row and row[0] == 1
+            return bool(row and row[0] == 1)
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return False
-        return loop.run_until_complete(_check())
+        return asyncio.run(_check())
     except Exception:
         return False
 
@@ -1125,9 +1400,7 @@ def _mark_transcript_embedded(recording_id: str, user_id: str) -> None:
             )
             await db.commit()
     try:
-        loop = asyncio.get_event_loop()
-        if not loop.is_running():
-            loop.run_until_complete(_mark())
+        asyncio.run(_mark())
     except Exception as e:
         logger.warning(f"[RAG] Could not mark transcript_embedded: {e}")
 
@@ -1145,9 +1418,7 @@ def _mark_meeting_context_embedded(recording_id: str, user_id: str) -> None:
             )
             await db.commit()
     try:
-        loop = asyncio.get_event_loop()
-        if not loop.is_running():
-            loop.run_until_complete(_mark())
+        asyncio.run(_mark())
     except Exception as e:
         logger.warning(f"[RAG] Could not mark meeting_context_embedded: {e}")
 
@@ -1236,6 +1507,61 @@ def _load_context_summary(recording_id: str) -> Optional[str]:
         return None
 
 
+def _retrieve_global_context_for_agenda(agenda_text: str, user_id: str, k: int = 4) -> str:
+    """
+    Retrieve the top-k most relevant Global Context chunks for the uploaded agenda text.
+
+    This is used during agenda creation to give the LLM background knowledge
+    (terminology, abbreviations, project names, org context) WITHOUT letting
+    it alter the agenda structure.
+
+    Returns
+    -------
+    Formatted string of global context chunks, or empty string if none found.
+    """
+    if not agenda_text or not agenda_text.strip():
+        return ""
+    if not user_id:
+        return ""
+
+    try:
+        from services.vector_store import get_global_context_store
+
+        embedder = _get_embedder()
+        dim = embedder.embedding_dim()
+
+        g_store = get_global_context_store(user_id, dim)
+        if not g_store.exists():
+            logger.info("[RAG] No global context store found for user — skipping agenda context retrieval")
+            return ""
+
+        # Embed the agenda text to use as the retrieval query
+        query_emb = embedder.encode(agenda_text.strip()[:2000])  # cap to avoid excessive token usage
+
+        results = g_store.search(query_emb, k=k)
+        if not results:
+            return ""
+
+        lines = []
+        for res in results:
+            text = res.get("_text", "").strip()
+            fname = res.get("filename", "")
+            if text:
+                prefix = f"[{fname}] " if fname else ""
+                lines.append(f"{prefix}{text}")
+
+        global_ctx = "\n\n".join(lines)
+        logger.info(
+            f"[RAG] Retrieved {len(lines)} global context chunks for agenda creation "
+            f"({len(global_ctx)} chars)"
+        )
+        return global_ctx
+
+    except Exception as e:
+        logger.warning(f"[RAG] Global context retrieval for agenda creation failed: {e}")
+        return ""
+
+
 def get_or_create_agenda_items(
     recording_id: str,
     user_id: str,
@@ -1246,6 +1572,8 @@ def get_or_create_agenda_items(
     Acquire agenda items for a recording:
     1. Load cached parsed agenda from DB.
     2. If not found and raw agenda text exists, parse it using LLM.
+       - Also retrieves 3-4 Global Context chunks to improve LLM understanding
+         of terminology/abbreviations WITHOUT allowing agenda structure changes.
     3. If still not found, generate agenda from the recording's context_summary (if it exists).
     4. Fallback to generic general meeting topic if all else fails.
     """
@@ -1262,7 +1590,15 @@ def get_or_create_agenda_items(
         logger.info(f"[RAG] Parsing agenda document ({len(agenda_text)} chars)")
         provider = get_provider()
         try:
-            agenda_items = provider.parse_agenda_items(agenda_text)
+            # Retrieve global context to improve LLM understanding of the agenda
+            global_context = _retrieve_global_context_for_agenda(agenda_text, user_id, k=4)
+
+            if global_context:
+                logger.info("[RAG] Using global context to enhance agenda parsing")
+                agenda_items = provider.parse_agenda_items_with_context(agenda_text, global_context)
+            else:
+                agenda_items = provider.parse_agenda_items(agenda_text)
+
             if agenda_items:
                 _save_parsed_agenda(recording_id, user_id, agenda_items)
                 return agenda_items

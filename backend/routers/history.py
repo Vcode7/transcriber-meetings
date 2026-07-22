@@ -159,11 +159,41 @@ async def stream_audio(recording_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=404, detail="Not found.")
 
     from fastapi.responses import FileResponse
+    from pathlib import Path
     import os
+
     fp = rec.get("file_path", "")
-    if not fp or not os.path.exists(fp):
+    if not fp:
         raise HTTPException(status_code=404, detail="Audio file not found on disk.")
-    return FileResponse(fp, media_type="audio/wav")
+
+    target_path = Path(fp)
+    if not target_path.is_absolute() or not target_path.exists():
+        # Try resolving relative to RUNTIME_DIR
+        candidate = settings.RUNTIME_DIR / fp
+        if candidate.exists():
+            target_path = candidate
+        else:
+            # Fallback search in user's upload directory
+            upload_candidate = settings.UPLOAD_DIR / user_id / target_path.name
+            if upload_candidate.exists():
+                target_path = upload_candidate
+
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found on disk.")
+
+    ext = target_path.suffix.lower()
+    media_types = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+    }
+    media_type = media_types.get(ext, "audio/wav")
+
+    return FileResponse(str(target_path), media_type=media_type)
+
 
 
 @router.post("/{recording_id}/regenerate-insights")

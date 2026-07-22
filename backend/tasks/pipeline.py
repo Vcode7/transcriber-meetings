@@ -2039,7 +2039,7 @@ async def _run_finalize_pipeline_impl(
                 await db.commit()
             logger.info(f"[FinalPipeline] {recording_id} — ===== FINALIZE PIPELINE COMPLETE (Automatic MoM skipped, status=done) ✓ =====")
             _analytics_fin["final_status"] = "done"
-            _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start_fin, 3)
+            _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
             await _emit_analytics(_analytics_fin)
             return
     except Exception as e:
