@@ -948,7 +948,7 @@ Return ONLY a valid JSON object matching this exact schema:
 Rules for discussion entries:
 - Extract ALL meaningful points — there is NO maximum limit. Completeness is the goal.
 - Group related facts together so each entry contains a complete, cohesive subset of discussion details.
-- "dates" array: include ONLY if the entry involves a specific date/deadline/milestone.
+- "dates" array: include ONLY if the entry involves a specific actual calendar date or deadline (e.g. "July 8, 2026", "2026-07-08"). NEVER output transcript timestamps, timeline ranges, or offsets like 00:02–05:03 or 3975.18 as dates.
 - "action": fill ONLY if the entry is an action item; set all fields to null otherwise.
 - "type" must be one of: decision, action, discussion, clarification, risk, milestone, dependency, reference.
 - "source_type" is REQUIRED on every entry. Use "Transcript" only for entries from the TRANSCRIPT section.
@@ -1342,6 +1342,301 @@ Topic Growth Report:"""
 
 
 # ══════════════════════════════════════════════════════════════
+# ROM Prompts
+# ══════════════════════════════════════════════════════════════
+
+ROM_DISCUSSION_EXTRACTION_PROMPT = """You are an expert meeting analyst. Extract structured discussion points from the following transcript window.
+
+CRITICAL RULES:
+- DO NOT summarize. Extract precise, detailed discussion points.
+- DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract ONLY actual calendar dates or explicit calendar references mentioned in the text (e.g., "July 8, 2026", "2026-07-08", "April 8th", "next Monday"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02–05:03 or 3975.18 as dates.
+- Do NOT generate or decide timeline start/end values. Timelines are computed automatically by the system.
+- Preserve ALL technical terminology, abbreviations, acronyms, project names EXACTLY as spoken.
+- Examples of terms to preserve exactly: LCA Mk2, AMCA, DRDO, ADA, HAL, etc.
+- Never replace abbreviations with generic wording.
+- Each point must be information-dense and specific.
+- If you need additional information to understand a point, add it to required_information instead of guessing.
+
+{previous_context}
+
+{video_context_section}
+
+TRANSCRIPT WINDOW:
+{window_text}
+
+Extract discussion points as JSON:
+```json
+{{
+  "discussion_points": [
+    {{
+      "discussion_point": "Clear, detailed description of what was discussed",
+      "speakers": ["Speaker Name"],
+      "action_owner": "Person responsible or null",
+      "decisions": ["Any decisions made"],
+      "questions": ["Any questions raised"],
+      "technical_terms": ["Exact abbreviations and technical terms used"],
+      "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
+      "numbers": ["Any numbers, measurements, quantities mentioned"],
+      "project_names": ["Any project names mentioned"],
+      "action_items": ["Any action items identified"],
+      "references": ["Any documents, standards, or references mentioned"],
+      "required_information": ["Additional context needed to fully understand this point"]
+    }}
+  ]
+}}
+```"""
+
+ROM_POLISH_PROMPT = """You are an expert meeting analyst. Enhance and merge the following discussion points using the retrieved context.
+
+CRITICAL RULES & MERGING INSTRUCTIONS:
+- DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract/preserve ONLY actual calendar dates or explicit calendar references (e.g., "July 8, 2026", "April 8th"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02–05:03 or 3975.18 as dates.
+- INFORMATION-DENSE SUMMARY: The enhanced point (`polished_text`) must be a clear, informative, and detailed summary of what was discussed, preserving all important facts, decisions, dates, numbers, and outcomes.
+- MERGE DUPLICATES & SIMILAR POINTS: Identify discussion points in the batch that refer to the same topic, decision, project, or issue. Combine/merge duplicate or highly similar points into a single enriched, comprehensive point. Do NOT output redundant points.
+- ENRICH WITH CONTEXT: Use the retrieved context (if any) to add precision, technical details, background, and clarity to the merged points.
+- PRESERVE ALL FACTS: Retain ALL technical terminology, project names, acronyms, action owners, decisions, action items, dates, and numbers from the original points.
+- RETURN ORIGINAL IDS: For each merged point, return a list of all `original_point_ids` that were merged into it.
+
+BATCH OF ORIGINAL DISCUSSION POINTS:
+{original_points}
+
+RETRIEVED CONTEXT:
+{retrieved_context}
+
+Return merged and enhanced discussion points as JSON:
+```json
+{{
+  "polished_points": [
+    {{
+      "original_point_ids": ["id-1", "id-2"],
+      "polished_text": "Clear, detailed, information-dense summary of what was discussed",
+      "speakers": ["Speaker Name"],
+      "action_owner": "Person responsible or null",
+      "decisions": ["Decisions"],
+      "technical_terms": ["Terms"],
+      "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
+      "numbers": ["Numbers"],
+      "references": ["References"],
+      "action_items": ["Action items"]
+    }}
+  ]
+}}
+```"""
+
+ROM_ENHANCE_WINDOW_PROMPT = """You are an expert meeting analyst. Your task is to ENHANCE a window of consecutive discussion points extracted from a meeting transcript using two independently retrieved reference sources: Meeting Context and Global Context.
+
+ENHANCEMENT RULES:
+- PRESERVE ALL ORIGINAL FACTS: Never remove or contradict any information from the original discussion points.
+- VERIFY TECHNICAL TERMINOLOGY: If the retrieved context confirms or clarifies a technical term, incorporate the clarification.
+- EXPAND ABBREVIATIONS: If the context makes an abbreviation's full form clear, expand it the first time it appears in enhanced_text (e.g., "SRS (Software Requirements Specification)").
+- ADD MISSING TECHNICAL DETAILS: Only add details that are DIRECTLY supported by the retrieved context. NEVER invent or hallucinate.
+- IMPROVE CLARITY: Make the enhanced point clearer and more complete while preserving the original meaning.
+- INFORMATION-DENSE: Write clear, professional prose.
+- DATES — CALENDAR DATES ONLY: In the "dates" array, output ONLY actual calendar dates (e.g., "July 8, 2026", "Q3 2026"). NEVER include transcript timestamps, audio offsets, or values like "3975.18" or "00:02-05:03".
+- MERGE DUPLICATES: If any two points in the window refer to the same topic, decision, or fact, merge them into a single, comprehensive point. Return `original_point_ids` listing all merged IDs.
+- CONTEXT USAGE REPORT: For EVERY enhanced point, you MUST fill in the `context_usage_report` object honestly. If a field is false, set it to false — do not set everything to true.
+
+DISCUSSION WINDOW (points to enhance):
+{window_json}
+
+MEETING CONTEXT (from agenda docs, presentations, design docs, previous MoM, etc.):
+{meeting_context}
+
+GLOBAL CONTEXT (from standards, SOPs, manuals, technical references, etc.):
+{global_context}
+
+Return the enhanced points as a JSON object:
+```json
+{{
+  "enhanced_points": [
+    {{
+      "original_point_ids": ["id-1", "id-2"],
+      "enhanced_text": "Clear, information-dense enhanced discussion point text.",
+      "speakers": ["Speaker Name"],
+      "action_owner": "Person responsible or null",
+      "decisions": ["Decisions made"],
+      "technical_terms": ["Technical terms used"],
+      "dates": ["Actual calendar dates only"],
+      "numbers": ["Numbers and quantities"],
+      "references": ["Document or section references"],
+      "action_items": ["Action items"],
+      "context_usage_report": {{
+        "verified": true,
+        "technical_details_added": false,
+        "abbreviations_expanded": true,
+        "references_added": false,
+        "terminology_clarified": true,
+        "no_useful_context": false,
+        "meeting_context_docs": ["filename.pdf"],
+        "global_context_docs": ["standard.pdf"]
+      }}
+    }}
+  ]
+}}
+```"""
+
+ROM_DEDUPLICATION_PROMPT = """You are an expert meeting analyst. Evaluate the following candidate discussion points that have high semantic similarity (>= 0.90).
+
+DEDUPLICATION & MERGING INSTRUCTIONS:
+1. Determine whether the points in this group are:
+   - "duplicate": Virtually identical in topic and details. Select/produce the single best, clearest, and most comprehensive version.
+   - "complementary": Refer to the same core topic with different or additional details. Merge them into a single, comprehensive, information-dense point (`polished_text`) without losing any factual details, technical terms, decisions, action items, dates, or numbers.
+   - "different": Represent distinct facts, decisions, or topics despite high semantic similarity. Keep all points separate in `result_points`.
+
+2. CRITICAL RULES:
+   - DATES MUST BE ACTUAL CALENDAR DATES ONLY: Extract/preserve ONLY actual calendar dates (e.g. "July 8, 2026", "April 8th"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 3975.18 as dates.
+   - PRESERVE ALL FACTS: Do NOT drop any unique technical terms, project names, acronyms, decisions, or action items.
+
+CANDIDATE DISCUSSION POINTS:
+{candidate_points}
+
+Return result as JSON:
+```json
+{{
+  "group_classification": "duplicate|complementary|different",
+  "result_points": [
+    {{
+      "original_point_ids": ["id-1", "id-2"],
+      "polished_text": "Single comprehensive description combining all details if duplicate/complementary, or individual texts if different",
+      "speakers": ["Speaker Name"],
+      "action_owner": "Person responsible or null",
+      "decisions": ["Decisions"],
+      "technical_terms": ["Terms"],
+      "dates": ["Dates"],
+      "numbers": ["Numbers"],
+      "references": ["References"],
+      "action_items": ["Action items"]
+    }}
+  ]
+}}
+```"""
+
+ROM_AGENDA_GENERATION_PROMPT = """You are an expert meeting analyst. Generate structured agenda sections from the following input.
+
+{agenda_input}
+
+{context}
+
+{previous_mom}
+
+Generate enriched agenda sections as JSON. Each agenda must have rich semantic representation for accurate discussion point mapping:
+```json
+{{
+  "agendas": [
+    {{
+      "agenda_id": "A1",
+      "title": "Agenda title",
+      "description": "Detailed description of what this agenda covers",
+      "keywords": ["key", "words", "for", "matching"],
+      "related_concepts": ["Related technical concepts"],
+      "alternative_terminology": ["Alternative ways this topic might be referred to"],
+      "expected_themes": ["Expected discussion themes under this agenda"]
+    }}
+  ]
+}}
+```"""
+
+ROM_MOM_EXPANSION_PROMPT = """You are an expert meeting analyst. You have been given a list of agenda items for the CURRENT MEETING and one or more PREVIOUS MEETING MoM (Minutes of Meeting) documents.
+
+Your task: For each agenda item, search ONLY the provided Previous Meeting MoM documents and extract any relevant information that was discussed before.
+
+STRICT RULES:
+- Use ONLY information explicitly found in the provided Previous Meeting MoM documents.
+- If an agenda item was NOT discussed in any previous meeting document, set "found_in_previous_meeting" to false and leave all text fields as empty strings and all list fields as empty arrays. DO NOT invent, guess, or paraphrase anything not present.
+- Extract only verifiable content: previous discussion summary, decisions made, action items assigned, pending work, follow-up items.
+- Be concise and factual.
+
+CURRENT MEETING AGENDA LIST:
+{agenda_list}
+
+PREVIOUS MEETING MoM DOCUMENTS:
+{previous_mom_docs}
+
+Return a JSON object with an "expansions" array covering ALL agenda items:
+```json
+{{
+  "expansions": [
+    {{
+      "agenda_id": "A1",
+      "found_in_previous_meeting": true,
+      "previous_discussion": "Concise summary of what was discussed about this topic in the previous meeting",
+      "previous_decisions": ["Decision 1", "Decision 2"],
+      "previous_action_items": ["Action item 1"],
+      "pending_work": ["Pending work item 1"],
+      "follow_up_items": ["Follow-up item 1"]
+    }},
+    {{
+      "agenda_id": "A2",
+      "found_in_previous_meeting": false,
+      "previous_discussion": "",
+      "previous_decisions": [],
+      "previous_action_items": [],
+      "pending_work": [],
+      "follow_up_items": []
+    }}
+  ]
+}}
+```"""
+
+ROM_AGENDA_ASSIGN_BATCH_PROMPT = """You are an expert meeting analyst. Assign each discussion point in this batch to the most appropriate agenda from its provided candidate agendas.
+
+ASSIGNMENT RULES:
+- You MUST assign an agenda_id ONLY from the "candidate_agendas" list provided for each individual point.
+- Do NOT invent new agenda names or IDs.
+- Do NOT assign an agenda_id that is not present in that point's candidate_agendas list.
+- If you are uncertain, choose the closest candidate and set confidence to "low".
+- Write a concise 1-sentence reason for each assignment.
+- Confidence levels: "high" = clearly on-topic, "medium" = likely related, "low" = uncertain but best match.
+
+AGENDA REFERENCE (titles and descriptions for context):
+{agenda_reference}
+
+DISCUSSION POINTS BATCH:
+{batch_json}
+
+Return ONLY a JSON object. One entry per discussion point, in the same order as the batch:
+```json
+{{
+  "assignments": [
+    {{
+      "point_id": "uuid-string",
+      "assigned_agenda_id": "A2",
+      "confidence": "high",
+      "reason": "The point discusses X which directly relates to agenda A2 on Y."
+    }}
+  ]
+}}
+```"""
+
+ROM_AGENDA_DOC_POINTS_PROMPT = """You are an expert meeting analyst. A supporting document has been uploaded for a specific agenda item in a meeting. Extract the most important factual points from the document that are directly relevant to this agenda topic.
+
+AGENDA TITLE: {agenda_title}
+AGENDA DESCRIPTION: {agenda_description}
+
+SUPPORTING DOCUMENT CONTENT:
+{document_text}
+
+INSTRUCTIONS:
+- Extract ONLY 2 to 5 factual, agenda-specific points from the document.
+- Check the document for any presenter, speaker, author, owner, or 'presented by' name (e.g., 'Presenter: John Doe', 'Presented by Alice', 'Speaker: Bob', 'Owner: Charlie'). If found, return the presenter name in the "presenter" field. Otherwise set "presenter" to null.
+- Each point must be a complete, standalone statement of fact, decision, milestone, figure, date, or key information shown in the document.
+- Points must be directly relevant to the agenda topic. Ignore unrelated content.
+- Do NOT paraphrase or summarize broadly. Extract precise, specific factual information.
+- Do NOT include decorative text, slide headers, repeated boilerplate, page numbers, or company logos.
+- If the document has very little relevant content, extract fewer points (even 0 is acceptable).
+- Write each point as a professional, information-dense sentence suitable for meeting records.
+
+Return ONLY a JSON object:
+```json
+{
+  "presenter": "Speaker / Presenter name if mentioned in document, or null",
+  "points": [
+    "Factual point 1 extracted from the document relevant to the agenda.",
+    "Factual point 2 extracted from the document relevant to the agenda."
+  ]
+}
+```"""
+
+# ══════════════════════════════════════════════════════════════
 # Shared utilities
 # ══════════════════════════════════════════════════════════════
 
@@ -1368,6 +1663,14 @@ def _get_prompt(key: str) -> str:
         "mom": MOM_PROMPT,
         "mom_merge": MOM_MERGE_PROMPT,
         "raw_mom_to_mom": RAW_MOM_TO_MOM_PROMPT,
+        "rom_discussion": ROM_DISCUSSION_EXTRACTION_PROMPT,
+        "rom_polish": ROM_POLISH_PROMPT,
+        "rom_enhance_window": ROM_ENHANCE_WINDOW_PROMPT,
+        "rom_deduplicate": ROM_DEDUPLICATION_PROMPT,
+        "rom_agenda": ROM_AGENDA_GENERATION_PROMPT,
+        "rom_mom_expansion": ROM_MOM_EXPANSION_PROMPT,
+        "rom_agenda_assign_batch": ROM_AGENDA_ASSIGN_BATCH_PROMPT,
+        "rom_agenda_doc_points": ROM_AGENDA_DOC_POINTS_PROMPT,
         "raw_mom_extraction": RAW_MOM_EXTRACTION_PROMPT,
         "agenda_compress": AGENDA_COMPRESS_PROMPT,
         "agenda_compress_with_context": AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
@@ -2916,6 +3219,20 @@ class QwenProvider(AIProvider):
                 else:
                     timeline = None
 
+                # Sanitize dates to keep ONLY actual calendar dates
+                raw_dates_list = []
+                for d in dates:
+                    if isinstance(d, dict):
+                        val = str(d.get("value", "")).strip()
+                    else:
+                        val = str(d).strip()
+                    if val:
+                        raw_dates_list.append(val)
+                from services.rom_service import clean_calendar_dates
+                valid_calendar_dates = clean_calendar_dates(raw_dates_list)
+
+
+
                 normalized.append({
                     "type": str(entry.get("type", "discussion")),
                     "speaker": entry.get("speaker") or None,
@@ -2925,9 +3242,8 @@ class QwenProvider(AIProvider):
                     "timeline": timeline,
                     "source_reference": entry.get("source_reference") or None,
                     "dates": [
-                        {"value": str(d.get("value", "")), "purpose": str(d.get("purpose", ""))}
-                        for d in dates
-                        if isinstance(d, dict)
+                        {"value": cd, "purpose": "calendar date"}
+                        for cd in valid_calendar_dates
                     ],
                     "action": {
                         "owner": action.get("owner") or None,
@@ -2952,6 +3268,409 @@ class QwenProvider(AIProvider):
             "agenda_speaker": agenda_speaker,
             "discussion": raw,
         }
+
+    def extract_rom_discussion_points(
+        self,
+        window_text: str,
+        previous_points_json: Optional[str] = None,
+        video_context: str = "",
+    ) -> Dict:
+        """Extract structured discussion points from a transcript window for ROM pipeline.
+        
+        Args:
+            window_text:           Formatted transcript window text (speaker + timestamps).
+            previous_points_json:  JSON string of recent discussion points for continuity.
+            video_context:         Optional OCR text from presentation slides/screen shares
+                                   overlapping this window's time range. Empty string for
+                                   audio-only recordings.
+        """
+        prev_context = ""
+        if previous_points_json:
+            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity - do not repeat, only add new points):\n{previous_points_json}"
+
+        # Build video context section — injected only when OCR text is present
+        if video_context and video_context.strip():
+            video_context_section = (
+                "VIDEO OCR TRANSCRIPT (Screen/Slide Frame Extraction — Use With Intelligence):\n"
+                "This text was automatically extracted from video frames using OCR (Optical Character Recognition).\n"
+                "OCR extraction is imperfect: it may contain recognition errors, incomplete words, fragmented\n"
+                "sentences, repeated headers, or noisy text. Do NOT rely on exact wording.\n"
+                "Use the meeting audio transcript as the PRIMARY source of truth. Use OCR content only as\n"
+                "supplementary evidence and interpret it intelligently using the meeting context.\n"
+                "\n"
+                "WHEN TO CREATE AN ADDITIONAL POINT FROM OCR:\n"
+                "Create an additional ROM discussion point from OCR content ONLY when it contains meaningful\n"
+                "factual information that was NOT captured in the audio transcript, such as:\n"
+                "  - Decisions or conclusions shown on slides\n"
+                "  - Specific dates, deadlines, or milestones\n"
+                "  - Action items or assignments displayed on screen\n"
+                "  - Important numbers, figures, budgets, or measurements\n"
+                "  - Announcements or key statements shown in presentation slides\n"
+                "  - Critical information displayed on shared screens\n"
+                "\n"
+                "DO NOT create points from: decorative text, repeated slide headers/footers, company logos,\n"
+                "page numbers, navigation menus, or content that is insignificant or redundant with spoken content.\n"
+                "\n"
+                "OCR-ONLY POINTS — SPEAKER LABEL:\n"
+                "If you create a discussion point that originates ONLY from the OCR transcript (not from the audio),\n"
+                "set the speakers field to [\"For Information\"] for that point. Do NOT add any other labels or categories.\n"
+                "\n"
+                "NEVER output OCR timestamps (e.g. 00:15 → 00:45) as dates in the dates array.\n"
+                f"\n{video_context.strip()}"
+            )
+        else:
+            video_context_section = ""
+        
+        prompt = (
+            _get_prompt("rom_discussion")
+            .replace("{previous_context}", prev_context)
+            .replace("{video_context_section}", video_context_section)
+            .replace("{window_text}", window_text)
+        )
+        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_discussion")
+        
+        if not raw:
+            return {"discussion_points": []}
+        
+        # Parse JSON (handle markdown fences)
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+        
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"discussion_points": []}
+            else:
+                return {"discussion_points": []}
+        
+        return data if isinstance(data, dict) else {"discussion_points": []}
+
+
+    def polish_rom_discussion_points(self, original_points_json: str, retrieved_context: str) -> Dict:
+        """Enhance discussion points with retrieved context for ROM pipeline."""
+        prompt = _get_prompt("rom_polish").replace("{original_points}", original_points_json).replace("{retrieved_context}", retrieved_context)
+        raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_polish")
+        
+        if not raw:
+            return {"polished_points": []}
+        
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+        
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"polished_points": []}
+            else:
+                return {"polished_points": []}
+        
+        return data if isinstance(data, dict) else {"polished_points": []}
+    def enhance_rom_discussion_window(
+        self,
+        window_json: str,
+        meeting_context: str,
+        global_context: str,
+    ) -> Dict:
+        """
+        Enhance a discussion window using independently retrieved Meeting and Global Context.
+
+        Returns a dict:
+          {
+            "enhanced_points": [
+              {
+                "original_point_ids": [...],
+                "enhanced_text": "...",
+                "speakers": [...],
+                "action_owner": null,
+                "decisions": [...],
+                "technical_terms": [...],
+                "dates": [...],
+                "numbers": [...],
+                "references": [...],
+                "action_items": [...],
+                "context_usage_report": {
+                  "verified": bool,
+                  "technical_details_added": bool,
+                  "abbreviations_expanded": bool,
+                  "references_added": bool,
+                  "terminology_clarified": bool,
+                  "no_useful_context": bool,
+                  "meeting_context_docs": [...],
+                  "global_context_docs": [...],
+                }
+              }
+            ]
+          }
+        """
+        meeting_section = (
+            f"[Meeting Context]\n{meeting_context.strip()}"
+            if meeting_context and meeting_context.strip()
+            else "[Meeting Context]\nNo meeting context retrieved."
+        )
+        global_section = (
+            f"[Global Context]\n{global_context.strip()}"
+            if global_context and global_context.strip()
+            else "[Global Context]\nNo global context retrieved."
+        )
+
+        prompt = (
+            _get_prompt("rom_enhance_window")
+            .replace("{window_json}", window_json)
+            .replace("{meeting_context}", meeting_section)
+            .replace("{global_context}", global_section)
+        )
+
+        raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_enhance_window")
+
+        if not raw:
+            return {"enhanced_points": []}
+
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"enhanced_points": []}
+            else:
+                return {"enhanced_points": []}
+
+        return data if isinstance(data, dict) else {"enhanced_points": []}
+
+    def deduplicate_rom_points(self, candidate_points_json: str) -> Dict:
+        """Evaluate high-similarity points at the end of Stage 2 (duplicate/complementary/different)."""
+        prompt = _get_prompt("rom_deduplicate").replace("{candidate_points}", candidate_points_json)
+        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_deduplicate")
+
+        if not raw:
+            return {"group_classification": "different", "result_points": []}
+
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"group_classification": "different", "result_points": []}
+            else:
+                return {"group_classification": "different", "result_points": []}
+
+        return data if isinstance(data, dict) else {"group_classification": "different", "result_points": []}
+
+    def generate_rom_agendas(self, agenda_text: Optional[str], context: str, previous_mom: Optional[str] = None) -> Dict:
+        """Generate enriched agenda representations for ROM pipeline."""
+        agenda_input = ""
+        if agenda_text:
+            agenda_input = f"UPLOADED AGENDA:\n{agenda_text}"
+        else:
+            agenda_input = "No agenda file provided. Generate appropriate agendas based on the context."
+        
+        context_section = f"SUPPORTING CONTEXT:\n{context}" if context else ""
+        prev_mom_section = f"PREVIOUS MEETING MOM:\n{previous_mom}" if previous_mom else ""
+        
+        prompt = _get_prompt("rom_agenda").replace("{agenda_input}", agenda_input).replace("{context}", context_section).replace("{previous_mom}", prev_mom_section)
+        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_agenda")
+        
+        if not raw:
+            return {"agendas": []}
+        
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+        
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
+            match_arr = re.search(r'\[.*\]', raw, re.DOTALL)
+            data = None
+            if match_obj:
+                try:
+                    data = json.loads(match_obj.group())
+                except Exception:
+                    pass
+            if not data and match_arr:
+                try:
+                    data = json.loads(match_arr.group())
+                except Exception:
+                    pass
+            if not data:
+                return {"agendas": []}
+        
+        if isinstance(data, list):
+            data = {"agendas": data}
+        elif isinstance(data, dict):
+            if "agendas" not in data and "agenda" in data:
+                data["agendas"] = data["agenda"]
+        
+        return data if isinstance(data, dict) else {"agendas": []}
+
+    def expand_agendas_with_previous_mom(self, agenda_list_json: str, previous_mom_combined: str) -> Dict:
+        """Phase 1: Expand each agenda item using Previous Meeting MoM documents.
+        Only called when previous MoM documents have been uploaded.
+        Returns per-agenda expansion with previous discussion, decisions, action items, pending work, follow-ups.
+        """
+        prompt = (
+            _get_prompt("rom_mom_expansion")
+            .replace("{agenda_list}", agenda_list_json)
+            .replace("{previous_mom_docs}", previous_mom_combined)
+        )
+        raw = self._infer(prompt, max_new_tokens=3000, task_key="rom_mom_expansion")
+
+        if not raw:
+            return {"expansions": []}
+
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"expansions": []}
+            else:
+                return {"expansions": []}
+
+        return data if isinstance(data, dict) else {"expansions": []}
+
+    def assign_agenda_batch(self, batch_json: str, agenda_reference_json: str) -> Dict:
+        """Phase 4: Batch agenda assignment – LLM assigns each point to one of its Top-3 candidates.
+        Returns assignments list with point_id, assigned_agenda_id, confidence, reason.
+        """
+        prompt = (
+            _get_prompt("rom_agenda_assign_batch")
+            .replace("{agenda_reference}", agenda_reference_json)
+            .replace("{batch_json}", batch_json)
+        )
+        raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_agenda_assign_batch")
+
+        if not raw:
+            return {"assignments": []}
+
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"assignments": []}
+            else:
+                return {"assignments": []}
+
+        return data if isinstance(data, dict) else {"assignments": []}
+
+    def generate_agenda_document_points(self, agenda_title: str, agenda_description: str, document_text: str) -> Dict:
+        """Extract 2-5 factual agenda-specific points from a supporting document uploaded for an agenda item.
+        
+        Args:
+            agenda_title:       Title of the agenda item this document supports.
+            agenda_description: Description of the agenda item for context.
+            document_text:      Extracted text content of the uploaded supporting document.
+        
+        Returns:
+            Dict with 'points' list of factual string statements.
+        """
+        # Truncate document to avoid token overflow (keep first ~6000 chars)
+        doc_text_truncated = document_text[:6000].strip() if document_text else ""
+        
+        if not doc_text_truncated:
+            return {"points": []}
+        
+        prompt = (
+            _get_prompt("rom_agenda_doc_points")
+            .replace("{agenda_title}", agenda_title or "Meeting Agenda")
+            .replace("{agenda_description}", agenda_description or "No additional description provided.")
+            .replace("{document_text}", doc_text_truncated)
+        )
+        
+        raw = self._infer(prompt, max_new_tokens=1024, task_key="rom_agenda_doc_points")
+        
+        if not raw:
+            return {"points": []}
+        
+        raw = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+        
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    return {"points": []}
+            else:
+                return {"points": []}
+        
+        # Validate and clean the points list
+        raw_points = data.get("points", []) if isinstance(data, dict) else []
+        clean_points = [
+            str(p).strip() for p in raw_points
+            if p and str(p).strip() and len(str(p).strip()) > 10
+        ][:5]  # Cap at 5 points
+        
+        presenter = data.get("presenter") if isinstance(data, dict) else None
+        if isinstance(presenter, str):
+            presenter = presenter.strip()
+            if presenter.lower() in ("null", "none", "n/a", "unknown", "undefined", ""):
+                presenter = None
+
+        if not presenter and document_text:
+            # Fallback regex search in document content for presenter/speaker/owner patterns
+            m = re.search(
+                r'(?:Presenter|Speaker|Presented\s+[Bb]y|Owner|Lead|Author|Prepared\s+[Bb]y)\s*[:\-]\s*([A-Za-z0-9 .,_\-]{2,60})',
+                document_text[:4000],
+                re.IGNORECASE
+            )
+            if m:
+                presenter = m.group(1).strip()
+        
+        return {"points": clean_points, "presenter": presenter}
 
     def _parse_mom_json(self, raw: str, recording_meta: dict) -> Optional[dict]:
 
@@ -3002,6 +3721,10 @@ class QwenProvider(AIProvider):
         points = data.get("points_discussed", []) or []
         if isinstance(points, list):
             points = [str(p) for p in points if p]
+        elif isinstance(points, str) and points.strip():
+            # LLM returned a string instead of a list — split on newlines or wrap
+            lines = [ln.strip().lstrip("•-*").strip() for ln in points.splitlines() if ln.strip()]
+            points = lines if lines else [points.strip()]
         else:
             points = []
 
@@ -3367,6 +4090,10 @@ class QwenProvider(AIProvider):
             else:
                 logger.error(f"[QwenAI] Single-pass MoM generation failed: {e}", exc_info=True)
                 return _empty_mom(recording_meta)
+
+    def query(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.2) -> str:
+        """General text generation interface for QwenProvider."""
+        return self._infer(prompt, max_new_tokens=max_tokens)
 
 
 # ══════════════════════════════════════════════════════════════

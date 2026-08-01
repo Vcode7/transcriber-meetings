@@ -95,6 +95,27 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "max_tokens_collection_compare": 1500,
         "max_tokens_collection_topic_growth": 1500,
         "max_tokens_vocab_extractor": 512,
+        "enable_vad": True,
+        "enable_transcription_vad": True,
+        "enable_alignment_vad": True,
+        "enable_audio_normalization": True,
+        "norm_target_dbfs": -3.0,
+        "norm_compression_ratio": 2.0,
+        "enable_adaptive_vad": True,
+        "vad_speech_threshold": 0.15,
+        "vad_silence_threshold": 0.10,
+        "vad_min_speech_ms": 250,
+        "vad_min_silence_ms": 400,
+        "enable_speech_padding": True,
+        "speech_pad_ms": 400,
+        "enable_speech_segment_merging": True,
+        "max_merge_silence_ms": 500,
+        "enable_low_volume_recovery": True,
+        "recovery_energy_threshold": -45.0,
+        "recovery_min_duration_ms": 300,
+        "enable_audio_validation": True,
+        "min_audio_duration_seconds": 2.0,
+        "min_audio_rms_threshold": 0.003,
     }
 
     if not doc:
@@ -108,6 +129,15 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["use_ollama"] = bool(res["use_ollama"])
     res["generate_mom_auto"] = bool(res["generate_mom_auto"])
     res["ollama_dynamic_ctx"] = bool(res["ollama_dynamic_ctx"])
+    res["enable_vad"] = bool(res["enable_vad"])
+    res["enable_transcription_vad"] = bool(res["enable_transcription_vad"])
+    res["enable_alignment_vad"] = bool(res["enable_alignment_vad"])
+    res["enable_audio_normalization"] = bool(res["enable_audio_normalization"])
+    res["enable_adaptive_vad"] = bool(res["enable_adaptive_vad"])
+    res["enable_speech_padding"] = bool(res["enable_speech_padding"])
+    res["enable_speech_segment_merging"] = bool(res["enable_speech_segment_merging"])
+    res["enable_low_volume_recovery"] = bool(res["enable_low_volume_recovery"])
+    res["enable_audio_validation"] = bool(res["enable_audio_validation"])
 
     if res.get("embedding_model"):
         from config import settings
@@ -141,6 +171,25 @@ async def update_settings(
         patch["generate_mom_auto"] = 1 if patch["generate_mom_auto"] else 0
     if "ollama_dynamic_ctx" in patch:
         patch["ollama_dynamic_ctx"] = 1 if patch["ollama_dynamic_ctx"] else 0
+    if "enable_vad" in patch:
+        patch["enable_vad"] = 1 if patch["enable_vad"] else 0
+    if "enable_transcription_vad" in patch:
+        patch["enable_transcription_vad"] = 1 if patch["enable_transcription_vad"] else 0
+    if "enable_alignment_vad" in patch:
+        patch["enable_alignment_vad"] = 1 if patch["enable_alignment_vad"] else 0
+    if "enable_audio_normalization" in patch:
+        patch["enable_audio_normalization"] = 1 if patch["enable_audio_normalization"] else 0
+    if "enable_adaptive_vad" in patch:
+        patch["enable_adaptive_vad"] = 1 if patch["enable_adaptive_vad"] else 0
+    if "enable_speech_padding" in patch:
+        patch["enable_speech_padding"] = 1 if patch["enable_speech_padding"] else 0
+    if "enable_speech_segment_merging" in patch:
+        patch["enable_speech_segment_merging"] = 1 if patch["enable_speech_segment_merging"] else 0
+    if "enable_low_volume_recovery" in patch:
+        patch["enable_low_volume_recovery"] = 1 if patch["enable_low_volume_recovery"] else 0
+    if "enable_audio_validation" in patch:
+        patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
+
 
     # Sync embedding model setting with runtime config & unload existing text embedder if changed
     if "embedding_model" in patch and patch["embedding_model"]:

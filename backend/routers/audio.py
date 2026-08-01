@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/audio", tags=["audio"])
 
 
+async def _validate_audio_for_user(wav_path: str, user_id: str, db) -> tuple[bool, str]:
+    enabled = True
+    min_dur = 2.0
+    min_rms = 0.003
+    try:
+        r = await db.execute(
+            text("SELECT enable_audio_validation, min_audio_duration_seconds, min_audio_rms_threshold FROM user_settings WHERE user_id = :uid"),
+            {"uid": user_id}
+        )
+        row = r.mappings().fetchone()
+        if row:
+            if row.get("enable_audio_validation") is not None:
+                enabled = bool(row["enable_audio_validation"])
+            if row.get("min_audio_duration_seconds") is not None:
+                min_dur = float(row["min_audio_duration_seconds"])
+            if row.get("min_audio_rms_threshold") is not None:
+                min_rms = float(row["min_audio_rms_threshold"])
+    except Exception as e:
+        logger.warning(f"Could not load audio validation settings: {e}")
+    return validate_audio(wav_path, enabled=enabled, min_duration=min_dur, min_rms=min_rms)
+
+
 async def _create_recording_and_run(
     file_path: str,
     original_filename: str,
@@ -155,7 +177,6 @@ async def _create_recording_and_run_chunked(
     return recording_id
 
 
-# ── Upload audio file ──────────────────────────────────────────
 @router.post("/upload")
 async def upload_audio(
     background_tasks: BackgroundTasks,
@@ -165,6 +186,7 @@ async def upload_audio(
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
     current_user: dict = Depends(get_current_user),
+    db = Depends(get_db),
 ):
     """Upload a pre-recorded audio file for processing."""
     import json as _json
@@ -189,7 +211,7 @@ async def upload_audio(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
 
-    valid, reason = validate_audio(wav_path)
+    valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
     if not valid:
         logger.warning(f"[Audio] Audio validation failed: {reason}")
         delete_file(wav_path)
@@ -247,6 +269,7 @@ async def submit_recording(
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
     current_user: dict = Depends(get_current_user),
+    db = Depends(get_db),
 ):
     """
     Accept audio blob from browser MediaRecorder (webm/ogg/wav).
@@ -272,7 +295,7 @@ async def submit_recording(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Conversion failed: {e}")
 
-    valid, reason = validate_audio(wav_path)
+    valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
     if not valid:
         logger.warning(f"[Audio] Audio validation failed: {reason}")
         delete_file(wav_path)
@@ -355,10 +378,11 @@ async def submit_chunk(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Chunk conversion failed: {e}")
 
-    valid, reason = validate_audio(wav_path)
-    if not valid:
-        delete_file(wav_path)
-        raise HTTPException(status_code=422, detail=reason)
+    async with get_db() as db:
+        valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
+        if not valid:
+            delete_file(wav_path)
+            raise HTTPException(status_code=422, detail=reason)
 
     # Create chunk row in DB
     async with get_db() as db:
@@ -443,10 +467,11 @@ async def finalize_recording(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
 
-    valid, reason = validate_audio(wav_path)
-    if not valid:
-        delete_file(wav_path)
-        raise HTTPException(status_code=422, detail=reason)
+    async with get_db() as db:
+        valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
+        if not valid:
+            delete_file(wav_path)
+            raise HTTPException(status_code=422, detail=reason)
 
     # Get duration
     try:

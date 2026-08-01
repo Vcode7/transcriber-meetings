@@ -159,6 +159,32 @@ class Settings(BaseSettings):
     # Default is relative to base dir; override in .env with absolute path if needed
     OVERLAP_MODEL_PATH: str = str(BASE_DIR / "checkpoints" / "overlap_model.pth")
 
+    # --- Low-Volume Speech Transcription Pipeline Defaults ---
+    ENABLE_VAD: bool = True
+    ENABLE_TRANSCRIPTION_VAD: bool = True
+    ENABLE_ALIGNMENT_VAD: bool = True
+
+    ENABLE_AUDIO_NORMALIZATION: bool = True
+    NORM_TARGET_DBFS: float = -3.0
+    NORM_COMPRESSION_RATIO: float = 2.0
+
+    ENABLE_ADAPTIVE_VAD: bool = True
+    VAD_SPEECH_THRESHOLD: float = 0.15
+    VAD_SILENCE_THRESHOLD: float = 0.10
+    VAD_MIN_SPEECH_MS: int = 250
+    VAD_MIN_SILENCE_MS: int = 400
+
+    ENABLE_SPEECH_PADDING: bool = True
+    SPEECH_PAD_MS: int = 400
+
+    ENABLE_SPEECH_SEGMENT_MERGING: bool = True
+    MAX_MERGE_SILENCE_MS: int = 500
+
+    ENABLE_LOW_VOLUME_RECOVERY: bool = True
+    RECOVERY_ENERGY_THRESHOLD: float = -45.0
+    RECOVERY_MIN_DURATION_MS: int = 300
+
+
     def __init__(self, **values):
         super().__init__(**values)
         if self.QWEN_EMBEDDING_MODEL_NAME is not None:

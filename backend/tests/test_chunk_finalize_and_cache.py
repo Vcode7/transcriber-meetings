@@ -37,11 +37,12 @@ class TestOffsetSegmentTimestamps(unittest.TestCase):
 
 
 class TestAlignmentModelCaching(unittest.TestCase):
+    @patch("services.audio_preprocessing.detect_speech_regions")
     @patch("whisperx.load_align_model")
     @patch("services.transcription.get_whisperx_model")
     @patch("services.transcription._resolve_device")
     @patch("services.transcription._align_segments_chunked")
-    def test_alignment_model_caching(self, mock_align_segments, mock_resolve_device, mock_get_model, mock_load_align_model):
+    def test_alignment_model_caching(self, mock_align_segments, mock_resolve_device, mock_get_model, mock_load_align_model, mock_detect_speech):
         mock_resolve_device.return_value = ("cpu", "int8")
         
         # Mock WhisperX transcription model

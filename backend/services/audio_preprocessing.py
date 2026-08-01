@@ -146,33 +146,155 @@ def _repair_clipping(audio: np.ndarray, clip_threshold: float = 0.98) -> np.ndar
     return out
 
 
-def _normalize_loudness(audio: np.ndarray, target_dbfs: float = _PEAK_TARGET_DBFS) -> np.ndarray:
+def _apply_selective_loudness_enhancement(
+    audio: np.ndarray,
+    sr: int = 16000,
+    target_dbfs: float = -18.0,
+    max_gain_db: float = 14.0,
+    noise_floor_db: float = -48.0,
+    window_ms: float = 30.0,
+    hop_ms: float = 15.0,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
-    Peak-normalize audio to `target_dbfs` dBFS.
-    Skips normalization if the audio is near-silent to avoid amplifying noise.
+    Selective Adaptive Loudness Enhancement.
+
+    Analyzes audio using short overlapping windows (30ms frame, 15ms hop).
+    Calculates RMS energy for each window.
+    Only quiet speech windows (below target_dbfs and above noise_floor_db) receive additional gain.
+    Windows already at or above target_dbfs remain COMPLETELY UNCHANGED (gain = 1.0, 0 dB boost).
+    Near-silent / noise floor windows remain UNCHANGED (gain = 1.0) to prevent noise amplification.
+    Smooths gain transitions between windows to prevent pumping / pops.
+    Applies a peak limiter / clipping protection if necessary after amplification.
     """
-    peak = float(np.max(np.abs(audio)))
+    if len(audio) == 0:
+        return audio, {
+            "avg_input_dbfs": -100.0,
+            "quiet_windows_pct": 0.0,
+            "avg_gain_applied_db": 0.0,
+            "max_gain_applied_db": 0.0,
+            "limiter_activated": "No",
+        }
+
+    abs_audio = np.abs(audio)
+    peak = float(np.max(abs_audio))
     if peak < 1e-6:
-        return audio  # near-silent — don't amplify
+        return audio, {
+            "avg_input_dbfs": -100.0,
+            "quiet_windows_pct": 0.0,
+            "avg_gain_applied_db": 0.0,
+            "max_gain_applied_db": 0.0,
+            "limiter_activated": "No",
+        }
 
-    target_linear = 10 ** (target_dbfs / 20.0)
-    gain = target_linear / peak
+    frame_len = int(sr * (window_ms / 1000.0))
+    hop_len = int(sr * (hop_ms / 1000.0))
+    if frame_len <= 0 or len(audio) < frame_len:
+        return audio, {
+            "avg_input_dbfs": round(20 * np.log10(peak + 1e-7), 1),
+            "quiet_windows_pct": 0.0,
+            "avg_gain_applied_db": 0.0,
+            "max_gain_applied_db": 0.0,
+            "limiter_activated": "No",
+        }
 
-    # Safety guard: don't amplify by more than 40 dB to prevent noise pumping
-    max_gain = 100.0
-    if gain > max_gain:
-        logger.debug(
-            f"[Preprocess] Loudness normalization: peak={20*np.log10(peak):.1f} dBFS, "
-            f"gain would be {20*np.log10(gain):.1f} dB — capped at {20*np.log10(max_gain):.0f} dB"
-        )
-        gain = max_gain
+    n_frames = (len(audio) - frame_len) // hop_len + 1
+    target_rms = 10 ** (target_dbfs / 20.0)
+    noise_floor_rms = 10 ** (noise_floor_db / 20.0)
+    max_gain_linear = 10 ** (max_gain_db / 20.0)
 
-    out = audio * gain
-    logger.debug(
-        f"[Preprocess] Loudness normalization: peak={20*np.log10(peak):.1f} dBFS → "
-        f"{target_dbfs:.1f} dBFS (gain={20*np.log10(gain):.1f} dB)"
+    window_centers = []
+    window_gains_linear = []
+    window_rms_list = []
+    quiet_windows_count = 0
+
+    for i in range(n_frames):
+        start_i = i * hop_len
+        end_i = start_i + frame_len
+        w_audio = audio[start_i:end_i]
+        w_rms = float(np.sqrt(np.mean(w_audio ** 2)))
+        window_rms_list.append(w_rms)
+        center_sample = start_i + frame_len // 2
+        window_centers.append(center_sample)
+
+        if w_rms >= target_rms or w_rms <= noise_floor_rms:
+            # Already adequate speech volume OR background noise floor -> 0 dB gain boost
+            gain = 1.0
+        else:
+            # Quiet speech window -> boost gain to bring RMS towards target_rms
+            quiet_windows_count += 1
+            needed_gain = target_rms / max(w_rms, 1e-7)
+            gain = min(needed_gain, max_gain_linear)
+
+        window_gains_linear.append(gain)
+
+    avg_input_rms = float(np.mean(window_rms_list))
+    avg_input_dbfs = 20 * np.log10(max(avg_input_rms, 1e-7))
+    quiet_windows_pct = (quiet_windows_count / max(1, n_frames)) * 100.0
+
+    # Smooth window gains to avoid pumping or audible jumps
+    window_gains_linear = np.array(window_gains_linear, dtype=np.float32)
+    smooth_kernel_size = 5
+    if len(window_gains_linear) >= smooth_kernel_size:
+        kernel = np.ones(smooth_kernel_size, dtype=np.float32) / smooth_kernel_size
+        window_gains_linear = np.convolve(window_gains_linear, kernel, mode="same")
+
+    sample_indices = np.arange(len(audio))
+    sample_gains = np.interp(
+        sample_indices,
+        np.array(window_centers, dtype=np.float32),
+        window_gains_linear,
+        left=window_gains_linear[0],
+        right=window_gains_linear[-1]
+    ).astype(np.float32)
+
+    enhanced = audio * sample_gains
+
+    # Peak Limiter / Soft Knee Clipping Protection
+    max_peak = float(np.max(np.abs(enhanced)))
+    limiter_activated = False
+    if max_peak > 0.95:
+        limiter_activated = True
+        enhanced = np.clip(enhanced, -0.95, 0.95)
+
+    gains_db = 20 * np.log10(np.maximum(sample_gains, 1.0))
+    avg_gain_applied_db = float(np.mean(gains_db))
+    max_gain_applied_db = float(np.max(gains_db))
+
+    stats = {
+        "avg_input_dbfs": round(avg_input_dbfs, 1),
+        "quiet_windows_pct": round(quiet_windows_pct, 1),
+        "avg_gain_applied_db": round(avg_gain_applied_db, 1),
+        "max_gain_applied_db": round(max_gain_applied_db, 1),
+        "limiter_activated": "Yes" if limiter_activated else "No",
+    }
+
+    logger.info(
+        f"[SelectiveAudioEnhancement] "
+        f"AvgInputLoudness={stats['avg_input_dbfs']} dBFS, "
+        f"QuietWindows={stats['quiet_windows_pct']}%, "
+        f"AvgGainApplied=+{stats['avg_gain_applied_db']} dB, "
+        f"MaxGainApplied=+{stats['max_gain_applied_db']} dB, "
+        f"PeakLimiterActivated={stats['limiter_activated']}"
     )
-    return np.clip(out, -1.0, 1.0)
+
+    return enhanced, stats
+
+
+def _normalize_loudness(audio: np.ndarray, target_dbfs: float = _PEAK_TARGET_DBFS) -> np.ndarray:
+    """Legacy loudness normalization alias using selective adaptive enhancement."""
+    enhanced, _ = _apply_selective_loudness_enhancement(audio, target_dbfs=target_dbfs)
+    return enhanced
+
+
+def _apply_dynamic_range_compression(
+    audio: np.ndarray,
+    ratio: float = 2.0,
+    threshold_db: float = -24.0,
+) -> np.ndarray:
+    """Legacy dynamic compression alias using selective adaptive enhancement."""
+    enhanced, _ = _apply_selective_loudness_enhancement(audio, target_dbfs=-18.0)
+    return enhanced
+
 
 
 def _spectral_subtract_denoise(
@@ -366,21 +488,15 @@ def _webrtcvad_regions(
 def detect_speech_regions(
     wav_path: str,
     aggressiveness: int = 2,
+    speech_quantile: float = _ENERGY_SPEECH_QUANTILE,
+    min_speech_sec: float = _MIN_SPEECH_SEC,
+    min_silence_sec: float = _MIN_SILENCE_SEC,
 ) -> List[Tuple[float, float]]:
     """
     Detect speech regions in a 16 kHz mono WAV file.
 
     Tries webrtcvad first (more accurate); falls back to energy-based VAD
     if webrtcvad is not installed or fails.
-
-    Args:
-        wav_path: Path to a 16 kHz mono WAV file.
-        aggressiveness: webrtcvad aggressiveness 0–3 (only used if webrtcvad
-                        is available).
-
-    Returns:
-        List of (start_sec, end_sec) tuples covering speech regions.
-        Empty list if no speech is detected.
     """
     audio, sr = _load_wav_mono(wav_path)
 
@@ -392,20 +508,130 @@ def detect_speech_regions(
             sr = SAMPLE_RATE
         except Exception:
             logger.warning("[Preprocess] Could not resample audio for VAD — using energy VAD directly")
-            return _energy_vad(audio, sr)
+            return _energy_vad(audio, sr, speech_quantile=speech_quantile, min_speech_sec=min_speech_sec, min_silence_sec=min_silence_sec)
 
     try:
-        regions = _webrtcvad_regions(audio, sr, aggressiveness=aggressiveness)
-        logger.info(f"[Preprocess] Speech detection (webrtcvad): {len(regions)} regions")
+        regions = _webrtcvad_regions(
+            audio, sr, aggressiveness=aggressiveness,
+            min_speech_sec=min_speech_sec, min_silence_sec=min_silence_sec
+        )
+        logger.info(f"[Preprocess] Speech detection (webrtcvad, agg={aggressiveness}): {len(regions)} regions")
         return regions
     except ImportError:
         logger.debug("[Preprocess] webrtcvad not installed — using energy-based VAD")
     except Exception as e:
         logger.warning(f"[Preprocess] webrtcvad failed ({e}) — falling back to energy VAD")
 
-    regions = _energy_vad(audio, sr)
+    regions = _energy_vad(
+        audio, sr, speech_quantile=speech_quantile,
+        min_speech_sec=min_speech_sec, min_silence_sec=min_silence_sec
+    )
     logger.info(f"[Preprocess] Speech detection (energy VAD): {len(regions)} regions")
     return regions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Speech Padding & Segment Merging Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_speech_padding(
+    regions: List[Tuple[float, float]],
+    pad_ms: float,
+    total_duration_sec: float,
+) -> List[Tuple[float, float]]:
+    """
+    Add pre- and post-segment padding (in ms) to detected speech regions,
+    clamping to [0.0, total_duration_sec] and merging overlapping regions.
+    """
+    if not regions or pad_ms <= 0:
+        return regions
+
+    pad_sec = pad_ms / 1000.0
+    padded: List[Tuple[float, float]] = []
+    for start, end in regions:
+        p_start = max(0.0, start - pad_sec)
+        p_end = min(total_duration_sec, end + pad_sec)
+        padded.append((round(p_start, 3), round(p_end, 3)))
+
+    # Merge overlapping regions resulting from padding
+    merged: List[Tuple[float, float]] = []
+    for s, e in padded:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    return merged
+
+
+def merge_speech_segments(
+    regions: List[Tuple[float, float]],
+    max_merge_silence_ms: float,
+) -> List[Tuple[float, float]]:
+    """
+    Merge nearby speech segments separated by short silence <= max_merge_silence_ms.
+    """
+    if not regions or max_merge_silence_ms <= 0:
+        return regions
+
+    max_silence_sec = max_merge_silence_ms / 1000.0
+    merged: List[Tuple[float, float]] = []
+    for s, e in regions:
+        if merged and (s - merged[-1][1]) <= max_silence_sec:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    return merged
+
+
+def detect_rejected_low_volume_regions(
+    audio: np.ndarray,
+    sr: int,
+    speech_regions: List[Tuple[float, float]],
+    energy_threshold_db: float = -45.0,
+    min_duration_sec: float = 0.3,
+) -> List[Tuple[float, float]]:
+    """
+    Analyze rejected (non-speech) regions between VAD speech spans.
+    Returns regions containing audio energy >= energy_threshold_db (likely quiet speech).
+    """
+    total_sec = len(audio) / sr
+    if total_sec <= 0:
+        return []
+
+    sorted_speech = sorted(speech_regions, key=lambda x: x[0])
+    rejected_spans: List[Tuple[float, float]] = []
+
+    curr = 0.0
+    for s, e in sorted_speech:
+        if s - curr >= min_duration_sec:
+            rejected_spans.append((curr, s))
+        curr = max(curr, e)
+    if total_sec - curr >= min_duration_sec:
+        rejected_spans.append((curr, total_sec))
+
+    recovered_spans: List[Tuple[float, float]] = []
+    threshold_linear = 10 ** (energy_threshold_db / 20.0)
+
+    for r_start, r_end in rejected_spans:
+        s_idx = int(r_start * sr)
+        e_idx = int(r_end * sr)
+        chunk = audio[s_idx:e_idx]
+        if len(chunk) < int(sr * min_duration_sec):
+            continue
+
+        rms = float(np.sqrt(np.mean(chunk ** 2)))
+        rms_db = 20 * np.log10(rms + 1e-9)
+
+        if rms >= threshold_linear:
+            recovered_spans.append((round(r_start, 3), round(r_end, 3)))
+            logger.debug(
+                f"[Preprocess] Rejected region [{r_start:.2f}s–{r_end:.2f}s] "
+                f"passed recovery check (RMS={rms_db:.1f} dBFS >= {energy_threshold_db:.1f} dBFS)"
+            )
+
+    return recovered_spans
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,27 +643,17 @@ def preprocess_audio_for_alignment(
     trim_silence: bool = True,
     repair_clipping: bool = True,
     normalize_loudness: bool = True,
-    denoise: bool = False,          # off by default — use only if audio is very noisy
+    compress_dynamic_range: bool = True,
+    target_dbfs: float = _PEAK_TARGET_DBFS,
+    compression_ratio: float = 2.0,
+    denoise: bool = False,
     output_path: Optional[str] = None,
 ) -> str:
     """
     Apply optional audio cleanup steps before WhisperX forced alignment.
 
-    The original WAV is never modified.  A preprocessed copy is written
+    The original WAV is never modified. A preprocessed copy is written
     to `output_path` (or a temp file if not provided).
-
-    Args:
-        wav_path:          Path to the 16 kHz mono input WAV.
-        trim_silence:      Trim leading/trailing silence.
-        repair_clipping:   Fix soft-clipped samples.
-        normalize_loudness: Peak-normalize to -3 dBFS.
-        denoise:           Apply light spectral subtraction denoising.
-        output_path:       Where to write the preprocessed WAV.
-                           If None, a temp file is used (caller is responsible
-                           for cleanup).
-
-    Returns:
-        Path to the preprocessed WAV file.
     """
     steps_applied = []
 
@@ -456,11 +672,11 @@ def preprocess_audio_for_alignment(
             if not np.array_equal(audio, audio_prev):
                 steps_applied.append("clip_repair")
 
-        if normalize_loudness:
+        if normalize_loudness or compress_dynamic_range:
             audio_prev = audio
-            audio = _normalize_loudness(audio)
+            audio, stats = _apply_selective_loudness_enhancement(audio, sr=sr, target_dbfs=-18.0)
             if not np.array_equal(audio, audio_prev):
-                steps_applied.append("loudness_norm")
+                steps_applied.append(f"selective_adaptive_loudness_enhancement(avg_boost={stats['avg_gain_applied_db']}dB, quiet={stats['quiet_windows_pct']}%)")
 
         if denoise:
             audio = _spectral_subtract_denoise(audio, sr)
@@ -477,7 +693,6 @@ def preprocess_audio_for_alignment(
         logger.info("[Preprocess] No preprocessing steps were needed — using original WAV")
         return wav_path
 
-    # Write preprocessed audio to output path (or temp file)
     if output_path is None:
         fd, output_path = tempfile.mkstemp(suffix="_preprocessed.wav")
         os.close(fd)

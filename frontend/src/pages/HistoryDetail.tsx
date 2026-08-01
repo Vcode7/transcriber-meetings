@@ -1,12 +1,16 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, FlaskConical } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, FlaskConical, Video, RotateCcw, AlertTriangle } from 'lucide-react'
+import { toast } from 'sonner'
 import TranscriptViewer from '../components/TranscriptViewer'
+import VideoTranscriptViewer from '../components/VideoTranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
 import PDFButton from '../components/PDFButton'
 import InlineEdit from '../components/InlineEdit'
 import api from '../api/client'
-import type { RecordingDetail } from '../types/recording'
+import { useJobsStore } from '../store/jobs'
+import { useProcessingStore } from '../store/processing'
+import type { RecordingDetail, VideoTranscriptBlock } from '../types/recording'
 
 // MoM data shape (mirrors mom_router.py response)
 interface MomData {
@@ -48,6 +52,8 @@ export default function HistoryDetail() {
   const [showConfidence, setShowConfidence] = useState(true);
   const { id } = useParams()
   const [rec, setRec] = useState<RecordingDetail | null>(null)
+  const [activeTab, setActiveTab] = useState<'audio' | 'video'>('audio')
+  const [videoBlocks, setVideoBlocks] = useState<VideoTranscriptBlock[]>([])
   const [loading, setLoading] = useState(true)
   const [chatOpen, setChatOpen] = useState(true)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
@@ -58,6 +64,8 @@ export default function HistoryDetail() {
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
   const [reidentifying, setReidentifying] = useState(false)
   const [reidentifyDone, setReidentifyDone] = useState(false)
+  const [confirmRerunOpen, setConfirmRerunOpen] = useState(false)
+  const [rerunning, setRerunning] = useState(false)
   const reidentifyPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // â”€â”€ Resizable chat panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [chatWidth, setChatWidth] = useState<number>(() => {
@@ -173,6 +181,32 @@ export default function HistoryDetail() {
     }, 2500)
   }
 
+  const handleRerunPipeline = async () => {
+    if (!id || rerunning || !rec) return
+    setConfirmRerunOpen(false)
+    setRerunning(true)
+    try {
+      await api.post(`/history/${id}/rerun`)
+      
+      const source = rec.source_type === 'video' ? 'video-upload' : 'upload'
+      useJobsStore.getState().addJob({
+        jobId: id,
+        source: source,
+        filename: rec.filename || 'recording',
+        startedAt: new Date().toISOString(),
+      })
+      useProcessingStore.getState().setProcessing(source, 'queued')
+
+      toast.success('Pipeline rerun initiated! Re-processing media...')
+      setRec(prev => prev ? { ...prev, status: 'processing' } : prev)
+    } catch (err: unknown) {
+      console.error('[RerunPipeline] Failed to start:', err)
+      toast.error('Failed to initiate pipeline rerun.')
+    } finally {
+      setRerunning(false)
+    }
+  }
+
   /** Generate AI insights on-demand (called from AIChatPanel Generate button) */
   const handleGenerateInsights = useCallback(async (tasks: string[]) => {
     if (!id || isGeneratingInsights) return
@@ -194,9 +228,36 @@ export default function HistoryDetail() {
     }
   }, [id, isGeneratingInsights])
 
+  const reloadDetail = useCallback(() => {
+    if (!id) return;
+    api.get(`/history/${id}`).then((r) => {
+      setRec(r.data);
+      if (r.data?.video_transcript && Array.isArray(r.data.video_transcript)) {
+        setVideoBlocks(r.data.video_transcript);
+      }
+    });
+    api.get(`/mom/${id}`).then((r) => setMomData(r.data)).catch(() => {});
+  }, [id]);
+
   useEffect(() => {
     if (!id) return
-    api.get(`/history/${id}`).then((r) => setRec(r.data)).finally(() => setLoading(false))
+    setLoading(true);
+    api.get(`/history/${id}`).then((r) => {
+      setRec(r.data)
+      if (r.data?.video_transcript && Array.isArray(r.data.video_transcript)) {
+        setVideoBlocks(r.data.video_transcript)
+      }
+    }).finally(() => setLoading(false))
+
+    // Fetch video transcript endpoint to ensure latest OCR blocks are loaded
+    api.get(`/video/jobs/${id}/video-transcript`)
+      .then((r) => {
+        if (r.data?.video_transcript && Array.isArray(r.data.video_transcript)) {
+          setVideoBlocks(r.data.video_transcript)
+        }
+      })
+      .catch(() => {})
+
     // Also fetch MoM data (404 means not generated yet — that's fine)
     api.get(`/mom/${id}`)
       .then((r) => setMomData(r.data))
@@ -242,7 +303,13 @@ export default function HistoryDetail() {
   )
 
   const chatW = chatOpen ? `${chatWidth}px` : '48px'
-  const speakers: string[] = rec.speakers_detected || []
+  const speakersFromTranscript = Array.from(new Set(
+    (rec.transcript || []).map(s => s.speaker_label || s.speaker).filter((lbl): lbl is string => Boolean(lbl) && lbl !== 'Unknown')
+  ))
+  const speakers: string[] = Array.from(new Set([
+    ...(rec.speakers_detected || []),
+    ...speakersFromTranscript
+  ]))
 
   return (
     <div className="workspace-split" style={{
@@ -286,6 +353,17 @@ export default function HistoryDetail() {
                   <FileAudio size={10} /> {fmtDuration(rec.duration)}
                 </span>
               )}
+              {(rec.source_type === 'video' || videoBlocks.length > 0) && (
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                  fontSize: '.72rem', fontWeight: 600,
+                  background: 'hsl(210,80%,55%/.12)', border: '1px solid hsl(210,80%,55%/.3)',
+                  color: 'hsl(210,85%,60%)', padding: '.1rem .5rem', borderRadius: '999px',
+                  fontFamily: 'Inter, sans-serif'
+                }}>
+                  <Video size={10} /> Video Recording ({videoBlocks.length} OCR blocks)
+                </span>
+              )}
               {/* Speaker chips */}
               {speakers.map((sp, si) => {
                 const col = getSpeakerColor(sp)
@@ -307,7 +385,21 @@ export default function HistoryDetail() {
 
 
 
-          {/* More Options */}
+          {/* Header Action Buttons */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setConfirmRerunOpen(true)}
+              disabled={rerunning || reidentifying || regenerating}
+              title="Re-run processing pipeline on this recording"
+              id="btn-rerun-pipeline-header"
+              style={{ fontSize: '.82rem', padding: '.4rem .85rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'hsl(var(--accent))' }}
+            >
+              {rerunning ? <Loader size={14} className="spin" /> : <RotateCcw size={14} />}
+              <span>Re-Run Pipeline</span>
+            </button>
+
+            {/* More Options */}
             <div
               style={{
                 position: "relative",
@@ -325,6 +417,19 @@ export default function HistoryDetail() {
 
               {menuOpen && (
                 <div className="header-dropdown" >
+
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      setConfirmRerunOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    disabled={rerunning || reidentifying}
+                    id="btn-rerun-pipeline-dropdown"
+                  >
+                    <RotateCcw size={14} style={{ color: 'hsl(var(--accent))' }} />
+                    Re-Run Pipeline
+                  </button>
 
                   <button
                     className="dropdown-item"
@@ -392,6 +497,30 @@ export default function HistoryDetail() {
                     Generate Raw MoM (Lab)
                   </button>
 
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      navigate(`/dashboard/history/${id}/rom`);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <FileText size={14} style={{ color: 'hsl(160,70%,45%)' }} />
+                    Record of Meeting (ROM)
+                  </button>
+
+                  {(rec.source_type === 'video' || videoBlocks.length > 0) && (
+                    <button
+                      className="dropdown-item"
+                      onClick={() => {
+                        setActiveTab('video');
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <Video size={14} style={{ color: 'hsl(210,85%,60%)' }} />
+                      Video OCR Transcript ({videoBlocks.length})
+                    </button>
+                  )}
+
                   <div className="dropdown-item">
                     <PDFButton
                       recordingId={id}
@@ -403,7 +532,7 @@ export default function HistoryDetail() {
                 </div>
               )}
             </div>
-
+          </div>
         </div>
 
         {/* Re-identification success banner */}
@@ -423,101 +552,154 @@ export default function HistoryDetail() {
           </div>
         )}
 
-        {/* Transcript */}
+        {/* Transcript area */}
         <div className="transcript-scroll" style={{
           flex: 1, overflowY: 'auto',
           padding: '1.25rem 1.5rem',
           background: 'hsl(var(--paper) / .4)',
           minHeight: 0
         }}>
-          {rec.transcript?.length > 0 && (
-            <div className="transcript-subheader">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', letterSpacing: '-.01em', margin: 0 }}>
-                  Transcript
-                </h3>
-                <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', background: 'hsl(var(--muted))', padding: '.15rem .5rem', borderRadius: '999px', fontFamily: 'Inter, sans-serif' }}>
-                  {rec.transcript.length} segments
-                </span>
-                {speakers.length > 0 && (
-                  <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
-                    Â· <Users size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {speakers.length} {speakers.length === 1 ? 'speaker' : 'speakers'}
-                  </span>
-                )}
-              </div>
-              <div
-                className="confidence-legend"
+          {/* Tab buttons if video transcript is available */}
+          {(rec.source_type === 'video' || videoBlocks.length > 0) && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '1.25rem',
+              background: 'hsl(var(--muted)/.4)', padding: '4px', borderRadius: '10px',
+              width: 'fit-content', border: '1px solid hsl(var(--border)/.4)'
+            }}>
+              <button
+                onClick={() => setActiveTab('audio')}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "16px",
-                  flexWrap: "wrap",
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  padding: '.35rem .85rem', borderRadius: '7px', border: 'none',
+                  background: activeTab === 'audio' ? 'hsl(var(--card))' : 'transparent',
+                  color: activeTab === 'audio' ? 'hsl(var(--ink))' : 'hsl(var(--pencil))',
+                  fontWeight: activeTab === 'audio' ? 700 : 500,
+                  fontSize: '.8rem', cursor: 'pointer', fontFamily: 'Inter, sans-serif',
+                  boxShadow: activeTab === 'audio' ? '0 1px 3px rgba(0,0,0,0.06)' : 'none',
+                  transition: 'all .15s ease'
                 }}
               >
-                <span
-                  style={{
-                    fontSize: ".68rem",
-                    color: "hsl(var(--pencil))",
-                    textTransform: "uppercase",
-                    letterSpacing: ".08em",
-                    fontWeight: 700,
-                    fontFamily: "Inter, sans-serif",
-                  }}
-                >
-                  Confidence
-                </span>
+                <FileAudio size={14} /> Spoken Audio Transcript
+              </button>
 
-                <span className="confidence-legend-item">
-                  <span
-                    className="conf-dot"
-                    style={{ background: "hsl(var(--sticky-green))" }}
-                  />
-                  High
-                </span>
-
-                <span className="confidence-legend-item">
-                  <span
-                    className="conf-dot"
-                    style={{ background: "hsl(45,90%,50%)" }}
-                  />
-                  Mid
-                </span>
-
-                <span className="confidence-legend-item">
-                  <span
-                    className="conf-dot"
-                    style={{ background: "hsl(var(--destructive))" }}
-                  />
-                  Low
-                </span>
-
-                <div style={{ flex: 1 }} />
-
-                <label className="confidence-switch">
-                  <span>Highlight</span>
-
-                  <input
-                    type="checkbox"
-                    checked={showConfidence}
-                    onChange={(e) => setShowConfidence(e.target.checked)}
-                  />
-
-                  <span className="slider" />
-                </label>
-              </div>
+              <button
+                onClick={() => setActiveTab('video')}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  padding: '.35rem .85rem', borderRadius: '7px', border: 'none',
+                  background: activeTab === 'video' ? 'hsl(var(--card))' : 'transparent',
+                  color: activeTab === 'video' ? 'hsl(210,85%,60%)' : 'hsl(var(--pencil))',
+                  fontWeight: activeTab === 'video' ? 700 : 500,
+                  fontSize: '.8rem', cursor: 'pointer', fontFamily: 'Inter, sans-serif',
+                  boxShadow: activeTab === 'video' ? '0 1px 3px rgba(0,0,0,0.06)' : 'none',
+                  transition: 'all .15s ease'
+                }}
+              >
+                <Video size={14} /> Video OCR Transcript ({videoBlocks.length})
+              </button>
             </div>
           )}
-          <TranscriptViewer
-            segments={rec.transcript || []}
-            showConfidence={showConfidence}
-            audioUrl={audioUrl || undefined}
-            recordingId={id}
-            onSegmentsChange={(updated) => {
-              if (rec) {
-                setRec({ ...rec, transcript: updated });
-              }
-            }}
-          />
+
+          {activeTab === 'audio' ? (
+            <>
+              {rec.transcript?.length > 0 && (
+                <div className="transcript-subheader">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', letterSpacing: '-.01em', margin: 0 }}>
+                      Transcript
+                    </h3>
+                    <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', background: 'hsl(var(--muted))', padding: '.15rem .5rem', borderRadius: '999px', fontFamily: 'Inter, sans-serif' }}>
+                      {rec.transcript.length} segments
+                    </span>
+                    {speakers.length > 0 && (
+                      <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+                        · <Users size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {speakers.length} {speakers.length === 1 ? 'speaker' : 'speakers'}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className="confidence-legend"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "16px",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: ".68rem",
+                        color: "hsl(var(--pencil))",
+                        textTransform: "uppercase",
+                        letterSpacing: ".08em",
+                        fontWeight: 700,
+                        fontFamily: "Inter, sans-serif",
+                      }}
+                    >
+                      Confidence
+                    </span>
+
+                    <span className="confidence-legend-item">
+                      <span
+                        className="conf-dot"
+                        style={{ background: "hsl(var(--sticky-green))" }}
+                      />
+                      High
+                    </span>
+
+                    <span className="confidence-legend-item">
+                      <span
+                        className="conf-dot"
+                        style={{ background: "hsl(45,90%,50%)" }}
+                      />
+                      Mid
+                    </span>
+
+                    <span className="confidence-legend-item">
+                      <span
+                        className="conf-dot"
+                        style={{ background: "hsl(var(--destructive))" }}
+                      />
+                      Low
+                    </span>
+
+                    <div style={{ flex: 1 }} />
+
+                    <label className="confidence-switch">
+                      <span>Highlight</span>
+
+                      <input
+                        type="checkbox"
+                        checked={showConfidence}
+                        onChange={(e) => setShowConfidence(e.target.checked)}
+                      />
+
+                      <span className="slider" />
+                    </label>
+                  </div>
+                </div>
+              )}
+              <TranscriptViewer
+                segments={rec.transcript || []}
+                showConfidence={showConfidence}
+                audioUrl={audioUrl || undefined}
+                recordingId={id}
+                onSegmentsChange={(updated) => {
+                  if (rec) {
+                    setRec({ ...rec, transcript: updated });
+                  }
+                  reloadDetail();
+                }}
+              />
+            </>
+          ) : (
+            <VideoTranscriptViewer
+              blocks={videoBlocks}
+              filename={rec.filename}
+              recordingId={id}
+              onBlocksUpdated={(updated) => setVideoBlocks(updated)}
+            />
+          )}
         </div>
       </div>
 
@@ -555,6 +737,76 @@ export default function HistoryDetail() {
           isGeneratingInsights={isGeneratingInsights}
         />
       </div>
+
+      {/* Confirmation Modal for Re-Run Pipeline */}
+      {confirmRerunOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0, 0, 0, 0.45)', backdropFilter: 'blur(3px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem'
+        }}>
+          <div style={{
+            background: 'hsl(var(--card))',
+            border: '2px solid hsl(var(--border))',
+            borderRadius: '16px',
+            padding: '1.5rem 1.75rem',
+            maxWidth: '480px',
+            width: '100%',
+            boxShadow: '0 20px 40px rgba(0, 0, 0, 0.2)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '1.25rem',
+          }} className="animate-scale-up">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: 40, height: 40, borderRadius: '12px',
+                background: 'hsl(var(--destructive) / .12)',
+                border: '1.5px solid hsl(var(--destructive) / .3)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0
+              }}>
+                <RotateCcw size={20} style={{ color: 'hsl(var(--destructive))' }} />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: 'hsl(var(--ink))' }}>
+                  Re-Run Pipeline Confirmation
+                </h3>
+                <p style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', margin: '2px 0 0 0' }}>
+                  This will re-process the existing media with your current settings.
+                </p>
+              </div>
+            </div>
+
+            <div style={{
+              fontSize: '.85rem', color: 'hsl(var(--ink-soft))', lineHeight: 1.5,
+              background: 'hsl(var(--muted) / .5)', padding: '.85rem 1rem', borderRadius: '10px',
+              border: '1px dashed hsl(var(--border))'
+            }}>
+              ⚠️ <strong>Warning:</strong> Existing transcriptions, speaker identifications, Minutes of Meeting (MoM), AI Insights, and ROM outputs will be replaced with newly generated results. The original audio/video file will not be deleted.
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '.25rem' }}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => setConfirmRerunOpen(false)}
+                style={{ fontSize: '.85rem', padding: '.45rem 1rem' }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleRerunPipeline}
+                style={{
+                  fontSize: '.85rem', padding: '.45rem 1.1rem',
+                  background: 'hsl(var(--destructive))', borderColor: 'hsl(var(--destructive))'
+                }}
+              >
+                Re-Run Pipeline
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

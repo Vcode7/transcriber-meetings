@@ -25,6 +25,7 @@ async def upload_voice_sample(
     label: str = Form("self"),
     sample_index: int = Form(0),
     current_user: dict = Depends(get_current_user),
+    db = Depends(get_db),
 ):
     """
     Upload one voice sample. Returns the saved file path.
@@ -43,8 +44,24 @@ async def upload_voice_sample(
 
     delete_file(raw_path)  # keep only converted
 
-    # Validate
-    valid, reason = validate_audio(wav_path)
+    # Validate with user settings
+    enabled = True
+    min_dur = 2.0
+    min_rms = 0.003
+    try:
+        r = await db.execute(
+            text("SELECT enable_audio_validation, min_audio_duration_seconds, min_audio_rms_threshold FROM user_settings WHERE user_id = :uid"),
+            {"uid": user_id}
+        )
+        row = r.mappings().fetchone()
+        if row:
+            if row.get("enable_audio_validation") is not None: enabled = bool(row["enable_audio_validation"])
+            if row.get("min_audio_duration_seconds") is not None: min_dur = float(row["min_audio_duration_seconds"])
+            if row.get("min_audio_rms_threshold") is not None: min_rms = float(row["min_audio_rms_threshold"])
+    except Exception:
+        pass
+
+    valid, reason = validate_audio(wav_path, enabled=enabled, min_duration=min_dur, min_rms=min_rms)
     if not valid:
         delete_file(wav_path)
         raise HTTPException(status_code=422, detail=reason)
@@ -421,12 +438,37 @@ async def delete_profile(
     user_id = current_user["id"]
 
     async with get_db() as db:
+        # Fetch profile label before deleting to scrub stale speaker_mappings
+        p_res = await db.execute(
+            text("SELECT label FROM voice_profiles WHERE id = :id AND user_id = :uid"),
+            {"id": profile_id, "uid": user_id},
+        )
+        p_row = p_res.mappings().fetchone()
+        deleted_label = p_row["label"] if p_row else None
+
         r = await db.execute(
             text("DELETE FROM voice_profiles WHERE id = :id AND user_id = :uid"),
             {"id": profile_id, "uid": user_id},
         )
         if r.rowcount == 0:
             raise HTTPException(status_code=404, detail="Profile not found.")
+
+        # Scrub deleted profile label from stored recordings.speaker_mappings
+        if deleted_label:
+            recs_res = await db.execute(
+                text("SELECT id, speaker_mappings FROM recordings WHERE user_id = :uid AND speaker_mappings IS NOT NULL"),
+                {"uid": user_id},
+            )
+            for rec_row in recs_res.mappings().fetchall():
+                sm_raw = rec_row.get("speaker_mappings")
+                sm = from_json(sm_raw, {}) if isinstance(sm_raw, str) else (sm_raw or {})
+                if isinstance(sm, dict):
+                    cleaned_sm = {k: v for k, v in sm.items() if k != deleted_label and v != deleted_label}
+                    if len(cleaned_sm) != len(sm):
+                        await db.execute(
+                            text("UPDATE recordings SET speaker_mappings = :sm WHERE id = :id AND user_id = :uid"),
+                            {"sm": to_json(cleaned_sm), "id": rec_row["id"], "uid": user_id},
+                        )
 
         # If deleted own profile, mark needs_setup again
         if str(current_user.get("own_profile_id")) == profile_id:
@@ -724,29 +766,10 @@ async def train_from_transcript(
             )
             logger.info(f"[TrainFromTranscript] Created new profile {profile_id} for label '{new_label}'")
 
-        # Relabel matching segments in the recording's transcript
-        r2 = await db.execute(
-            text("SELECT transcript FROM recordings WHERE id = :id AND user_id = :uid"),
-            {"id": recording_id, "uid": user_id},
-        )
-        rec = r2.mappings().fetchone()
-        updated_count = 0
-        if rec:
-            transcript: list = _json.loads(rec.get("transcript") or "[]")
-            for seg in transcript:
-                if seg.get("speaker_label") == speaker_label:
-                    seg["speaker_label"] = new_label
-                    seg["speaker_profile_id"] = profile_id
-                    # Also relabel per-word speaker labels if present
-                    for w in seg.get("words", []):
-                        if w.get("speaker_label") == speaker_label:
-                            w["speaker_label"] = new_label
-                    updated_count += 1
-            if updated_count > 0:
-                await db.execute(
-                    text("UPDATE recordings SET transcript = :t WHERE id = :id AND user_id = :uid"),
-                    {"t": to_json(transcript), "id": recording_id, "uid": user_id},
-                )
+        # Relabel matching segments and synchronize speaker mappings everywhere
+        from services.speaker_sync import sync_global_speaker_rename
+        updated_rec = await sync_global_speaker_rename(db, recording_id, user_id, {speaker_label: new_label})
+        updated_count = len(updated_rec.get("transcript", [])) if updated_rec else 0
 
         await db.commit()
 
@@ -764,22 +787,9 @@ async def train_from_transcript(
         f"segments_updated={updated_count}, embeddings={len(embeddings)}"
     )
 
-    # ── Fire-and-forget: propagate updated speaker name to MoM ───────────
-    # When the speaker label changed (new_label != speaker_label) or a new
-    # profile was created, the stored MoM may still reference the old name.
-    # We kick off a background task that reads the updated transcript,
-    # refreshes speakers_detected, and regenerates the MoM asynchronously so
-    # the HTTP response returns immediately.
-    if speaker_label != new_label or existing_profile_id is None:
-        import asyncio as _asyncio
-        _asyncio.create_task(
-            _refresh_mom_after_voice_training(
-                recording_id=recording_id,
-                user_id=user_id,
-                old_label=speaker_label,
-                new_label=new_label,
-            )
-        )
+    # speaker_sync already updated the transcript, speakers_detected, speaker
+    # mappings, and any existing MoM text fields (participants, action items)
+    # inline — no background AI pipeline is needed.
 
     return {
         "profile_id": profile_id,
@@ -817,91 +827,3 @@ async def get_sample_audio(
 
     return FileResponse(requested, media_type="audio/wav")
 
-
-# ── Background helper: refresh MoM after voice profile training ───────────────
-
-async def _refresh_mom_after_voice_training(
-    recording_id: str,
-    user_id: str,
-    old_label: str,
-    new_label: str,
-) -> None:
-    """
-    Re-derive speakers_detected from the updated transcript and regenerate the
-    MoM so the new speaker name appears everywhere.
-
-    Runs as a fire-and-forget asyncio task — all failures are logged but never
-    re-raised so they cannot affect the HTTP response or other pipeline state.
-    """
-    import json as _json
-    import asyncio as _asyncio
-    logger.info(
-        f"[VoiceTrain/MoM] {recording_id} — Propagating label change "
-        f"'{old_label}' → '{new_label}' to speakers_detected and MoM"
-    )
-    try:
-        # Re-read the transcript that was already relabeled by train_from_transcript
-        async with get_db() as db:
-            r = await db.execute(
-                text("SELECT transcript, raw_text FROM recordings WHERE id = :id AND user_id = :uid"),
-                {"id": recording_id, "uid": user_id},
-            )
-            rec = r.mappings().fetchone()
-
-        if not rec:
-            logger.warning(f"[VoiceTrain/MoM] {recording_id} — Recording not found; skipping MoM refresh.")
-            return
-
-        transcript: list = _json.loads(rec.get("transcript") or "[]")
-        raw_text: str = rec.get("raw_text") or ""
-
-        if not transcript:
-            logger.warning(f"[VoiceTrain/MoM] {recording_id} — Empty transcript; skipping MoM refresh.")
-            return
-
-        # Re-derive speakers_detected from the updated transcript
-        speakers_detected = list({
-            seg["speaker_label"]
-            for seg in transcript
-            if seg.get("speaker_label") not in ("Unknown", None, "") and not seg.get("is_overlap")
-        })
-
-        # Persist updated speakers_detected
-        async with get_db() as db:
-            await db.execute(
-                text("UPDATE recordings SET speakers_detected = :sd WHERE id = :id AND user_id = :uid"),
-                {"sd": to_json(speakers_detected), "id": recording_id, "uid": user_id},
-            )
-            await db.commit()
-        logger.info(f"[VoiceTrain/MoM] {recording_id} — speakers_detected updated: {speakers_detected}")
-
-        # Check if a MoM exists for this recording
-        async with get_db() as db:
-            r = await db.execute(
-                text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid LIMIT 1"),
-                {"rid": recording_id, "uid": user_id},
-            )
-            mom_row = r.fetchone()
-
-        if not mom_row:
-            logger.info(f"[VoiceTrain/MoM] {recording_id} — No existing MoM; skipping regeneration.")
-            return
-
-        # Regenerate the MoM using the existing helper from rereid_pipeline
-        from tasks.rereid_pipeline import _regenerate_mom
-        loop = _asyncio.get_event_loop()
-        await _regenerate_mom(
-            recording_id=recording_id,
-            user_id=user_id,
-            final_segments=transcript,
-            raw_text=raw_text,
-            speakers_detected=speakers_detected,
-            loop=loop,
-        )
-        logger.info(f"[VoiceTrain/MoM] {recording_id} — MoM regeneration complete ✓")
-
-    except Exception as e:
-        logger.warning(
-            f"[VoiceTrain/MoM] {recording_id} — MoM refresh failed (non-fatal): {e}",
-            exc_info=True,
-        )

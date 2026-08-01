@@ -384,159 +384,336 @@ def _align_segments_chunked(
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -> Dict[str, Any]:
+def transcribe(
+    file_path: str,
+    initial_prompt: str = "",
+    language: str = None,
+    user_settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file with WhisperX and run the forced-alignment step
-    to obtain precise word-level timestamps.
-
-    Args:
-        file_path: Path to a WAV audio file.
-        initial_prompt: Optional Whisper initial_prompt for context injection
-                        (global prompt + meeting prompt + vocabulary).
-        language: Optional detected language code to skip automatic language detection.
-
-    Returns:
-        {
-          "segments": [
-            {
-              "start": float,
-              "end": float,
-              "text": str,
-              "words": [{"word": str, "start": float, "end": float, "probability": float}],
-              "avg_logprob": float,
-            }
-          ],
-          "language": str,
-          "raw_text": str,
-          # Extra key consumed by pipeline.py for word→speaker assignment:
-          "aligned_result": dict,   # raw WhisperX aligned output
-        }
+    to obtain precise word-level timestamps. Supports configurable low-volume speech
+    preservation features: Audio Normalization, Adaptive VAD, Speech Padding,
+    Segment Merging, and Low-Volume Recovery Pass.
     """
     import whisperx
     import gc
+    import soundfile as sf
+    import numpy as np
+
+    cfg = user_settings or {}
+
+    # Extract pipeline toggles and parameters
+    enable_transcription_vad = bool(cfg.get("enable_transcription_vad", cfg.get("enable_vad", getattr(settings, "ENABLE_TRANSCRIPTION_VAD", getattr(settings, "ENABLE_VAD", True)))))
+    enable_alignment_vad = bool(cfg.get("enable_alignment_vad", getattr(settings, "ENABLE_ALIGNMENT_VAD", True)))
+
+    enable_audio_norm = bool(cfg.get("enable_audio_normalization", getattr(settings, "ENABLE_AUDIO_NORMALIZATION", True)))
+    norm_target_dbfs = float(cfg.get("norm_target_dbfs", getattr(settings, "NORM_TARGET_DBFS", -3.0)))
+    norm_compression_ratio = float(cfg.get("norm_compression_ratio", getattr(settings, "NORM_COMPRESSION_RATIO", 2.0)))
+
+    enable_adaptive_vad = bool(cfg.get("enable_adaptive_vad", getattr(settings, "ENABLE_ADAPTIVE_VAD", True)))
+    vad_speech_threshold = float(cfg.get("vad_speech_threshold", getattr(settings, "VAD_SPEECH_THRESHOLD", 0.15)))
+    vad_silence_threshold = float(cfg.get("vad_silence_threshold", getattr(settings, "VAD_SILENCE_THRESHOLD", 0.10)))
+    vad_min_speech_ms = int(cfg.get("vad_min_speech_ms", getattr(settings, "VAD_MIN_SPEECH_MS", 250)))
+    vad_min_silence_ms = int(cfg.get("vad_min_silence_ms", getattr(settings, "VAD_MIN_SILENCE_MS", 400)))
+
+    enable_speech_padding = bool(cfg.get("enable_speech_padding", getattr(settings, "ENABLE_SPEECH_PADDING", True)))
+    speech_pad_ms = int(cfg.get("speech_pad_ms", getattr(settings, "SPEECH_PAD_MS", 400)))
+
+    enable_segment_merging = bool(cfg.get("enable_speech_segment_merging", getattr(settings, "ENABLE_SPEECH_SEGMENT_MERGING", True)))
+    max_merge_silence_ms = int(cfg.get("max_merge_silence_ms", getattr(settings, "MAX_MERGE_SILENCE_MS", 500)))
+
+    enable_low_volume_recovery = bool(cfg.get("enable_low_volume_recovery", getattr(settings, "ENABLE_LOW_VOLUME_RECOVERY", True)))
+    recovery_energy_threshold = float(cfg.get("recovery_energy_threshold", getattr(settings, "RECOVERY_ENERGY_THRESHOLD", -45.0)))
+    recovery_min_duration_ms = int(cfg.get("recovery_min_duration_ms", getattr(settings, "RECOVERY_MIN_DURATION_MS", 300)))
+
+    logger.info(
+        f"[Transcription Settings] "
+        f"TranscriptionVAD={'Enabled (Region Processing)' if enable_transcription_vad else 'Disabled (Direct Full Audio)'}, "
+        f"AlignmentVAD={'Enabled (Region Slicing)' if enable_alignment_vad else 'Disabled (Full Audio Single Pass)'}, "
+        f"AudioNormalization={'Enabled' if enable_audio_norm else 'Disabled'}"
+    )
 
     device, compute_type = _resolve_device()
     model = get_whisperx_model()
 
-    # ── Step 1: Transcribe ────────────────────────────────────────────────
-    logger.info(f"[Transcription] Transcribing {file_path} on device={device} ...")
-    if initial_prompt:
-        logger.info(f"[Transcription] Using initial_prompt ({len(initial_prompt)} chars)")
-    if language:
-        logger.info(f"[Transcription] Reusing pre-detected language: {language}")
+    # ── Step 1: Preprocessing (Audio Normalization & Mild Dynamic Compression)
+    alignment_audio_path = file_path
+    _preprocessed_path: Optional[str] = None
+
+    if enable_audio_norm:
+        try:
+            from services.audio_preprocessing import preprocess_audio_for_alignment
+            _preprocessed_path = preprocess_audio_for_alignment(
+                file_path,
+                normalize_loudness=True,
+                compress_dynamic_range=True,
+                target_dbfs=norm_target_dbfs,
+                compression_ratio=norm_compression_ratio,
+            )
+            if _preprocessed_path and _preprocessed_path != file_path:
+                alignment_audio_path = _preprocessed_path
+                logger.info(f"[Transcription] Audio normalization & compression applied → {alignment_audio_path}")
+        except Exception as norm_err:
+            logger.warning(f"[Transcription] Audio normalization failed ({norm_err}) — using raw WAV")
+
+    # ── Step 2: Primary Whisper Transcription Pass ─────────────────────────
+    transcribe_target_path = alignment_audio_path if enable_audio_norm else file_path
+    if enable_transcription_vad:
+        logger.info(f"[Transcription] Primary Whisper Pass: Transcribing {transcribe_target_path} on device={device} ...")
+    else:
+        logger.info(f"[Transcription] Primary Whisper Pass (Transcription VAD Disabled): Sending complete audio {transcribe_target_path} directly to Whisper on device={device} ...")
 
     transcribe_kwargs = {"batch_size": 8}
-
     if language:
         transcribe_kwargs["language"] = language
     if initial_prompt:
         transcribe_kwargs["initial_prompt"] = initial_prompt
 
     try:
-        raw_result = model.transcribe(file_path, **transcribe_kwargs)
-
+        raw_result = model.transcribe(transcribe_target_path, **transcribe_kwargs)
     except TypeError as e:
         logger.warning(f"Retrying without unsupported kwargs: {e}")
-
         unsupported = str(e)
-
         if "initial_prompt" in unsupported:
             transcribe_kwargs.pop("initial_prompt", None)
-
         if "language" in unsupported:
             transcribe_kwargs.pop("language", None)
+        raw_result = model.transcribe(transcribe_target_path, **transcribe_kwargs)
 
-        raw_result = model.transcribe(file_path, **transcribe_kwargs)
+    detected_lang: str = raw_result.get("language", language or "en")
+    raw_segments = raw_result.get("segments", [])
+    logger.info(f"[Transcription] Primary Whisper Pass complete ✓ Detected language: {detected_lang}, raw segments: {len(raw_segments)}")
 
-    language: str = raw_result.get("language", "en")
-    logger.info(f"[Transcription] Detected language: {language}, raw segments: {len(raw_result.get('segments', []))}")
+    # ── Step 3: Transcription VAD & Low-Volume Recovery Pass ──────────────
+    from services.audio_preprocessing import (
+        detect_speech_regions, apply_speech_padding, merge_speech_segments,
+        detect_rejected_low_volume_regions
+    )
 
-    # ── Step 1b: Normalize segments before alignment ──────────────────────
-    # Extract vocabulary terms from the initial_prompt for canonical reuse.
+    audio_dur = 0.0
+    audio_data = None
+    sr = 16000
+    try:
+        audio_data, sr = sf.read(transcribe_target_path, dtype="float32", always_2d=False)
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+        audio_dur = len(audio_data) / sr
+    except Exception:
+        pass
+
+    speech_regions = None
+    recovered_segments_count = 0
+
+    if enable_transcription_vad:
+        logger.info("[Transcription] Transcription VAD: Enabled — Detecting speech regions and applying VAD post-processing...")
+        if enable_adaptive_vad:
+            speech_regions = detect_speech_regions(
+                transcribe_target_path,
+                aggressiveness=1,
+                speech_quantile=vad_speech_threshold,
+                min_speech_sec=vad_min_speech_ms / 1000.0,
+                min_silence_sec=vad_min_silence_ms / 1000.0,
+            )
+        else:
+            speech_regions = detect_speech_regions(transcribe_target_path)
+
+        if enable_speech_padding and audio_dur > 0:
+            speech_regions = apply_speech_padding(speech_regions, speech_pad_ms, audio_dur)
+
+        if enable_segment_merging:
+            speech_regions = merge_speech_segments(speech_regions, max_merge_silence_ms)
+
+        # ── Low-Volume Recovery Pass (Secondary Whisper Pass on Quiet Regions with VAD Bypassed) ──
+        if enable_low_volume_recovery and audio_data is not None and len(audio_data) > 0:
+            try:
+                recovered_spans = detect_rejected_low_volume_regions(
+                    audio_data, sr, speech_regions,
+                    energy_threshold_db=recovery_energy_threshold,
+                    min_duration_sec=recovery_min_duration_ms / 1000.0,
+                )
+                if recovered_spans:
+                    pad_sec = min(0.5, max(0.3, speech_pad_ms / 1000.0))
+                    pad_ms = int(pad_sec * 1000)
+                    import tempfile
+                    from difflib import SequenceMatcher
+                    from services.audio_preprocessing import _apply_dynamic_range_compression, _normalize_loudness
+                    
+                    total_raw_recovered = 0
+                    total_merged_recovered = 0
+
+                    for r_start, r_end in recovered_spans:
+                        # Extract region with context padding (approx 300-500ms before and after)
+                        padded_start = max(0.0, r_start - pad_sec)
+                        padded_end = min(audio_dur, r_end + pad_sec)
+                        s_idx = int(padded_start * sr)
+                        e_idx = int(padded_end * sr)
+                        span_audio = audio_data[s_idx:e_idx]
+                        if len(span_audio) < int(sr * 0.2):
+                            continue
+                        
+                        # Apply selective adaptive loudness enhancement to recovery clip
+                        from services.audio_preprocessing import _apply_selective_loudness_enhancement
+                        enhanced_span, rec_stats = _apply_selective_loudness_enhancement(
+                            span_audio,
+                            sr=sr,
+                            target_dbfs=-18.0,
+                        )
+
+                        tmp_rec = None
+                        try:
+                            fd, tmp_rec = tempfile.mkstemp(suffix="_rec.wav")
+                            os.close(fd)
+                            sf.write(tmp_rec, enhanced_span, sr, subtype="PCM_16")
+
+                            # Direct Whisper pass with VAD explicitly bypassed
+                            rec_kwargs = {
+                                "batch_size": 1,
+                                "language": detected_lang,
+                                "vad_filter": False,
+                            }
+                            if initial_prompt:
+                                rec_kwargs["initial_prompt"] = initial_prompt
+
+                            try:
+                                rec_res = model.transcribe(tmp_rec, **rec_kwargs)
+                            except TypeError:
+                                rec_kwargs.pop("vad_filter", None)
+                                rec_res = model.transcribe(tmp_rec, **rec_kwargs)
+
+                            for r_seg in rec_res.get("segments", []):
+                                txt = r_seg.get("text", "").strip()
+                                if not txt:
+                                    continue
+                                
+                                total_raw_recovered += 1
+                                seg_start = round(r_seg.get("start", 0.0) + padded_start, 3)
+                                seg_end = round(r_seg.get("end", 0.0) + padded_start, 3)
+                                shifted_seg = dict(r_seg)
+                                shifted_seg["start"] = seg_start
+                                shifted_seg["end"] = seg_end
+
+                                # Deduplicate against primary raw_segments
+                                txt_lower = txt.lower()
+                                is_dup = False
+                                for ex in raw_segments:
+                                    ex_txt = ex.get("text", "").strip().lower()
+                                    ex_start = ex.get("start", 0.0)
+                                    ex_end = ex.get("end", 0.0)
+                                    if abs(seg_start - ex_start) < 2.5 or abs(seg_end - ex_end) < 2.5:
+                                        if txt_lower in ex_txt or ex_txt in txt_lower:
+                                            is_dup = True
+                                            break
+                                        if SequenceMatcher(None, txt_lower, ex_txt).ratio() > 0.7:
+                                            is_dup = True
+                                            break
+
+                                if not is_dup:
+                                    raw_segments.append(shifted_seg)
+                                    total_merged_recovered += 1
+
+                        except Exception as rec_err:
+                            logger.debug(f"[LowVolumeRecovery] Recovery pass on span [{r_start:.2f}s-{r_end:.2f}s] failed: {rec_err}")
+                        finally:
+                            if tmp_rec and os.path.exists(tmp_rec):
+                                try:
+                                    os.unlink(tmp_rec)
+                                except OSError:
+                                    pass
+
+                    if total_merged_recovered > 0:
+                        raw_segments.sort(key=lambda s: s.get("start", 0.0))
+
+                    logger.info(
+                        f"[LowVolumeRecovery]\n"
+                        f"  - Candidate Regions: {len(recovered_spans)}\n"
+                        f"  - Context Padding: {pad_ms} ms\n"
+                        f"  - Audio Enhancement: Selective Adaptive Loudness Enhancement Applied\n"
+                        f"    - Avg Input Loudness: {rec_stats['avg_input_dbfs']} dBFS\n"
+                        f"    - Quiet Windows Detected: {rec_stats['quiet_windows_pct']}%\n"
+                        f"    - Avg Gain Applied: +{rec_stats['avg_gain_applied_db']} dB\n"
+                        f"    - Max Gain Applied: +{rec_stats['max_gain_applied_db']} dB\n"
+                        f"    - Peak Limiter Activated: {rec_stats['limiter_activated']}\n"
+                        f"  - Recovery Whisper Pass: Executed (VAD Bypassed)\n"
+                        f"  - Recovery Segments Produced: {total_raw_recovered}\n"
+                        f"  - New Segments Merged: {total_merged_recovered}"
+                    )
+                else:
+                    logger.info(
+                        f"[LowVolumeRecovery]\n"
+                        f"  - Candidate Regions: 0\n"
+                        f"  - Context Padding: {speech_pad_ms} ms\n"
+                        f"  - Audio Enhancement: Gain + Compression Configured\n"
+                        f"  - Recovery Whisper Pass: Skipped (No low-volume candidate regions found above threshold {recovery_energy_threshold} dBFS)"
+                    )
+            except Exception as low_vol_err:
+                logger.warning(f"[LowVolumeRecovery] Recovery pass failed ({low_vol_err}) — keeping primary segments")
+    else:
+        logger.info("[Transcription] Transcription VAD: Disabled — bypassing speech region detection, padding, merging, and low-volume recovery pass.")
+
+    # ── Step 4: Normalize Text & Run Forced Alignment ─────────────────────
     vocab_terms: Optional[List[str]] = None
     if initial_prompt:
         try:
-            # Heuristic: extract capitalized words and quoted terms from prompt
             import re
-            # Pull any "Terms: X, Y, Z." or capitalized proper nouns
             terms_match = re.search(r"Terms:\s*([^\n]+)", initial_prompt)
             if terms_match:
                 vocab_terms = [t.strip().rstrip(".") for t in terms_match.group(1).split(",") if t.strip()]
         except Exception:
             vocab_terms = None
 
-    raw_segments = raw_result.get("segments", [])
     try:
         from services.transcript_normalizer import normalize_segments_for_alignment
         normalized_segments = normalize_segments_for_alignment(raw_segments, vocab_terms)
-        
-        logger.info(
-            f"[Transcription] Text normalization applied to {len(normalized_segments)} segments "
-            f"(vocab_terms={len(vocab_terms) if vocab_terms else 0})"
-        )
     except Exception as norm_err:
         logger.warning(f"[Transcription] Text normalization failed ({norm_err}) — using raw segments")
         normalized_segments = raw_segments
 
-    # ── Step 1c: Audio preprocessing before alignment ─────────────────────
-    alignment_audio_path = file_path
-    _preprocessed_path: Optional[str] = None
+    # ── Step 5: Word Alignment VAD & WhisperX Alignment ───────────────────
+    if enable_alignment_vad:
+        alignment_speech_regions = speech_regions
+        if alignment_speech_regions is None:
+            alignment_speech_regions = detect_speech_regions(alignment_audio_path)
+        logger.info(f"[Alignment] Alignment VAD: Enabled — running region-chunked WhisperX forced alignment on {len(alignment_speech_regions or [])} regions")
+    else:
+        alignment_speech_regions = None
+        logger.info("[Alignment] Alignment VAD: Disabled — running full audio single-pass WhisperX forced alignment")
 
-    # ── Step 2: Forced alignment (word-level timestamps) ──────────────────
-    logger.info("[Transcription] Running forced alignment ...")
     model_a = None
-    aligned_result = raw_result  # default fallback
+    aligned_result = {"segments": raw_segments}
 
     try:
         align_model_dir, model_cache_only = _resolve_align_model_dir()
-
         model_name = "facebook/wav2vec2-base"
-        cache_key = (language, device, model_name)
+        cache_key = (detected_lang, device, model_name)
+
         if cache_key in _align_model_cache:
             model_a, metadata = _align_model_cache[cache_key]
-            logger.info(f"[Transcription] Reusing cached alignment model for key {cache_key}")
         else:
             from services.device_utils import log_gpu_memory
             log_gpu_memory("Pre-load Alignment Model")
             model_a, metadata = whisperx.load_align_model(
-                language_code=language,
+                language_code=detected_lang,
                 device=device,
                 model_name=model_name,
                 model_dir=align_model_dir,
                 model_cache_only=model_cache_only,
             )
             _align_model_cache[cache_key] = (model_a, metadata)
-            logger.info(
-                f"[Transcription] Alignment model loaded and cached: {model_name} "
-                f"(dir={align_model_dir}, cache_only={model_cache_only})"
-            )
-            log_gpu_memory("Post-load Alignment Model")
 
-
-        # ── Step 2a: Detect speech regions for chunked alignment ──────────
-   
         aligned_result = _align_segments_chunked(
             normalized_segments,
             alignment_audio_path,
             model_a,
             metadata,
             device,
-            speech_regions=None,
+            speech_regions=alignment_speech_regions,
         )
-        logger.info(
-            f"[Transcription] Alignment complete ✓ "
-            f"({len(aligned_result.get('segments', []))} segments)"
-        )
-
-    except Exception as e:
-        logger.warning(
-            f"[Transcription] Alignment failed ({e}). "
-            "Falling back to unaligned segments. "
-            "Ensure facebook/wav2vec2-base is present as align_engine in MODELS_DIR."
-        )
-        aligned_result = raw_result
+        logger.info(f"[Transcription] Forced alignment complete ✓ ({len(aligned_result.get('segments', []))} segments)")
+    except Exception as align_err:
+        logger.warning(f"[Transcription] Alignment failed ({align_err}). Falling back to raw segments.")
+        aligned_result = {"segments": raw_segments}
     finally:
-        # Clean up preprocessed temp WAV
         if _preprocessed_path and _preprocessed_path != file_path:
             try:
                 from services.audio_preprocessing import cleanup_temp_wav
@@ -544,7 +721,7 @@ def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -
             except Exception:
                 pass
 
-    # ── Step 3: Normalise output schema ───────────────────────────────────
+    # ── Step 6: Normalize Output Schema & Log Stage Statistics ────────────
     segments: List[Dict[str, Any]] = []
     raw_parts: List[str] = []
 
@@ -556,18 +733,16 @@ def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -
         for w in seg.get("words", []):
             w_start = _safe_float(w.get("start"), seg_start)
             w_end = _safe_float(w.get("end"), seg_end)
-            # WhisperX uses "score" instead of "probability"
             words.append({
                 "word": w.get("word", "").strip(),
                 "start": w_start,
                 "end": w_end,
-                # Expose as "probability" to keep downstream code unchanged
                 "probability": round(float(w.get("score", w.get("probability", 1.0))), 4),
             })
 
         text = seg.get("text", "").strip()
         if not text:
-            continue  # skip empty segments
+            continue
 
         segments.append({
             "start": seg_start,
@@ -578,12 +753,20 @@ def transcribe(file_path: str, initial_prompt: str = "", language: str = None) -
         })
         raw_parts.append(text)
 
-    logger.info(f"[Transcription] Normalized {len(segments)} segments, {sum(len(s['words']) for s in segments)} words total")
+    total_words_count = sum(len(s["words"]) for s in segments)
+
+    logger.info(
+        f"[Transcription Pipeline Final Statistics]\n"
+        f"  - Audio Duration: {audio_dur:.2f}s\n"
+        f"  - Preprocessing Normalization: {'Applied' if enable_audio_norm else 'Disabled'}\n"
+        f"  - Low-Volume Recovery Segments Added: {recovered_segments_count}\n"
+        f"  - Final Transcript Segments: {len(segments)} ({total_words_count} total words)"
+    )
 
     return {
         "segments": segments,
-        "language": language,
+        "language": detected_lang,
         "raw_text": " ".join(raw_parts),
-        # Pipeline uses this for word-level speaker assignment
         "aligned_result": aligned_result,
     }
+

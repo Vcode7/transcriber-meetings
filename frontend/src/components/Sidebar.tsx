@@ -3,17 +3,19 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
-  Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database,
+  Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
 import { useJobsStore } from '../store/jobs'
+import { useRecordingStore } from '../store/recording'
 import api from '../api/client'
 
 const NAV = [
   { to: '/dashboard', icon: Mic, label: 'Record', end: true },
   { to: '/dashboard/tab-audio', icon: MonitorSpeaker, label: 'Tab Audio' },
   { to: '/dashboard/upload', icon: Upload, label: 'Upload' },
+  { to: '/dashboard/video-upload', icon: Video, label: 'Video' },
   { to: '/dashboard/history', icon: History, label: 'History' },
   { to: '/dashboard/dictionary', icon: BookOpen, label: 'Dictionary' },
   { to: '/dashboard/global-context', icon: Database, label: 'Global Context' },
@@ -30,6 +32,25 @@ export default function Sidebar() {
   const jobs = useJobsStore((s) => s.jobs)
   const navigate = useNavigate()
   const [loggingOut, setLoggingOut] = useState(false)
+
+  const recordingState = useRecordingStore((s) => s.state)
+  const recordingType = useRecordingStore((s) => s.recordingType)
+  const recordingDuration = useRecordingStore((s) => s.duration)
+  const isRecordingActive = recordingState === 'recording' || recordingState === 'paused'
+
+  const formatRecDuration = (s: number) => {
+    const m = Math.floor(s / 60).toString().padStart(2, '0')
+    const sec = (s % 60).toString().padStart(2, '0')
+    return `${m}:${sec}`
+  }
+
+  const handleRecordingBannerClick = () => {
+    if (recordingType === 'tab') {
+      navigate('/dashboard/tab-audio')
+    } else {
+      navigate('/dashboard')
+    }
+  }
 
   // Active jobs = any job not yet done/error
   const activeJobs = jobs.filter((j) => j.status !== 'done' && j.status !== 'error')
@@ -72,6 +93,7 @@ export default function Sidebar() {
       'record': '/dashboard',
       'upload': '/dashboard/upload',
       'tab-audio': '/dashboard/tab-audio',
+      'video-upload': '/dashboard/video-upload',
     }
     navigate(sourceRoutes[primaryJob.source] ?? '/dashboard')
   }
@@ -105,6 +127,44 @@ export default function Sidebar() {
           </span>
         )}
       </div>
+
+      {/* ── Active background recording banner ── */}
+      {isRecordingActive && (
+        <div
+          className="processing-sidebar-banner"
+          onClick={handleRecordingBannerClick}
+          style={{
+            cursor: 'pointer',
+            background: recordingState === 'paused' ? 'hsl(45 90% 50% / .15)' : 'hsl(var(--destructive) / .15)',
+            border: `1.5px solid ${recordingState === 'paused' ? 'hsl(45 90% 50% / .4)' : 'hsl(var(--destructive) / .35)'}`,
+            color: recordingState === 'paused' ? 'hsl(45 90% 45%)' : 'hsl(var(--destructive))',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '.45rem .75rem',
+            borderRadius: '8px',
+            margin: '0 8px 8px 8px',
+          }}
+          title="Click to return to active recording"
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: recordingState === 'paused' ? 'hsl(45 90% 50%)' : 'hsl(var(--destructive))',
+              flexShrink: 0,
+              boxShadow: '0 0 6px currentColor',
+            }}
+            className={recordingState === 'paused' ? '' : 'animate-pulse-rec'}
+          />
+          {!collapsed && (
+            <span style={{ fontSize: '.76rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {recordingState === 'paused' ? 'PAUSED' : 'RECORDING'} ({formatRecDuration(recordingDuration)})
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ── Active jobs banner (shown when any job is running) ── */}
       {hasActiveJob && (

@@ -51,38 +51,79 @@ def get_duration(file_path: str) -> float:
     return info.duration
 
 
-def validate_audio(file_path: str) -> Tuple[bool, str]:
+def validate_audio(
+    file_path: str,
+    enabled: bool = True,
+    min_duration: float = MIN_DURATION_SECONDS,
+    min_rms: float = MIN_RMS_THRESHOLD
+) -> Tuple[bool, str]:
     """
     Validate an audio recording.
     Returns (is_valid, reason).
 
     Memory-efficient implementation:
       - Duration is read from the file header only (sf.info).
-      - RMS is computed from the first RMS_SAMPLE_SECONDS only (not the full file).
-      - There is NO upper-bound duration limit.
+      - Multi-window peak 1-second RMS is sampled (Start, Middle, End) so that
+        leading silence/pauses at the beginning of a recording do not cause false rejections.
+      - If enabled is False, validation is bypassed completely.
     """
+    if not enabled:
+        return True, "ok"
+
     try:
         info = sf.info(file_path)
         duration = info.duration
         sr = info.samplerate
+        frames_total = info.frames
 
-        if duration < MIN_DURATION_SECONDS:
-            return False, f"Recording too short ({duration:.1f}s). Minimum is {MIN_DURATION_SECONDS}s."
+        if duration < min_duration:
+            return False, f"Recording too short ({duration:.1f}s). Minimum is {min_duration}s."
 
-        # Compute RMS from first RMS_SAMPLE_SECONDS to avoid loading the whole file.
-        sample_frames = int(min(duration, RMS_SAMPLE_SECONDS) * sr)
+        # Strategic 15-second sampling windows across the recording (Start, Middle, End)
+        sample_dur = 15.0
+        sample_frames = int(sample_dur * sr)
+
+        offsets_sec = [0.0]
+        if duration > 30.0:
+            offsets_sec.append(duration / 2.0)
+            offsets_sec.append(max(0.0, duration - sample_dur))
+
+        max_rms_found = 0.0
+
         with sf.SoundFile(file_path) as f:
-            audio_sample = f.read(frames=sample_frames, dtype="float32", always_2d=False)
+            for sec in offsets_sec:
+                seek_frame = int(sec * sr)
+                if seek_frame >= frames_total:
+                    continue
+                f.seek(seek_frame)
+                read_n = min(sample_frames, frames_total - seek_frame)
+                audio_chunk = f.read(frames=read_n, dtype="float32", always_2d=False)
 
-        # Convert to mono if multi-channel
-        if audio_sample.ndim > 1:
-            audio_sample = audio_sample.mean(axis=1)
+                if audio_chunk.ndim > 1:
+                    audio_chunk = audio_chunk.mean(axis=1)
 
-        rms = float(np.sqrt(np.mean(audio_sample ** 2)))
-        if rms < MIN_RMS_THRESHOLD:
+                if len(audio_chunk) == 0:
+                    continue
+
+                # Compute 1-second sliding frame RMS values
+                win_size = sr
+                if len(audio_chunk) <= win_size:
+                    chunk_rms = float(np.sqrt(np.mean(audio_chunk ** 2)))
+                    max_rms_found = max(max_rms_found, chunk_rms)
+                else:
+                    for i in range(0, len(audio_chunk) - win_size + 1, win_size // 2):
+                        frame = audio_chunk[i:i + win_size]
+                        frame_rms = float(np.sqrt(np.mean(frame ** 2)))
+                        max_rms_found = max(max_rms_found, frame_rms)
+
+                # Early exit if valid speech signal is detected
+                if max_rms_found >= min_rms:
+                    break
+
+        if max_rms_found < min_rms:
             return (
                 False,
-                f"Recording too quiet (RMS={rms:.4f}). Please speak closer to the microphone.",
+                f"Recording too quiet (Peak RMS={max_rms_found:.4f}). Minimum threshold is {min_rms}.",
             )
 
         return True, "ok"

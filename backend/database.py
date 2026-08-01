@@ -163,6 +163,24 @@ async def connect_db():
                 max_tokens_collection_compare INTEGER NOT NULL DEFAULT 1500,
                 max_tokens_collection_topic_growth INTEGER NOT NULL DEFAULT 1500,
                 max_tokens_vocab_extractor INTEGER NOT NULL DEFAULT 512,
+                enable_vad INTEGER NOT NULL DEFAULT 1,
+                enable_transcription_vad INTEGER NOT NULL DEFAULT 1,
+                enable_alignment_vad INTEGER NOT NULL DEFAULT 1,
+                enable_audio_normalization INTEGER NOT NULL DEFAULT 1,
+                norm_target_dbfs REAL NOT NULL DEFAULT -3.0,
+                norm_compression_ratio REAL NOT NULL DEFAULT 2.0,
+                enable_adaptive_vad INTEGER NOT NULL DEFAULT 1,
+                vad_speech_threshold REAL NOT NULL DEFAULT 0.15,
+                vad_silence_threshold REAL NOT NULL DEFAULT 0.10,
+                vad_min_speech_ms INTEGER NOT NULL DEFAULT 250,
+                vad_min_silence_ms INTEGER NOT NULL DEFAULT 400,
+                enable_speech_padding INTEGER NOT NULL DEFAULT 1,
+                speech_pad_ms INTEGER NOT NULL DEFAULT 400,
+                enable_speech_segment_merging INTEGER NOT NULL DEFAULT 1,
+                max_merge_silence_ms INTEGER NOT NULL DEFAULT 500,
+                enable_low_volume_recovery INTEGER NOT NULL DEFAULT 1,
+                recovery_energy_threshold REAL NOT NULL DEFAULT -45.0,
+                recovery_min_duration_ms INTEGER NOT NULL DEFAULT 300,
                 updated_at TEXT NOT NULL
             )
         """))
@@ -177,6 +195,8 @@ async def connect_db():
                 duration REAL DEFAULT 0,
                 planned_start_time TEXT,
                 actual_start_time TEXT,
+                planned_end_time TEXT,
+                actual_end_time TEXT,
                 participants TEXT NOT NULL DEFAULT '[]',
                 introduction TEXT,
                 points_discussed TEXT NOT NULL DEFAULT '[]',
@@ -200,6 +220,8 @@ async def connect_db():
         for _col, _def in [
             ("planned_start_time", "TEXT"),
             ("actual_start_time",  "TEXT"),
+            ("planned_end_time",   "TEXT"),
+            ("actual_end_time",    "TEXT"),
             ("introduction",       "TEXT"),
             ("points_discussed",   "TEXT NOT NULL DEFAULT '[]'"),
             ("conclusion",         "TEXT"),
@@ -359,6 +381,7 @@ async def connect_db():
         for col_def in (
             "chunk_ids TEXT DEFAULT '[]'",
             "is_chunked INTEGER NOT NULL DEFAULT 0",
+            "speaker_mappings TEXT DEFAULT '{}'",
         ):
             try:
                 await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
@@ -466,6 +489,76 @@ async def connect_db():
                 await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
             except Exception:
                 pass  # column already exists
+
+        # ── Migration: Add ROM (Record of Meeting) data column ────────────────
+        try:
+            await conn.execute(text("ALTER TABLE recordings ADD COLUMN rom_data TEXT DEFAULT NULL"))
+        except Exception:
+            pass  # column already exists
+
+        # ── Migration: Add Video support columns ──────────────────────────────
+        # video_transcript — JSON array of merged OCR blocks: [{start, end, text}]
+        #                    populated asynchronously after video upload; NULL for audio-only recordings.
+        # source_type      — 'audio' (default) or 'video'; used to activate video OCR context in ROM Stage 1.
+        for col_def in (
+            "video_transcript TEXT DEFAULT NULL",
+            "source_type TEXT NOT NULL DEFAULT 'audio'",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+
+        # ── Migration: Add ROM settings columns to user_settings ─────────────
+        for col_name, col_type in [
+            ("rom_transcript_window", "REAL NOT NULL DEFAULT 2.0"),
+            ("rom_meeting_top_k", "INTEGER NOT NULL DEFAULT 5"),
+            ("rom_global_top_k", "INTEGER NOT NULL DEFAULT 3"),
+            ("rom_windows_per_batch", "INTEGER NOT NULL DEFAULT 5"),
+            ("max_tokens_rom_discussion", "INTEGER NOT NULL DEFAULT 4096"),
+            ("max_tokens_rom_polish", "INTEGER NOT NULL DEFAULT 4096"),
+            ("max_tokens_rom_enhance_window", "INTEGER NOT NULL DEFAULT 4096"),
+            ("max_tokens_rom_deduplicate", "INTEGER NOT NULL DEFAULT 2048"),
+            ("max_tokens_rom_agenda", "INTEGER NOT NULL DEFAULT 2048"),
+            ("max_tokens_rom_mom_expansion", "INTEGER NOT NULL DEFAULT 3000"),
+            ("max_tokens_rom_agenda_assign_batch", "INTEGER NOT NULL DEFAULT 4096"),
+            ("max_tokens_rom_agenda_doc_points", "INTEGER NOT NULL DEFAULT 1024"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
+            except Exception:
+                pass  # column already exists
+
+        # ── Migration: Add Low-Volume Speech Transcription columns to user_settings ─
+        for col_name, col_type in [
+            ("enable_vad", "INTEGER NOT NULL DEFAULT 1"),
+            ("enable_transcription_vad", "INTEGER NOT NULL DEFAULT 1"),
+            ("enable_alignment_vad", "INTEGER NOT NULL DEFAULT 1"),
+            ("enable_audio_normalization", "INTEGER NOT NULL DEFAULT 1"),
+            ("norm_target_dbfs", "REAL NOT NULL DEFAULT -3.0"),
+            ("norm_compression_ratio", "REAL NOT NULL DEFAULT 2.0"),
+            ("enable_adaptive_vad", "INTEGER NOT NULL DEFAULT 1"),
+            ("vad_speech_threshold", "REAL NOT NULL DEFAULT 0.15"),
+            ("vad_silence_threshold", "REAL NOT NULL DEFAULT 0.10"),
+            ("vad_min_speech_ms", "INTEGER NOT NULL DEFAULT 250"),
+            ("vad_min_silence_ms", "INTEGER NOT NULL DEFAULT 400"),
+            ("enable_speech_padding", "INTEGER NOT NULL DEFAULT 1"),
+            ("speech_pad_ms", "INTEGER NOT NULL DEFAULT 400"),
+            ("enable_speech_segment_merging", "INTEGER NOT NULL DEFAULT 1"),
+            ("max_merge_silence_ms", "INTEGER NOT NULL DEFAULT 500"),
+            ("enable_low_volume_recovery", "INTEGER NOT NULL DEFAULT 1"),
+            ("recovery_energy_threshold", "REAL NOT NULL DEFAULT -45.0"),
+            ("recovery_min_duration_ms", "INTEGER NOT NULL DEFAULT 300"),
+            ("enable_audio_validation", "INTEGER NOT NULL DEFAULT 1"),
+            ("min_audio_duration_seconds", "REAL NOT NULL DEFAULT 2.0"),
+            ("min_audio_rms_threshold", "REAL NOT NULL DEFAULT 0.003"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
+            except Exception:
+                pass  # column already exists
+
 
         # ── Prompt Templates — system-wide, shared by all users ─────────────────
         # Stores custom overrides for every AI prompt used in the application.

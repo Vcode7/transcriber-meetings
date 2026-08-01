@@ -111,6 +111,13 @@ def unload_all_models():
         unload_text_embedder()
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload text embedder: {e}")
+
+    # 7. Unload Video OCR pipeline (RapidOCR / ONNX Runtime)
+    try:
+        from services.video_processing_service import unload_video_ocr_pipeline
+        unload_video_ocr_pipeline()
+    except Exception as e:
+        logger.warning(f"[Pipeline] Failed to unload Video OCR pipeline: {e}")
         
     # Force garbage collection and CUDA cache empty
     import gc
@@ -584,11 +591,24 @@ async def _run_pipeline_impl(
         logger.info(f"[Pipeline] {recording_id} — STAGE 1: Transcribing {file_path}")
         await _update_status_safe(recording_id, "processing", {"progress": "transcribing"})
 
+        user_settings_dict = {}
+        try:
+            async with get_db() as db:
+                r = await db.execute(
+                    text("SELECT * FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                us_row = r.mappings().fetchone()
+                if us_row:
+                    user_settings_dict = dict(us_row)
+        except Exception:
+            pass
+
         _t0_transcription = time.monotonic()
         try:
             t_result = await loop.run_in_executor(
                 None,
-                lambda: transcribe(file_path, initial_prompt=initial_prompt),
+                lambda: transcribe(file_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
             )
         except Exception as e:
             logger.error(f"[Pipeline] {recording_id} — Transcription FAILED: {e}", exc_info=True)
@@ -801,11 +821,12 @@ async def _run_pipeline_impl(
                 "overlap_regions": seg.get("overlap_regions", []),
             })
 
-        speakers_detected = list({
-            s["speaker_label"]
-            for s in final_segments
-            if not s.get("is_overlap") and s["speaker_label"] not in ("Unknown",)
-        })
+        speakers_detected = []
+        for s in final_segments:
+            lbl = s.get("speaker_label") or s.get("speaker")
+            if lbl and str(lbl).strip() and str(lbl).strip() not in ("Unknown", "null", "None"):
+                if str(lbl).strip() not in speakers_detected:
+                    speakers_detected.append(str(lbl).strip())
         _analytics["final_segment_count"] = len(final_segments)
         _analytics["speakers_detected_count"] = len(speakers_detected)
         _analytics["overlap_segments_in_final"] = sum(1 for s in final_segments if s.get("is_overlap"))
@@ -1769,11 +1790,24 @@ async def _run_finalize_pipeline_impl(
         except Exception as e:
             logger.warning(f"[FinalPipeline] {recording_id} — Prompt build failed (non-fatal): {e}")
 
+        user_settings_dict = {}
+        try:
+            async with get_db() as db:
+                r = await db.execute(
+                    text("SELECT * FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                us_row = r.mappings().fetchone()
+                if us_row:
+                    user_settings_dict = dict(us_row)
+        except Exception:
+            pass
+
         _t0_transcription = time.monotonic()
         try:
             t_result = await loop.run_in_executor(
                 None,
-                lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language),
+                lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language, user_settings=user_settings_dict),
             )
             full_raw_text = t_result.get("raw_text", "")
             language = t_result.get("language", "en")

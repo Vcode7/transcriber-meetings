@@ -1523,7 +1523,10 @@ async def get_status_payload() -> dict:
         try:
             # Query nvidia-smi command directly
             cmd = ["nvidia-smi", "--query-gpu=name,driver_version,utilization.gpu,memory.used,memory.total,memory.free,temperature.gpu,power.draw", "--format=csv,noheader,nounits"]
-            out = subprocess.check_output(cmd, text=True).strip()
+            sub_kwargs = {"text": True}
+            if sys.platform == "win32":
+                sub_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+            out = subprocess.check_output(cmd, **sub_kwargs).strip()
             parts = [p.strip() for p in out.split(",")]
             gpu_info["name"] = parts[0]
             gpu_info["driver_version"] = parts[1]

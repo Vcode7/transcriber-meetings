@@ -332,11 +332,12 @@ async def _run_reidentify_impl(
             "avg_logprob": seg.get("avg_logprob", 0.0),
         })
 
-    speakers_detected = list({
-        s["speaker_label"]
-        for s in final_segments
-        if not s.get("is_overlap") and s["speaker_label"] not in ("Unknown",)
-    })
+    speakers_detected = []
+    for s in final_segments:
+        lbl = s.get("speaker_label") or s.get("speaker")
+        if lbl and str(lbl).strip() and str(lbl).strip() not in ("Unknown", "null", "None"):
+            if str(lbl).strip() not in speakers_detected:
+                speakers_detected.append(str(lbl).strip())
     logger.info(f"[ReID] {recording_id} — Speakers detected: {speakers_detected}")
 
     # ── Stage 6: Persist updated transcript ───────────────────────────────────
@@ -349,6 +350,7 @@ async def _run_reidentify_impl(
                     "UPDATE recordings SET "
                     "  transcript = :transcript, "
                     "  speakers_detected = :speakers_detected, "
+                    "  speaker_mappings = :speaker_mappings, "
                     "  status = 'done', "
                     "  progress = NULL, "
                     "  speaker_reid_at = :reid_at "
@@ -357,6 +359,7 @@ async def _run_reidentify_impl(
                 {
                     "transcript": to_json(final_segments),
                     "speakers_detected": to_json(speakers_detected),
+                    "speaker_mappings": to_json({}),
                     "reid_at": dt_to_str(now),
                     "rid": recording_id,
                 },

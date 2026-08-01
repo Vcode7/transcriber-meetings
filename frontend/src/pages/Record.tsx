@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Mic, Square, RotateCcw, Loader, AlertTriangle, Users, Radio, CheckCircle, MoreVertical, FileText, X } from 'lucide-react'
+import { Mic, Square, RotateCcw, Loader, AlertTriangle, Users, Radio, CheckCircle, MoreVertical, FileText, X, Pause, Play } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAudioRecorder } from '../hooks/useAudioRecorder'
 import { useJobsStore } from '../store/jobs'
+import { useRecordingStore } from '../store/recording'
 import WaveformVisualizer from '../components/WaveformVisualizer'
 import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
@@ -155,6 +156,26 @@ export default function RecordPage() {
       setProcessing('record', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
   }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const recoveredSession = useRecordingStore((s) => s.recoveredSession)
+  const clearCrashRecovery = useRecordingStore((s) => s.clearCrashRecovery)
+
+  // Sync background recording status to page stage
+  useEffect(() => {
+    if (recorder.state === 'recording' || recorder.state === 'paused') {
+      setStage('recording')
+    }
+  }, [recorder.state])
+
+  const handleRestoreSession = () => {
+    if (!recoveredSession) return
+    const blob = recoveredSession.blob
+    const url = recoveredSession.url
+    useRecordingStore.setState({ audioBlob: blob, audioUrl: url, state: 'stopped' })
+    setStage('stopped')
+    clearCrashRecovery()
+    toast.success('Restored previous recording session!')
+  }
 
   // Cleanup on unmount
   useEffect(() => {
@@ -469,6 +490,49 @@ export default function RecordPage() {
           )}
         </div>
 
+        {/* Crash Recovery Alert Banner */}
+        {recoveredSession && stage === 'idle' && (
+          <div className="animate-slide-down" style={{
+            margin: '1.25rem 2rem 0',
+            padding: '.85rem 1.25rem',
+            borderRadius: '12px',
+            background: 'hsl(var(--accent) / .12)',
+            border: '1.5px solid hsl(var(--accent) / .4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '1rem'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <AlertTriangle size={20} style={{ color: 'hsl(var(--accent))', flexShrink: 0 }} />
+              <div>
+                <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                  Unsaved Previous Recording Session Found
+                </div>
+                <div style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))' }}>
+                  Recovered {recoveredSession.type === 'tab' ? 'Tab Audio' : 'Microphone'} recording ({Math.floor(recoveredSession.duration / 60)}m {recoveredSession.duration % 60}s).
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+              <button
+                className="btn btn-primary"
+                style={{ fontSize: '.78rem', padding: '.4rem .9rem' }}
+                onClick={handleRestoreSession}
+              >
+                Restore & Process
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: '.78rem', padding: '.4rem .8rem' }}
+                onClick={clearCrashRecovery}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Recording Section — hidden after results arrive */}
         {!result && (<div className="capture-setup" style={{
           padding: '1.75rem 2rem',
@@ -487,7 +551,7 @@ export default function RecordPage() {
           <div style={{ width: '100%' }}>
             <WaveformVisualizer
               analyser={recorder.analyser}
-              isActive={isRecording}
+              isActive={isRecording && recorder.state !== 'paused'}
               height={80}
             />
           </div>
@@ -515,21 +579,21 @@ export default function RecordPage() {
                 <span style={{
                   display: 'flex', alignItems: 'center', gap: '8px',
                   padding: '.4rem 1rem',
-                  background: 'hsl(var(--destructive) / .12)',
-                  border: '1.5px solid hsl(var(--destructive) / .3)',
+                  background: recorder.state === 'paused' ? 'hsl(45 90% 50% / .15)' : 'hsl(var(--destructive) / .12)',
+                  border: `1.5px solid ${recorder.state === 'paused' ? 'hsl(45 90% 50% / .4)' : 'hsl(var(--destructive) / .3)'}`,
                   borderRadius: '999px',
                   fontSize: '.82rem', fontWeight: 600,
-                  color: 'hsl(var(--destructive))',
+                  color: recorder.state === 'paused' ? 'hsl(45 90% 45%)' : 'hsl(var(--destructive))',
                   fontFamily: 'Inter, sans-serif',
                   boxShadow: '0 0 12px hsl(var(--destructive) / .15)'
                 }}>
                   <span style={{
                     width: 8, height: 8, borderRadius: '50%',
-                    background: 'hsl(var(--destructive))',
+                    background: recorder.state === 'paused' ? 'hsl(45 90% 50%)' : 'hsl(var(--destructive))',
                     display: 'inline-block',
-                    boxShadow: '0 0 6px hsl(var(--destructive))'
-                  }} className="animate-pulse-rec" />
-                  RECORDING
+                    boxShadow: '0 0 6px currentColor'
+                  }} className={recorder.state === 'paused' ? '' : 'animate-pulse-rec'} />
+                  {recorder.state === 'paused' ? 'PAUSED' : 'RECORDING'}
                 </span>
               </div>
             )}
@@ -586,19 +650,33 @@ export default function RecordPage() {
               </div>
             )}
             {isRecording && (
-              <button
-                className="record-btn recording"
-                onClick={handleStop}
-                id="main-stop-btn"
-                title="Stop recording"
-                style={{ position: 'relative' }}
-              >
-                {/* Pulsing concentric rings */}
-                <span className="record-ring-1" style={{ position: 'absolute', inset: '-18px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .3)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '0s' }} />
-                <span className="record-ring-2" style={{ position: 'absolute', inset: '-34px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .2)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '0.55s' }} />
-                <span className="record-ring-3" style={{ position: 'absolute', inset: '-50px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .1)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '1.1s' }} />
-                <Square size={32} color="hsl(var(--accent-foreground))" fill="hsl(var(--accent-foreground))" />
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                <button
+                  className="btn btn-ghost"
+                  onClick={recorder.state === 'paused' ? recorder.resume : recorder.pause}
+                  title={recorder.state === 'paused' ? 'Resume recording' : 'Pause recording'}
+                  style={{
+                    borderRadius: '50%', width: '56px', height: '56px', padding: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'hsl(var(--muted) / .6)', border: '1.5px solid hsl(var(--border))'
+                  }}
+                >
+                  {recorder.state === 'paused' ? <Play size={24} color="hsl(var(--ink))" /> : <Pause size={24} color="hsl(var(--ink))" />}
+                </button>
+                <button
+                  className="record-btn recording"
+                  onClick={handleStop}
+                  id="main-stop-btn"
+                  title="Stop recording"
+                  style={{ position: 'relative' }}
+                >
+                  {/* Pulsing concentric rings */}
+                  <span className="record-ring-1" style={{ position: 'absolute', inset: '-18px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .3)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '0s' }} />
+                  <span className="record-ring-2" style={{ position: 'absolute', inset: '-34px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .2)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '0.55s' }} />
+                  <span className="record-ring-3" style={{ position: 'absolute', inset: '-50px', borderRadius: '50%', border: '2px solid hsl(var(--destructive) / .1)', animation: 'recording-ring-pulse 2.4s ease-out infinite', animationDelay: '1.1s' }} />
+                  <Square size={32} color="hsl(var(--accent-foreground))" fill="hsl(var(--accent-foreground))" />
+                </button>
+              </div>
             )}
             {/* 'stopped' stage is now handled automatically — no manual Analyse button */}
             {processing && (

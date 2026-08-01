@@ -20,6 +20,8 @@ interface MomData {
   duration: number
   planned_start_time: string
   actual_start_time: string
+  planned_end_time: string
+  actual_end_time: string
   participants: string[]
   introduction: string
   points_discussed: string[]
@@ -49,6 +51,23 @@ type SaveState = 'saved' | 'saving' | 'unsaved'
 type ProcessState = 'idle' | 'processing' | 'done' | 'error'
 
 // ── Normalize API response to safe MomData ─────────────────────
+// Convert a raw points_discussed entry (string or object) to a clean display string
+function normalizePoint(pt: unknown): string {
+  if (typeof pt === 'string') return pt
+  if (pt && typeof pt === 'object' && !Array.isArray(pt)) {
+    const obj = pt as Record<string, unknown>
+    const topic = typeof obj.topic === 'string' ? obj.topic.trim() : ''
+    const summary = typeof obj.summary === 'string' ? obj.summary.trim()
+      : typeof obj.discussion_point === 'string' ? obj.discussion_point.trim()
+      : typeof obj.text === 'string' ? obj.text.trim() : ''
+    if (topic && summary && !summary.toLowerCase().startsWith(topic.toLowerCase())) {
+      return `${topic}: ${summary}`
+    }
+    return summary || topic || JSON.stringify(pt)
+  }
+  return String(pt ?? '')
+}
+
 function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null {
   if (!raw) return null
   return {
@@ -57,15 +76,21 @@ function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null 
     duration: typeof raw.duration === 'number' ? raw.duration : 0,
     planned_start_time: typeof raw.planned_start_time === 'string' ? raw.planned_start_time : '',
     actual_start_time: typeof raw.actual_start_time === 'string' ? raw.actual_start_time : '',
+    planned_end_time: typeof raw.planned_end_time === 'string' ? raw.planned_end_time : '',
+    actual_end_time: typeof raw.actual_end_time === 'string' ? raw.actual_end_time : '',
     participants: Array.isArray(raw.participants) ? raw.participants.map(String) : [],
     introduction: typeof raw.introduction === 'string' ? raw.introduction : '',
-    points_discussed: Array.isArray(raw.points_discussed) ? raw.points_discussed.map(String) : [],
+    points_discussed: Array.isArray(raw.points_discussed)
+      ? raw.points_discussed.map(normalizePoint).filter(Boolean)
+      : typeof raw.points_discussed === 'string' && (raw.points_discussed as string).trim()
+        ? (raw.points_discussed as string).split('\n').map(s => s.replace(/^[\s\u2022\-*]+/, '').trim()).filter(Boolean)
+        : [],
     action_items: Array.isArray(raw.action_items)
       ? raw.action_items.map((a: unknown) => {
           if (a && typeof a === 'object' && !Array.isArray(a)) {
             const obj = a as Record<string, unknown>
             return {
-              task: String(obj.task ?? ''),
+              task: String(obj.task ?? obj.item ?? obj.description ?? ''),
               owner: String(obj.owner ?? 'Unassigned'),
               deadline: String(obj.deadline ?? 'ASAP'),
             }
@@ -809,11 +834,13 @@ export default function MomPage() {
     const text = [
       'MINUTES OF MEETING',
       '==================',
-      `Meeting Title    : ${mom.title}`,
-      `Date             : ${mom.date}`,
-      `Members          : ${mom.participants.join(', ')}`,
-      ...(mom.planned_start_time ? [`Planned Start    : ${mom.planned_start_time}`] : []),
-      ...(mom.actual_start_time  ? [`Actual Start     : ${mom.actual_start_time}`]  : []),
+      `Meeting Title      : ${mom.title}`,
+      `Date               : ${mom.date}`,
+      `Members            : ${mom.participants.join(', ')}`,
+      ...(mom.planned_start_time ? [`Planned Start Time : ${mom.planned_start_time}`] : []),
+      ...(mom.actual_start_time  ? [`Actual Start Time  : ${mom.actual_start_time}`]  : []),
+      ...(mom.planned_end_time   ? [`Planned End Time   : ${mom.planned_end_time}`]   : []),
+      ...(mom.actual_end_time    ? [`Actual End Time    : ${mom.actual_end_time}`]    : []),
       '',
       'INTRODUCTION',
       '------------',
@@ -821,7 +848,7 @@ export default function MomPage() {
       '',
       'POINTS DISCUSSED',
       '----------------',
-      ...mom.points_discussed.map((p, i) => `${i + 1}. ${p}`),
+      ...mom.points_discussed.map((p, i) => `${i + 1}. ${normalizePoint(p)}`),
       '',
       'ACTION POINTS',
       '-------------',
@@ -989,11 +1016,11 @@ export default function MomPage() {
                 />
               </MomSection>
 
-              {/* ── 4 & 5. Start Times ───────────────────────────── */}
+              {/* ── 4 & 5. Meeting Times ──────────────────────────── */}
               <MomSection title="4 & 5. Meeting Times">
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem' }}>
                   <div>
-                    <FieldLabel>4. Planned Starting Time <span style={{ fontWeight: 400, color: 'hsl(var(--accent))', fontSize: '0.7rem', marginLeft: '4px' }}>(manual entry)</span></FieldLabel>
+                    <FieldLabel>4. Planned Starting Time <span style={{ fontWeight: 400, color: 'hsl(var(--accent))', fontSize: '0.7rem', marginLeft: '4px' }}>(manual)</span></FieldLabel>
                     <input
                       className="input"
                       value={mom.planned_start_time}
@@ -1009,6 +1036,26 @@ export default function MomPage() {
                       value={mom.actual_start_time}
                       onChange={e => update('actual_start_time', e.target.value)}
                       placeholder="e.g. 10:12 AM"
+                      style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel>Planned End Time</FieldLabel>
+                    <input
+                      className="input"
+                      value={mom.planned_end_time}
+                      onChange={e => update('planned_end_time', e.target.value)}
+                      placeholder="e.g. 11:00 AM"
+                      style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
+                    />
+                  </div>
+                  <div>
+                    <FieldLabel>Actual End Time</FieldLabel>
+                    <input
+                      className="input"
+                      value={mom.actual_end_time}
+                      onChange={e => update('actual_end_time', e.target.value)}
+                      placeholder="e.g. 11:18 AM"
                       style={{ width: '100%', padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
                     />
                   </div>
@@ -1033,15 +1080,15 @@ export default function MomPage() {
               {/* ── 7. Points Discussed ──────────────────────────── */}
               <MomSection title="7. Points Discussed">
                 <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '8px', lineHeight: 1.5 }}>
-                  Minimum 3 points, maximum 10 points. Each point should be a complete sentence.
+                  Each point is displayed as <strong>Topic: Summary</strong>. Minimum 3 points.
                 </p>
                 <EditableList
-                  items={mom.points_discussed.length > 0 ? mom.points_discussed : ['', '', '']}
+                  items={mom.points_discussed.length > 0 ? mom.points_discussed.map(pt => normalizePoint(pt)) : ['', '', '']}
                   onChange={items => update('points_discussed', items)}
-                  placeholder="Describe a discussion point..."
+                  placeholder="e.g. Budget Review: The committee reviewed the Q3 budget allocations and approved..."
                   ordered
                   minItems={3}
-                  maxItems={10}
+                  maxItems={15}
                 />
               </MomSection>
 

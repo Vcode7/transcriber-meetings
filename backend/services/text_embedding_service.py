@@ -241,16 +241,26 @@ class TextEmbeddingService:
 
         return normalized.cpu().float().numpy()
 
-    def encode(self, text: str) -> np.ndarray:
+    def encode(self, text: Union[str, List[str]]) -> np.ndarray:
         """
-        Embed a single string.
+        Embed a single string (or list of strings).
 
         Returns
         -------
-        np.ndarray of shape (dim,) — L2-normalized float32.
+        np.ndarray of shape (dim,) for a single string, or (n, dim) if passed a list.
         """
         self._ensure_loaded()
-        if not text or not text.strip():
+        if isinstance(text, list):
+            if not text:
+                return np.zeros((0, self._dim), dtype=np.float32)
+            if len(text) == 1:
+                t = text[0]
+                if not isinstance(t, str) or not t.strip():
+                    return np.zeros((1, self._dim), dtype=np.float32)
+                return self._encode_raw([t.strip()])
+            return self.encode_batch(text)
+
+        if not text or not isinstance(text, str) or not text.strip():
             return np.zeros(self._dim, dtype=np.float32)
         result = self._encode_raw([text.strip()])
         return result[0]

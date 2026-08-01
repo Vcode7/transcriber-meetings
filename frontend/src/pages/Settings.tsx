@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
 import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
-  MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database
+  MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database, Volume2, Activity,
+  Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -33,7 +34,7 @@ interface UserSettings {
   generate_mom_auto?: boolean
   embedding_model?: string
 
-  // New Ollama settings
+  // Ollama settings
   ollama_num_ctx?: number
   ollama_dynamic_ctx?: boolean
   ollama_temperature?: number
@@ -45,6 +46,21 @@ interface UserSettings {
   ollama_keep_alive?: string
   ollama_num_thread?: number
   ollama_num_gpu?: number
+
+  // ROM Pipeline Settings
+  rom_transcript_window?: number
+  rom_meeting_top_k?: number
+  rom_global_top_k?: number
+  rom_windows_per_batch?: number
+
+  max_tokens_rom_discussion?: number
+  max_tokens_rom_polish?: number
+  max_tokens_rom_enhance_window?: number
+  max_tokens_rom_deduplicate?: number
+  max_tokens_rom_agenda?: number
+  max_tokens_rom_mom_expansion?: number
+  max_tokens_rom_agenda_assign_batch?: number
+  max_tokens_rom_agenda_doc_points?: number
 
   // Task max tokens
   max_tokens_mom?: number
@@ -69,6 +85,34 @@ interface UserSettings {
   max_tokens_collection_compare?: number
   max_tokens_collection_topic_growth?: number
   max_tokens_vocab_extractor?: number
+
+  // Low-Volume Speech Transcription Pipeline Enhancements
+  enable_vad?: boolean
+  enable_transcription_vad?: boolean
+  enable_alignment_vad?: boolean
+  enable_audio_normalization?: boolean
+  norm_target_dbfs?: number
+  norm_compression_ratio?: number
+
+  enable_adaptive_vad?: boolean
+  vad_speech_threshold?: number
+  vad_silence_threshold?: number
+  vad_min_speech_ms?: number
+  vad_min_silence_ms?: number
+
+  enable_speech_padding?: boolean
+  speech_pad_ms?: number
+
+  enable_speech_segment_merging?: boolean
+  max_merge_silence_ms?: number
+
+  enable_low_volume_recovery?: boolean
+  recovery_energy_threshold?: number
+  recovery_min_duration_ms?: number
+
+  enable_audio_validation?: boolean
+  min_audio_duration_seconds?: number
+  min_audio_rms_threshold?: number
 }
 
 interface PromptTemplate {
@@ -93,7 +137,10 @@ interface EmbeddingModelOption {
   path?: string | null
 }
 
+type SettingsTab = 'rom' | 'prompts' | 'voice' | 'llm' | 'rag' | 'audio' | 'tokens'
+
 export default function SettingsPage() {
+  const [activeTab, setActiveTab] = useState<SettingsTab>('rom')
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([])
@@ -124,11 +171,14 @@ export default function SettingsPage() {
   // Prompt Templates state
   const [prompts, setPrompts] = useState<PromptTemplate[]>([])
   const [loadingPrompts, setLoadingPrompts] = useState(true)
-  const [activeCategory, setActiveCategory] = useState('MoM')
+  const [activePromptCategory, setActivePromptCategory] = useState<string>('All')
+  const [promptSearchQuery, setPromptSearchQuery] = useState<string>('')
   const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set())
   const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set())
   const [importing, setImporting] = useState(false)
   const [editingTemplates, setEditingTemplates] = useState<Record<string, string>>({})
+  const [expandedPromptKey, setExpandedPromptKey] = useState<string | null>(null)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   const loadData = async () => {
     try {
@@ -189,10 +239,16 @@ export default function SettingsPage() {
   const handleSaveSettings = async () => {
     if (!settings) return
     setSavingSettings(true)
-    await api.put('/settings', settings)
-    setSavingSettings(false)
-    setSettingsSaved(true)
-    setTimeout(() => setSettingsSaved(false), 2000)
+    try {
+      await api.put('/settings', settings)
+      setSettingsSaved(true)
+      toast.success('Settings saved successfully!')
+      setTimeout(() => setSettingsSaved(false), 2000)
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Failed to save settings')
+    } finally {
+      setSavingSettings(false)
+    }
   }
 
   const handleTestOllamaConnection = async () => {
@@ -221,10 +277,10 @@ export default function SettingsPage() {
     }
   }
 
-  const upd = (key: keyof UserSettings, val: any) =>
-    setSettings((prev) => prev ? { ...prev, [key]: val } : prev)
-
-  const handleSavePromptTemplate = async (key: string, template: string) => {
+  const handleSavePromptTemplate = async (key: string) => {
+    const pt = prompts.find(p => p.key === key)
+    if (!pt) return
+    const template = editingTemplates[key] ?? pt.template
     setSavingKeys(prev => {
       const next = new Set(prev)
       next.add(key)
@@ -321,1671 +377,687 @@ export default function SettingsPage() {
     }
   }
 
+  const handleCopyPrompt = (key: string, text: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedKey(key)
+    toast.success('Prompt text copied to clipboard!')
+    setTimeout(() => setCopiedKey(null), 2000)
+  }
+
+  const handleInsertVariable = (key: string, variable: string) => {
+    const current = editingTemplates[key] ?? prompts.find(p => p.key === key)?.template ?? ''
+    const updated = current + ` ${variable}`
+    setEditingTemplates(prev => ({ ...prev, [key]: updated }))
+    toast.info(`Inserted variable ${variable}`)
+  }
+
   const PROFILE_COLORS = [
     'hsl(14, 90%, 56%)',
     'hsl(205, 90%, 55%)',
     'hsl(130, 60%, 45%)',
     'hsl(280, 70%, 60%)',
-    'hsl(45, 90%, 50%)',
+    'hsl(35, 90%, 50%)',
+    'hsl(330, 75%, 55%)',
   ]
 
-  return (
-    <div className="page-scroll-root" style={{ display: 'flex', flexDirection: 'column' }}>
+  const promptCategories = ['All', ...Array.from(new Set(prompts.map(p => p.category)))]
+  const modifiedCount = prompts.filter(p => p.is_modified).length
+  const romPromptsCount = prompts.filter(p => p.category === 'ROM').length
 
-      {/* Panel Header */}
-      <div className="panel-header">
-        <div style={{
-          width: '34px', height: '34px', borderRadius: '10px', flexShrink: 0,
-          background: 'hsl(var(--accent) / .12)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          border: '2px solid hsl(var(--accent) / .3)',
-        }}>
-          <Settings size={16} style={{ color: 'hsl(var(--accent))' }} />
+  const filteredPrompts = prompts.filter(p => {
+    const matchesCat = activePromptCategory === 'All' || p.category === activePromptCategory
+    const q = promptSearchQuery.toLowerCase().trim()
+    const matchesSearch = !q || p.name.toLowerCase().includes(q) || p.key.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
+    return matchesCat && matchesSearch
+  })
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+
+      {/* Top Header Bar */}
+      <div className="panel-header" style={{ flexShrink: 0, justifyContent: 'space-between', padding: '.65rem 1.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{
+            width: '36px', height: '36px', borderRadius: '10px', flexShrink: 0,
+            background: 'hsl(var(--accent) / .12)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '2px solid hsl(var(--accent) / .3)',
+          }}>
+            <Settings size={18} style={{ color: 'hsl(var(--accent))' }} />
+          </div>
+          <div>
+            <h1 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0 }}>System Settings &amp; Configuration</h1>
+            <p style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0 }}>
+              ROM pipeline parameters, prompt templates engine, inference tuning &amp; audio processing
+            </p>
+          </div>
         </div>
-        <div style={{ flex: 1 }}>
-          <h1>Settings</h1>
-          <p style={{ fontSize: '.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', fontWeight: 400, marginTop: '1px' }}>
-            Voice profiles &amp; recognition thresholds
-          </p>
+
+        {/* Global Save Button */}
+        <button
+          onClick={handleSaveSettings}
+          disabled={savingSettings}
+          className="btn btn-primary"
+          style={{
+            fontSize: '.78rem', padding: '.45rem 1.05rem', borderRadius: 8,
+            fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6,
+            background: settingsSaved ? 'hsl(140,70%,45%)' : undefined
+          }}
+        >
+          {savingSettings ? <Loader size={13} className="spin" /> : settingsSaved ? <CheckCircle size={13} /> : <Save size={13} />}
+          {savingSettings ? 'Saving...' : settingsSaved ? 'Settings Saved!' : 'Save All Settings'}
+        </button>
+      </div>
+
+      {/* Stats Metric Strip */}
+      <div style={{
+        display: 'flex', gap: '1.25rem', padding: '.55rem 1.5rem',
+        background: 'hsl(var(--muted)/.25)', borderBottom: '1px solid hsl(var(--border)/.3)',
+        fontSize: '.72rem', color: 'hsl(var(--pencil))', alignItems: 'center', flexWrap: 'wrap'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Sparkles size={13} style={{ color: 'hsl(280,75%,60%)' }} />
+          <span>ROM Prompts: <strong style={{ color: 'hsl(var(--ink))' }}>{romPromptsCount} Active</strong></span>
+        </div>
+        <div style={{ width: 1, height: 12, background: 'hsl(var(--border))' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <FileText size={13} style={{ color: 'hsl(140,70%,45%)' }} />
+          <span>Total Templates: <strong style={{ color: 'hsl(var(--ink))' }}>{prompts.length} Registered</strong></span>
+        </div>
+        <div style={{ width: 1, height: 12, background: 'hsl(var(--border))' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Pencil size={13} style={{ color: 'hsl(35,90%,50%)' }} />
+          <span>Customized Overrides: <strong style={{ color: 'hsl(var(--ink))' }}>{modifiedCount} Override(s)</strong></span>
+        </div>
+        <div style={{ width: 1, height: 12, background: 'hsl(var(--border))' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Mic size={13} style={{ color: 'hsl(205,90%,55%)' }} />
+          <span>Voice Profiles: <strong style={{ color: 'hsl(var(--ink))' }}>{profiles.length} Saved</strong></span>
         </div>
       </div>
 
-      {/* Scrollable content */}
-      <div className="page-wrapper">
+      {/* Main Tabbed Layout Container */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
 
-      {/* Page title - REMOVED, now in panel-header */}
-
-      
-      {/* ─── Voice Profiles ─── */}
-      <section className="animate-slide-up" style={{ marginBottom: '2.5rem', animationDelay: '0.05s', animationFillMode: 'both' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.5rem' }}>
-          <div style={{
-            width: '36px', height: '36px', borderRadius: '9px',
-            background: 'hsl(205,90%,55% / .12)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: '1.5px solid hsl(205,90%,55% / .25)',
-          }}>
-            <Mic size={18} style={{ color: 'hsl(205,90%,55%)' }} />
-          </div>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-            Voice Profiles
-          </h2>
-          <span style={{
-            fontSize: '.76rem', fontWeight: 600,
-            color: 'hsl(235,80%,60%)',
-            background: 'hsl(235,80%,60% / .1)',
-            padding: '.15rem .55rem', borderRadius: '999px',
-            border: '1.5px solid hsl(235,80%,60% / .25)',
-            fontFamily: 'Inter, sans-serif'
-          }}>
-            {profiles.length}
-          </span>
+        {/* Navigation Tabs Bar */}
+        <div style={{
+          display: 'flex', gap: 6, padding: '.65rem 1.5rem',
+          background: 'hsl(var(--card))', borderBottom: '1px solid hsl(var(--border)/.4)',
+          overflowX: 'auto', flexShrink: 0
+        }}>
+          {[
+            { id: 'rom', label: 'ROM Pipeline', count: '4 Settings', icon: <Sparkles size={14} />, color: 'hsl(280,75%,60%)' },
+            { id: 'prompts', label: 'Prompt Templates', count: `${prompts.length}`, icon: <FileText size={14} />, color: 'hsl(140,70%,45%)' },
+            { id: 'voice', label: 'Voice & Diarization', count: `${profiles.length} Profiles`, icon: <Mic size={14} />, color: 'hsl(205,90%,55%)' },
+            { id: 'llm', label: 'LLM Inference', count: 'Ollama', icon: <Cpu size={14} />, color: 'hsl(35,90%,50%)' },
+            { id: 'rag', label: 'RAG & Vectors', count: 'FAISS / BM25', icon: <Database size={14} />, color: 'hsl(200,80%,50%)' },
+            { id: 'audio', label: 'VAD & Audio', count: 'dBFS / VAD', icon: <Volume2 size={14} />, color: 'hsl(330,75%,55%)' },
+            { id: 'tokens', label: 'Task Token Limits', count: 'Max Tokens', icon: <SlidersHorizontal size={14} />, color: 'hsl(250,70%,60%)' },
+          ].map(tab => {
+            const active = activeTab === tab.id
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as SettingsTab)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '.5rem .9rem', borderRadius: 8,
+                  fontSize: '.78rem', fontWeight: active ? 700 : 500,
+                  color: active ? tab.color : 'hsl(var(--pencil))',
+                  background: active ? `${tab.color}15` : 'transparent',
+                  border: active ? `1.5px solid ${tab.color}40` : '1px solid transparent',
+                  cursor: 'pointer', fontFamily: 'Inter', whiteSpace: 'nowrap',
+                  transition: 'all .15s ease'
+                }}
+              >
+                {tab.icon}
+                <span>{tab.label}</span>
+                <span style={{ fontSize: '.65rem', padding: '1px 5px', borderRadius: 6, background: active ? `${tab.color}25` : 'hsl(var(--muted)/.6)', color: active ? tab.color : 'hsl(var(--pencil))', fontWeight: 600 }}>{tab.count}</span>
+              </button>
+            )
+          })}
         </div>
 
-        {loadingProfiles ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '4rem', flexDirection: 'column', gap: '1rem' }}>
-            <Loader size={28} className="spin" style={{ color: 'hsl(var(--accent))' }} />
-            <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.9rem', color: 'hsl(var(--pencil))' }}>Loading profiles…</p>
-          </div>
-        ) : profiles.length === 0 ? (
-          <div style={{
-            padding: '3.5rem 2rem', textAlign: 'center',
-            background: 'hsl(var(--card))',
-            border: '1.5px dashed hsl(var(--ink) / .15)',
-            borderRadius: '12px'
-          }}>
-            <div style={{
-              width: '60px', height: '60px', borderRadius: '50%',
-              background: 'hsl(var(--accent) / .08)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              margin: '0 auto 1.25rem'
-            }}>
-              <User size={28} style={{ opacity: 0.3, color: 'hsl(var(--accent))' }} className="animate-float" />
-            </div>
-            <p style={{ color: 'hsl(var(--pencil))', fontSize: '.95rem', fontFamily: 'Inter, sans-serif' }}>
-              No voice profiles saved yet
-            </p>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {profiles.map((p, idx) => {
-              const color = PROFILE_COLORS[idx % PROFILE_COLORS.length]
-              const sampleDots = Math.min(p.sample_count, 10)
-              return (
-                <div
-                  key={p.id}
-                  className="animate-slide-up sketch-border"
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '16px',
-                    padding: '1.1rem 1.25rem',
-                    background: 'hsl(var(--card))',
-                    borderLeft: `4px solid ${color}`,
-                    borderRadius: '0 12px 12px 0',
-                    animationDelay: `${0.1 + idx * 0.04}s`,
-                    animationFillMode: 'both',
-                    transition: 'box-shadow .2s, transform .2s',
-                  }}
-                  onMouseEnter={e => {
-                    const el = e.currentTarget as HTMLDivElement
-                    el.style.boxShadow = `4px 4px 0 ${color}25, 0 4px 16px ${color}15`
-                    el.style.transform = 'translateX(2px)'
-                  }}
-                  onMouseLeave={e => {
-                    const el = e.currentTarget as HTMLDivElement
-                    el.style.boxShadow = 'none'
-                    el.style.transform = 'none'
-                  }}
-                >
-                  {/* Avatar with hover glow */}
-                  <div
-                    style={{
-                      width: '48px', height: '48px', borderRadius: '50%',
-                      background: `${color}20`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color, fontWeight: 800, fontSize: '1.2rem', flexShrink: 0,
-                      border: `2px solid ${color}50`,
-                      fontFamily: 'Inter, sans-serif',
-                      transition: 'transform .3s cubic-bezier(0.34,1.56,.64,1), box-shadow .3s',
-                      cursor: 'default',
-                    }}
-                    onMouseEnter={e => {
-                      const el = e.currentTarget as HTMLDivElement
-                      el.style.transform = 'rotate(8deg) scale(1.08)'
-                      el.style.boxShadow = `0 0 16px ${color}55`
-                    }}
-                    onMouseLeave={e => {
-                      const el = e.currentTarget as HTMLDivElement
-                      el.style.transform = 'none'
-                      el.style.boxShadow = 'none'
-                    }}
-                  >
-                    {p.label[0]?.toUpperCase()}
-                  </div>
+        {/* Scrollable Tab Content View */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem 2rem' }}>
 
-                  {/* Info */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {editingId === p.id ? (
-                      <input
-                        className="input"
-                        value={editLabel}
-                        onChange={(e) => setEditLabel(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleRename(p.id)}
-                        style={{ padding: '0.5rem 0.75rem', fontSize: '.95rem', height: '36px' }}
-                        autoFocus
-                      />
-                    ) : (
-                      <div style={{ fontWeight: 700, fontSize: '1rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        {p.label}
-                        {p.is_self && (
-                          <span style={{
-                            fontSize: '.68rem', fontWeight: 600,
-                            color: 'hsl(235,80%,60%)', background: 'hsl(235,80%,60% / .1)',
-                            padding: '.1rem .45rem', borderRadius: '999px',
-                            border: '1.5px solid hsl(235,80%,60% / .25)',
-                            fontFamily: 'Inter, sans-serif',
-                            display: 'inline-flex', alignItems: 'center', gap: '3px'
-                          }}>
-                            <Sparkles size={10} /> You
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {/* Sample count as dots */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <div style={{ display: 'flex', gap: '3px', alignItems: 'center' }}>
-                        {Array.from({ length: sampleDots }).map((_, i) => (
-                          <span key={i} style={{ width: '7px', height: '7px', borderRadius: '50%', background: color, opacity: 0.65 + (i / sampleDots) * 0.35 }} />
-                        ))}
-                        {p.sample_count > 10 && <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>+{p.sample_count - 10}</span>}
-                      </div>
-                      <span style={{ fontSize: '0.76rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
-                        {p.sample_count} sample{p.sample_count !== 1 ? 's' : ''} · {new Date(p.created_at).toLocaleDateString()}
-                      </span>
-                    </div>
+          {/* 🚀 TAB: ROM PIPELINE */}
+          {activeTab === 'rom' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 1000, margin: '0 auto' }}>
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(280,75%,60%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: '1.15rem' }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 9, background: 'hsl(280,75%,60%/.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(280,75%,60%)' }}>
+                    <Sparkles size={18} />
                   </div>
-
-                  {/* Actions */}
-                  <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-                    {editingId === p.id ? (
-                      <button
-                        className="btn btn-primary"
-                        style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', height: '36px' }}
-                        onClick={() => handleRename(p.id)}
-                        disabled={savingLabel}
-                      >
-                        {savingLabel ? <Loader size={13} className="spin" /> : <Save size={13} />} Save
-                      </button>
-                    ) : (
-                      <button
-                        className="icon-btn"
-                        style={{ width: '36px', height: '36px' }}
-                        onClick={() => { setEditingId(p.id); setEditLabel(p.label) }}
-                        title="Rename"
-                      >
-                        <Pencil size={14} />
-                      </button>
-                    )}
-                    <button
-                      className="icon-btn"
-                      style={{ width: '36px', height: '36px', color: 'hsl(var(--destructive) / .7)', transition: 'color .15s' }}
-                      onClick={() => handleDelete(p.id)}
-                      disabled={deletingId === p.id}
-                      title="Delete"
-                      onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.color = 'hsl(var(--destructive))'}
-                      onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.color = 'hsl(var(--destructive) / .7)'}
-                    >
-                      {deletingId === p.id ? <Loader size={14} className="spin" /> : <Trash2 size={14} />}
-                    </button>
+                  <div>
+                    <h3 style={{ fontSize: '1.02rem', fontWeight: 700, margin: 0 }}>ROM Pipeline Parameters</h3>
+                    <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))' }}>Tune sliding transcript window size, context retrieval K depth, and enhancement window batching</div>
                   </div>
                 </div>
-              )
-            })}
-          </div>
-        )}
-      </section>
 
-      {/* ─── Recognition Thresholds ─── */}
-      {settings && (
-        <section className="animate-slide-up" style={{ animationDelay: '0.2s', animationFillMode: 'both' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(45,90%,50% / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(45,90%,50% / .3)',
-            }}>
-              <Sliders size={18} style={{ color: 'hsl(45,90%,50%)' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              Recognition Thresholds
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '2rem'
-          }}>
-            {([
-              { key: 'speaker_similarity_threshold', label: 'Speaker Similarity Threshold', min: 0.5, max: 0.99, step: 0.01, desc: 'Minimum cosine similarity to match a known speaker (default: 0.73)' },
-              { key: 'word_conf_low', label: 'Low Confidence Threshold', min: 0.3, max: 0.9, step: 0.01, desc: 'Words below this are highlighted red (default: 0.70)' },
-              { key: 'word_conf_mid', label: 'Mid Confidence Threshold', min: 0.5, max: 0.99, step: 0.01, desc: 'Words below this are highlighted yellow (default: 0.85)' },
-              { key: 'min_segment_duration', label: 'Min. Segment Duration (s)', min: 0.5, max: 5, step: 0.5, desc: 'Segments shorter than this are ignored (default: 1.5s)' },
-            ] as const).map(({ key, label, min, max, step, desc }) => {
-              return (
-                <div key={key}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
-                    <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                      {label}
-                    </label>
-                    <input
-                      type="number"
-                      min={min} max={max} step={step}
-                      value={settings[key]}
-                      onChange={(e) => {
-                        const parsed = parseFloat(e.target.value)
-                        upd(key, isNaN(parsed) ? min : parsed)
-                      }}
-                      style={{
-                        fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
-                        color: 'hsl(var(--accent))', fontWeight: 700,
-                        padding: '.3rem .65rem',
-                        background: 'hsl(var(--accent) / .1)',
-                        borderRadius: '6px',
-                        border: '1.5px solid hsl(var(--accent) / .2)',
-                        width: '75px', textAlign: 'center',
-                        outline: 'none',
-                      }}
+                {settings && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                    <SettingCard
+                      title="Stage 1 Window Size (mins)"
+                      description="Sliding audio/transcript window duration processed in Stage 1 extraction."
+                      value={settings.rom_transcript_window ?? 2.0}
+                      min={0.5} max={10.0} step={0.5}
+                      onChange={v => setSettings({ ...settings, rom_transcript_window: v })}
                     />
-                  </div>
-
-                  <input
-                    type="range"
-                    min={min} max={max} step={step}
-                    value={settings[key]}
-                    onChange={(e) => upd(key, parseFloat(e.target.value))}
-                    style={{
-                      width: '100%',
-                      accentColor: 'hsl(var(--accent))',
-                      height: '6px',
-                      cursor: 'pointer',
-                      marginTop: '8px',
-                      marginBottom: '8px',
-                      outline: 'none',
-                    }}
-                  />
-                  <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
-                    {desc}
-                  </p>
-                </div>
-              )
-            })}
-          </div>
-
-          {/* ─── Minutes of Meeting (MoM) Automation ─── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(var(--accent) / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(var(--accent) / .3)',
-            }}>
-              <Sparkles size={18} style={{ color: 'hsl(var(--accent))' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              Minutes of Meeting (MoM) Automation
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '2rem'
-          }}>
-            {/* ── Generate MoM Automatically toggle ── */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '1rem 1.25rem',
-              background: (settings.generate_mom_auto ?? true) ? 'hsl(var(--accent) / .06)' : 'hsl(var(--muted) / .3)',
-              borderRadius: '10px',
-              border: `1.5px solid ${(settings.generate_mom_auto ?? true) ? 'hsl(var(--accent) / .35)' : 'hsl(var(--ink) / .08)'}`,
-              transition: 'background .2s, border-color .2s',
-            }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '3px' }}>
-                  Generate MoM Automatically
-                </div>
-                <div style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
-                  {(settings.generate_mom_auto ?? true)
-                    ? 'ON — After speaker identification completes, automatically generate the MoM.'
-                    : 'OFF — Skip automatic MoM generation. The pipeline will finish after speaker identification without starting MoM generation.'}
-                </div>
-              </div>
-              <button
-                id="generate-mom-auto-toggle"
-                onClick={() => upd('generate_mom_auto', !(settings.generate_mom_auto ?? true))}
-                style={{
-                  flexShrink: 0,
-                  width: '52px', height: '28px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: (settings.generate_mom_auto ?? true) ? 'hsl(var(--accent))' : 'hsl(var(--ink) / .18)',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  transition: 'background .25s',
-                  outline: 'none',
-                  boxShadow: (settings.generate_mom_auto ?? true) ? '0 0 0 3px hsl(var(--accent) / .2)' : 'none',
-                }}
-                title={(settings.generate_mom_auto ?? true) ? 'Click to disable automatic MoM generation' : 'Click to enable automatic MoM generation'}
-              >
-                <span style={{
-                  position: 'absolute',
-                  top: '3px',
-                  left: (settings.generate_mom_auto ?? true) ? '26px' : '3px',
-                  width: '22px', height: '22px',
-                  borderRadius: '50%',
-                  background: 'white',
-                  transition: 'left .25s cubic-bezier(.4,0,.2,1)',
-                  boxShadow: '0 1px 4px rgba(0,0,0,.25)',
-                  display: 'block',
-                }} />
-              </button>
-            </div>
-          </div>
-
-          {/* ─── Ollama Settings ─── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(180,90%,50% / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(180,90%,50% / .3)',
-            }}>
-              <Cpu size={18} style={{ color: 'hsl(180,90%,50%)' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              Ollama Offline Fallback Settings
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '2rem'
-          }}>
-
-            {/* ── Use Ollama toggle ── */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '1rem 1.25rem',
-              background: settings.use_ollama ? 'hsl(180,90%,50% / .06)' : 'hsl(var(--muted) / .3)',
-              borderRadius: '10px',
-              border: `1.5px solid ${settings.use_ollama ? 'hsl(180,90%,50% / .35)' : 'hsl(var(--ink) / .08)'}`,
-              transition: 'background .2s, border-color .2s',
-            }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '3px' }}>
-                  Use Ollama
-                </div>
-                <div style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
-                  {settings.use_ollama
-                    ? 'Ollama will be tried first. Falls back to the bundled Qwen model if unavailable.'
-                    : 'Disabled — the bundled Qwen model is used directly. Ollama is not contacted.'}
-                </div>
-              </div>
-              {/* Toggle switch */}
-              <button
-                id="use-ollama-toggle"
-                onClick={() => upd('use_ollama', !settings.use_ollama)}
-                style={{
-                  flexShrink: 0,
-                  width: '52px', height: '28px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: settings.use_ollama ? 'hsl(180,90%,45%)' : 'hsl(var(--ink) / .18)',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  transition: 'background .25s',
-                  outline: 'none',
-                  boxShadow: settings.use_ollama ? '0 0 0 3px hsl(180,90%,50% / .2)' : 'none',
-                }}
-                title={settings.use_ollama ? 'Click to disable Ollama' : 'Click to enable Ollama'}
-              >
-                <span style={{
-                  position: 'absolute',
-                  top: '3px',
-                  left: settings.use_ollama ? '26px' : '3px',
-                  width: '22px', height: '22px',
-                  borderRadius: '50%',
-                  background: 'white',
-                  transition: 'left .25s cubic-bezier(.4,0,.2,1)',
-                  boxShadow: '0 1px 4px rgba(0,0,0,.25)',
-                  display: 'block',
-                }} />
-              </button>
-            </div>
-
-            {/* Server URL, Port, and Priority — dimmed when Ollama disabled */}
-            <div style={{ opacity: settings.use_ollama ? 1 : 0.45, transition: 'opacity .2s', pointerEvents: settings.use_ollama ? 'auto' : 'none' }}>
-              
-              {/* ── Ollama Server URL Field with Test Connection Button ── */}
-              <div style={{ marginBottom: '1.75rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    Ollama Server URL
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleTestOllamaConnection}
-                    disabled={testingOllama}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: '6px',
-                      fontSize: '.85rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
-                      padding: '.35rem .85rem',
-                      borderRadius: '7px',
-                      background: 'hsl(180,90%,50% / .15)',
-                      color: 'hsl(180,90%,35%)',
-                      border: '1.5px solid hsl(180,90%,50% / .35)',
-                      cursor: testingOllama ? 'not-allowed' : 'pointer',
-                      transition: 'all .2s',
-                    }}
-                  >
-                    {testingOllama ? <Loader size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                    {testingOllama ? 'Testing...' : 'Test Connection'}
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={settings.ollama_server_url !== undefined ? settings.ollama_server_url : 'http://localhost:11434'}
-                  onChange={(e) => {
-                    upd('ollama_server_url', e.target.value)
-                    setOllamaTestResult(null)
-                  }}
-                  placeholder="http://localhost:11434"
-                  style={{
-                    width: '100%',
-                    fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
-                    color: 'hsl(var(--ink))', fontWeight: 500,
-                    padding: '.55rem .85rem',
-                    background: 'hsl(var(--background))',
-                    borderRadius: '8px',
-                    border: '1.5px solid hsl(var(--ink) / .15)',
-                    outline: 'none',
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6, marginTop: '6px' }}>
-                  Configurable HTTP/HTTPS endpoint for your Ollama instance (default: <code>http://localhost:11434</code>). Accepts <code>http://192.168.x.x:11434</code> or custom domain.
-                </p>
-
-                {/* Connection test result banner */}
-                {ollamaTestResult && (
-                  <div style={{
-                    marginTop: '12px',
-                    padding: '.85rem 1rem',
-                    borderRadius: '8px',
-                    fontSize: '.85rem',
-                    fontFamily: 'Inter, sans-serif',
-                    background: ollamaTestResult.success ? 'hsl(142, 70%, 45% / .12)' : 'hsl(0, 70%, 50% / .12)',
-                    border: `1.5px solid ${ollamaTestResult.success ? 'hsl(142, 70%, 45% / .35)' : 'hsl(0, 70%, 50% / .35)'}`,
-                    color: ollamaTestResult.success ? 'hsl(142, 70%, 30%)' : 'hsl(0, 70%, 35%)',
-                  }}>
-                    <div style={{ fontWeight: 700, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {ollamaTestResult.success ? <CheckCircle size={15} /> : <span style={{ fontWeight: 900 }}>✕</span>}
-                      {ollamaTestResult.success ? 'Connection Successful' : 'Connection Failed'}
-                    </div>
-                    <div>{ollamaTestResult.message || ollamaTestResult.error}</div>
-                    {ollamaTestResult.error && (
-                      <div style={{ marginTop: '4px', fontSize: '.8rem', opacity: 0.9, fontFamily: 'JetBrains Mono, monospace' }}>
-                        {ollamaTestResult.error}
-                      </div>
-                    )}
-                    {ollamaTestResult.available_models && ollamaTestResult.available_models.length > 0 && (
-                      <div style={{ marginTop: '8px', paddingTop: '6px', borderTop: '1px solid hsl(142, 70%, 45% / .2)', fontSize: '.8rem' }}>
-                        <strong>Available Models ({ollamaTestResult.available_models.length}):</strong>{' '}
-                        {ollamaTestResult.available_models.join(', ')}
-                      </div>
-                    )}
+                    <SettingCard
+                      title="Stage 2 Meeting Context Top-K"
+                      description="Top-K context chunks retrieved from uploaded meeting supporting documents."
+                      value={settings.rom_meeting_top_k ?? 5}
+                      min={1} max={30} step={1}
+                      onChange={v => setSettings({ ...settings, rom_meeting_top_k: Math.round(v) })}
+                    />
+                    <SettingCard
+                      title="Stage 2 Global Context Top-K"
+                      description="Top-K context chunks retrieved from organizational global context knowledge."
+                      value={settings.rom_global_top_k ?? 3}
+                      min={1} max={20} step={1}
+                      onChange={v => setSettings({ ...settings, rom_global_top_k: Math.round(v) })}
+                    />
+                    <SettingCard
+                      title="Stage 2 Points per Enhancement Window"
+                      description="Number of discussion points grouped into one enhancement window LLM call."
+                      value={settings.rom_windows_per_batch ?? 5}
+                      min={1} max={20} step={1}
+                      onChange={v => setSettings({ ...settings, rom_windows_per_batch: Math.round(v) })}
+                    />
                   </div>
                 )}
               </div>
 
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    Ollama Port
-                  </label>
-                  <input
-                    type="number"
-                    min={1} max={65535}
-                    value={settings.ollama_port !== undefined ? settings.ollama_port : 11434}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('ollama_port', isNaN(parsed) ? 11434 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.3rem .65rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '100px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
-                  Port of the locally running Ollama server (default: 11434).
-                </p>
-              </div>
-
-                <div style={{ marginTop: '1.5rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', alignItems: 'center' }}>
-                    <label style={{ fontSize: '.95rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                      Model Priority List
-                    </label>
-                    <input
-                      type="text"
-                      value={settings.ollama_model_priority !== undefined ? settings.ollama_model_priority : 'gemma,qwen,llama,deepseek,mistral'}
-                      onChange={(e) => {
-                        upd('ollama_model_priority', e.target.value)
-                      }}
-                      style={{
-                        fontFamily: 'JetBrains Mono, monospace', fontSize: '.9rem',
-                        color: 'hsl(var(--accent))', fontWeight: 600,
-                        padding: '.3rem .65rem',
-                        background: 'hsl(var(--accent) / .1)',
-                        borderRadius: '6px',
-                        border: '1.5px solid hsl(var(--accent) / .2)',
-                        width: '280px',
-                        outline: 'none',
-                      }}
-                    />
+              {/* ROM Max Tokens */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h4 style={{ fontSize: '.92rem', fontWeight: 700, marginBottom: '.85rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Sliders size={14} style={{ color: 'hsl(280,75%,60%)' }} /> ROM Task Token Limits
+                </h4>
+                {settings && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '.85rem' }}>
+                    <TokenInput label="Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
+                    <TokenInput label="Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
+                    <TokenInput label="Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
+                    <TokenInput label="Stage 2 Deduplication" val={settings.max_tokens_rom_deduplicate ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_deduplicate: v })} />
+                    <TokenInput label="Stage 3 Generate Agendas" val={settings.max_tokens_rom_agenda ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_agenda: v })} />
+                    <TokenInput label="Stage 3 Previous MoM Expansion" val={settings.max_tokens_rom_mom_expansion ?? 3000} onChange={v => setSettings({ ...settings, max_tokens_rom_mom_expansion: v })} />
+                    <TokenInput label="Stage 3 Agenda Batch Mapping" val={settings.max_tokens_rom_agenda_assign_batch ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_agenda_assign_batch: v })} />
+                    <TokenInput label="Stage 3 Supporting Doc Points" val={settings.max_tokens_rom_agenda_doc_points ?? 1024} onChange={v => setSettings({ ...settings, max_tokens_rom_agenda_doc_points: v })} />
                   </div>
-                  <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
-                    Comma-separated list of model keywords in order of preference (e.g., gemma, qwen, llama, deepseek, mistral).
-                  </p>
-                </div>
-
-                {/* ── Ollama Advanced Parameters Subgrid ── */}
-                <div style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid hsl(var(--border) / .3)' }}>
-                  <h3 style={{ fontSize: '0.92rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', marginBottom: '1.25rem' }}>
-                    Ollama Advanced Generation Parameters
-                  </h3>
-
-                  {/* Dynamic Context Window Toggle */}
-                  <div style={{
-                    marginBottom: '1.25rem',
-                    padding: '0.9rem 1.1rem',
-                    borderRadius: '10px',
-                    background: 'hsl(var(--ink) / .03)',
-                    border: '1.5px solid hsl(var(--border) / .4)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '1rem',
-                  }}>
-                    <div>
-                      <div style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        Dynamic Context Window (num_ctx)
-                        <span style={{
-                          fontSize: '.72rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
-                          background: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,50% / .15)' : 'hsl(var(--pencil) / .15)',
-                          color: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,35%)' : 'hsl(var(--pencil))',
-                          border: `1px solid ${(settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,50% / .3)' : 'hsl(var(--pencil) / .3)'}`
-                        }}>
-                          {(settings.ollama_dynamic_ctx ?? true) ? 'ON (Auto-calculated)' : 'OFF (Manual num_ctx)'}
-                        </span>
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: '4px 0 0', lineHeight: 1.45 }}>
-                        {(settings.ollama_dynamic_ctx ?? true)
-                          ? 'ON: Before every Ollama request, estimates prompt tokens + max_output_tokens + 512 safety buffer, selecting the smallest suitable standard num_ctx (2048, 4096, 8192, 16384, ...).'
-                          : 'OFF: Uses the manually configured num_ctx value below exactly as specified.'}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => upd('ollama_dynamic_ctx', !(settings.ollama_dynamic_ctx ?? true))}
-                      style={{
-                        flexShrink: 0,
-                        width: '48px', height: '26px',
-                        borderRadius: '999px',
-                        border: 'none',
-                        background: (settings.ollama_dynamic_ctx ?? true) ? 'hsl(180,90%,45%)' : 'hsl(var(--ink) / .18)',
-                        cursor: 'pointer',
-                        position: 'relative',
-                        transition: 'background .25s',
-                        outline: 'none',
-                        boxShadow: (settings.ollama_dynamic_ctx ?? true) ? '0 0 0 3px hsl(180,90%,50% / .2)' : 'none',
-                      }}
-                      title={(settings.ollama_dynamic_ctx ?? true) ? 'Click to disable Dynamic Context Window' : 'Click to enable Dynamic Context Window'}
-                    >
-                      <span style={{
-                        position: 'absolute',
-                        top: '3px',
-                        left: (settings.ollama_dynamic_ctx ?? true) ? '25px' : '3px',
-                        width: '20px', height: '20px',
-                        borderRadius: '50%',
-                        background: 'white',
-                        transition: 'left .25s cubic-bezier(.4,0,.2,1)',
-                        boxShadow: '0 1px 4px rgba(0,0,0,.25)',
-                        display: 'block',
-                      }} />
-                    </button>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
-                    
-                    {/* Context Size */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Context Size (num_ctx)
-                        </label>
-                        <input
-                          type="number"
-                          min={512} max={131072} step={512}
-                          value={settings.ollama_num_ctx ?? 32768}
-                          onChange={(e) => {
-                            const parsed = parseInt(e.target.value, 10)
-                            upd('ollama_num_ctx', isNaN(parsed) ? 32768 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Context window size (default: 32768). Keep large.
-                      </p>
-                    </div>
-
-                    {/* Temperature */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Temperature
-                        </label>
-                        <input
-                          type="number"
-                          min={0.0} max={2.0} step={0.1}
-                          value={settings.ollama_temperature ?? 0.0}
-                          onChange={(e) => {
-                            const parsed = parseFloat(e.target.value)
-                            upd('ollama_temperature', isNaN(parsed) ? 0.0 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Creative randomness: 0.0 is deterministic.
-                      </p>
-                    </div>
-
-                    {/* Top P */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Top P
-                        </label>
-                        <input
-                          type="number"
-                          min={0.0} max={1.0} step={0.05}
-                          value={settings.ollama_top_p ?? 0.9}
-                          onChange={(e) => {
-                            const parsed = parseFloat(e.target.value)
-                            upd('ollama_top_p', isNaN(parsed) ? 0.9 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Nucleus sampling threshold (default: 0.9).
-                      </p>
-                    </div>
-
-                    {/* Top K */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Top K
-                        </label>
-                        <input
-                          type="number"
-                          min={0} max={500} step={5}
-                          value={settings.ollama_top_k ?? 40}
-                          onChange={(e) => {
-                            const parsed = parseInt(e.target.value, 10)
-                            upd('ollama_top_k', isNaN(parsed) ? 40 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Top-K sampling limit (default: 40).
-                      </p>
-                    </div>
-
-                    {/* Repeat Penalty */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Repeat Penalty
-                        </label>
-                        <input
-                          type="number"
-                          min={0.0} max={3.0} step={0.05}
-                          value={settings.ollama_repeat_penalty ?? 1.15}
-                          onChange={(e) => {
-                            const parsed = parseFloat(e.target.value)
-                            upd('ollama_repeat_penalty', isNaN(parsed) ? 1.15 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Repetition penalty weight (default: 1.15).
-                      </p>
-                    </div>
-
-                    {/* Seed */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Random Seed
-                        </label>
-                        <input
-                          type="number"
-                          min={-1}
-                          value={settings.ollama_seed ?? -1}
-                          onChange={(e) => {
-                            const parsed = parseInt(e.target.value, 10)
-                            upd('ollama_seed', isNaN(parsed) ? -1 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Determinism seed (-1 for random).
-                      </p>
-                    </div>
-
-                    {/* Threads */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          CPU Threads
-                        </label>
-                        <input
-                          type="number"
-                          min={0}
-                          value={settings.ollama_num_thread ?? 0}
-                          onChange={(e) => {
-                            const parsed = parseInt(e.target.value, 10)
-                            upd('ollama_num_thread', isNaN(parsed) ? 0 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Number of CPU threads (default: 0 = auto).
-                      </p>
-                    </div>
-
-                    {/* GPU Layers */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          GPU Layers
-                        </label>
-                        <input
-                          type="number"
-                          min={-1}
-                          value={settings.ollama_num_gpu ?? -1}
-                          onChange={(e) => {
-                            const parsed = parseInt(e.target.value, 10)
-                            upd('ollama_num_gpu', isNaN(parsed) ? -1 : parsed)
-                          }}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Layers offloaded to GPU (-1 = auto).
-                      </p>
-                    </div>
-
-                    {/* Keep Alive */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Keep Alive
-                        </label>
-                        <input
-                          type="text"
-                          value={settings.ollama_keep_alive ?? '5m'}
-                          onChange={(e) => upd('ollama_keep_alive', e.target.value)}
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Time model stays loaded (e.g. 5m, 1h, 0).
-                      </p>
-                    </div>
-
-                    {/* Stop Sequences */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                        <label style={{ fontSize: '.88rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                          Stop Sequences
-                        </label>
-                        <input
-                          type="text"
-                          value={settings.ollama_stop ?? ''}
-                          onChange={(e) => upd('ollama_stop', e.target.value)}
-                          placeholder="e.g. \n,User:"
-                          style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                            color: 'hsl(var(--accent))', fontWeight: 700,
-                            padding: '.25rem .5rem',
-                            background: 'hsl(var(--accent) / .1)',
-                            borderRadius: '6px',
-                            border: '1.5px solid hsl(var(--accent) / .2)',
-                            width: '90px', textAlign: 'center',
-                            outline: 'none',
-                          }}
-                        />
-                      </div>
-                      <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                        Comma-separated sequence list.
-                      </p>
-                    </div>
-
-                  </div>
-                </div>
+                )}
               </div>
             </div>
+          )}
 
-          {/* ─── RAG Configuration Settings ─── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(210,90%,50% / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(210,90%,50% / .3)',
-            }}>
-              <Database size={18} style={{ color: 'hsl(210,90%,50%)' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              RAG & Retrieval Settings
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '2rem'
-          }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.5rem' }}>
-              {/* Chunk Size */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    Chunk Size (words)
-                  </label>
+          {/* 📝 TAB: PROMPT TEMPLATES */}
+          {activeTab === 'prompts' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 1100, margin: '0 auto' }}>
+              
+              {/* Prompt Controls & Search Header */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'space-between', borderRadius: 12, border: '1.5px solid hsl(140,70%,45%/.3)', background: 'hsl(var(--card))', padding: '.85rem 1.15rem' }}>
+                
+                {/* Search */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'hsl(var(--muted)/.3)', border: '1px solid hsl(var(--border)/.4)', borderRadius: 8, padding: '5px 10px', width: 280 }}>
+                  <Search size={14} style={{ color: 'hsl(var(--pencil))' }} />
                   <input
-                    type="number"
-                    min={50} max={2000} step={50}
-                    value={settings.rag_chunk_size !== undefined ? settings.rag_chunk_size : 400}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('rag_chunk_size', isNaN(parsed) ? 400 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
+                    type="text"
+                    placeholder="Search prompts by name, key, description..."
+                    value={promptSearchQuery}
+                    onChange={e => setPromptSearchQuery(e.target.value)}
+                    style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: '.78rem', width: '100%', color: 'hsl(var(--ink))', fontFamily: 'Inter' }}
                   />
+                  {promptSearchQuery && <button onClick={() => setPromptSearchQuery('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: 0 }}><RotateCcw size={11} /></button>}
                 </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Target number of words per document chunk (default: 400).
-                </p>
-              </div>
 
-              {/* Chunk Overlap */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    Chunk Overlap (words)
-                  </label>
-                  <input
-                    type="number"
-                    min={0} max={500} step={10}
-                    value={settings.rag_chunk_overlap !== undefined ? settings.rag_chunk_overlap : 50}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('rag_chunk_overlap', isNaN(parsed) ? 50 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Words of overlap between adjacent chunks (default: 50).
-                </p>
-              </div>
-
-              {/* K Global */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    K Global Context
-                  </label>
-                  <input
-                    type="number"
-                    min={0} max={20} step={1}
-                    value={settings.rag_retrieval_k_global !== undefined ? settings.rag_retrieval_k_global : 2}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('rag_retrieval_k_global', isNaN(parsed) ? 2 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Top-K global context documents to retrieve (default: 2).
-                </p>
-              </div>
-
-              {/* K Meeting */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    K Meeting Attachments
-                  </label>
-                  <input
-                    type="number"
-                    min={0} max={20} step={1}
-                    value={settings.rag_retrieval_k_meeting !== undefined ? settings.rag_retrieval_k_meeting : 3}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('rag_retrieval_k_meeting', isNaN(parsed) ? 3 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Top-K meeting context attachments to retrieve (default: 3).
-                </p>
-              </div>
-
-              {/* K Transcript */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    K Transcript Chunks
-                  </label>
-                  <input
-                    type="number"
-                    min={0} max={30} step={1}
-                    value={settings.rag_retrieval_k_transcript !== undefined ? settings.rag_retrieval_k_transcript : 10}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10)
-                      upd('rag_retrieval_k_transcript', isNaN(parsed) ? 10 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Top-K transcript discussion chunks to retrieve (default: 10).
-                </p>
-              </div>
-
-              {/* Score Cutoff */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                  <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                    Relative Score Cutoff
-                  </label>
-                  <input
-                    type="number"
-                    min={0.001} max={0.5} step={0.001}
-                    value={settings.rag_relative_score_cutoff !== undefined ? settings.rag_relative_score_cutoff : 0.01}
-                    onChange={(e) => {
-                      const parsed = parseFloat(e.target.value)
-                      upd('rag_relative_score_cutoff', isNaN(parsed) ? 0.01 : parsed)
-                    }}
-                    style={{
-                      fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                      color: 'hsl(var(--accent))', fontWeight: 700,
-                      padding: '.25rem .5rem',
-                      background: 'hsl(var(--accent) / .1)',
-                      borderRadius: '6px',
-                      border: '1.5px solid hsl(var(--accent) / .2)',
-                      width: '80px', textAlign: 'center',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                  Similarity score delta threshold to filter low-ranking search results (default: 0.01).
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* ─── Text Embedding Model Settings ─── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(280,80%,60% / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(280,80%,60% / .3)',
-            }}>
-              <Database size={18} style={{ color: 'hsl(280,80%,60%)' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              Text Embedding Model Selection
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '1.5rem'
-          }}>
-            <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0, lineHeight: 1.5 }}>
-              Select the active text embedding model used to generate vector embeddings for global context documents, meeting attachments, and transcript chunks.
-            </p>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
-              {embeddingModels.map((m) => {
-                const isSelected = (settings.embedding_model || 'Qwen3-Embedding-0.6B') === m.id
-                return (
-                  <div
-                    key={m.id}
-                    onClick={() => upd('embedding_model', m.id)}
-                    style={{
-                      padding: '1.1rem 1.25rem',
-                      borderRadius: '10px',
-                      border: `2px solid ${isSelected ? 'hsl(var(--accent))' : 'hsl(var(--ink) / .1)'}`,
-                      background: isSelected ? 'hsl(var(--accent) / .06)' : 'hsl(var(--background))',
-                      cursor: 'pointer',
-                      transition: 'all .2s ease',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
-                      gap: '8px',
-                      boxShadow: isSelected ? '0 0 0 1px hsl(var(--accent))' : 'none',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ fontWeight: 700, fontSize: '.95rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                        {m.name}
-                      </div>
-                      <span style={{
-                        fontSize: '.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px',
-                        background: m.installed ? 'hsl(142,70%,45% / .15)' : 'hsl(45,90%,50% / .15)',
-                        color: m.installed ? 'hsl(142,70%,30%)' : 'hsl(45,90%,35%)',
-                        border: `1px solid ${m.installed ? 'hsl(142,70%,45% / .3)' : 'hsl(45,90%,50% / .3)'}`
-                      }}>
-                        {m.installed ? 'Installed' : 'Not Downloaded'}
-                      </span>
-                    </div>
-
-                    <p style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.45 }}>
-                      {m.description}
-                    </p>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '4px', fontSize: '.75rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace' }}>
-                      {m.dim && <span>Dimension: {m.dim}d</span>}
-                      {m.quantization && <span>Format: {m.quantization}</span>}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-
-            <div style={{
-              fontSize: '.8rem',
-              color: 'hsl(45, 90%, 35%)',
-              background: 'hsl(45, 90%, 50% / .1)',
-              border: '1px solid hsl(45, 90%, 50% / .25)',
-              padding: '.75rem 1rem',
-              borderRadius: '8px',
-              fontFamily: 'Inter, sans-serif',
-              lineHeight: 1.5,
-            }}>
-              💡 <strong>Note:</strong> Changing the active embedding model unloads the current model from memory. Vector indexes will automatically re-embed using the newly selected model when vector search or document indexing runs.
-            </div>
-          </div>
-
-          {/* ─── AI Task Output Settings ─── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '2.5rem', marginBottom: '1.5rem' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(260,70%,60% / .15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(260,70%,60% / .3)',
-            }}>
-              <FileText size={18} style={{ color: 'hsl(260,70%,60%)' }} />
-            </div>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-              AI Task Output Limits (max_new_tokens)
-            </h2>
-          </div>
-
-          <div style={{
-            padding: '1.75rem',
-            background: 'hsl(var(--card))',
-            border: '1.5px solid hsl(var(--ink) / .1)',
-            borderRadius: '12px',
-            display: 'flex', flexDirection: 'column', gap: '2rem',
-            marginBottom: '2rem'
-          }}>
-            <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0, lineHeight: 1.6 }}>
-              Configure the maximum generation token limit (`max_new_tokens`) for every individual AI task type.
-            </p>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
-              {[
-                { key: 'max_tokens_mom', label: 'Minutes of Meeting (MoM)', desc: 'Max output tokens for generating the primary Minutes of Meeting.' },
-                { key: 'max_tokens_mom_merge', label: 'MoM Merge Consolidation', desc: 'Max tokens used during multi-section MoM merges.' },
-                { key: 'max_tokens_raw_mom_to_mom', label: 'Raw MoM to Final MoM', desc: 'Max tokens for compiling final MoM from raw annotations.' },
-                { key: 'max_tokens_raw_mom_extraction', label: 'Raw MoM Extraction', desc: 'Max tokens for parsing discussion points per section.' },
-                { key: 'max_tokens_raw_mom_repair', label: 'Raw MoM Repair', desc: 'Max tokens used to fix corrupted raw MoM JSON structures.' },
-                { key: 'max_tokens_agenda_compress', label: 'Agenda Compression', desc: 'Max tokens for converting long/messy agendas into lists.' },
-                { key: 'max_tokens_reference_compress', label: 'Reference Document Compression', desc: 'Max tokens for summarizing attached reference knowledge.' },
-                { key: 'max_tokens_agenda_from_summary', label: 'Agenda Generation from Summary', desc: 'Max tokens for creating agenda items based on a summary.' },
-                { key: 'max_tokens_executive_summary', label: 'Executive Summary', desc: 'Max tokens for generating executive PDF report summaries.' },
-                { key: 'max_tokens_short_summary', label: 'Short Summary', desc: 'Max tokens for generating the ~120-word meeting summary.' },
-                { key: 'max_tokens_detailed_summary', label: 'Detailed Summary', desc: 'Max tokens for the detailed section-by-section summaries.' },
-                { key: 'max_tokens_chunk_summary', label: 'Chunk Summary', desc: 'Max tokens for single-chunk summaries during RAG/hierarchical passes.' },
-                { key: 'max_tokens_key_points', label: 'Key Points', desc: 'Max tokens for generating bullet-point meeting highlights.' },
-                { key: 'max_tokens_action_items', label: 'Action Items', desc: 'Max tokens for extracting standard action item lists.' },
-                { key: 'max_tokens_key_decisions', label: 'Key Decisions', desc: 'Max tokens for highlighting critical meeting decisions.' },
-                { key: 'max_tokens_speaker_summary', label: 'Speaker Summary', desc: 'Max tokens for summarizing a speaker\'s overall contributions.' },
-                { key: 'max_tokens_speaker_key_points', label: 'Speaker Key Points', desc: 'Max tokens for extracting speaker-specific highlights.' },
-                { key: 'max_tokens_speaker_action_items', label: 'Speaker Action Items', desc: 'Max tokens for extracting tasks assigned to specific speakers.' },
-                { key: 'max_tokens_collection_chat', label: 'Collection Chat Max Tokens', desc: 'Max output tokens for collection-level RAG questions.' },
-                { key: 'rag_max_collection_context', label: 'Max Collection Context Chunks', desc: 'Default maximum number of retrieved context chunks sent to LLM during Collection Chat.' },
-                { key: 'max_tokens_collection_compare', label: 'Collection Comparison', desc: 'Max tokens for comparing two full meetings.' },
-                { key: 'max_tokens_collection_topic_growth', label: 'Collection Topic Growth', desc: 'Max tokens for tracking how a topic grows over time.' },
-                { key: 'max_tokens_vocab_extractor', label: 'Vocabulary Extractor', desc: 'Max tokens for AI-assisted glossary/vocab extraction.' },
-              ].map(({ key, label, desc }) => {
-                return (
-                  <div key={key}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                      <label style={{ fontSize: '.9rem', fontWeight: 600, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-                        {label}
-                      </label>
-                      <input
-                        type="number"
-                        min={1} max={65536}
-                        value={settings[key as keyof UserSettings] ?? 1024}
-                        onChange={(e) => {
-                          const parsed = parseInt(e.target.value, 10)
-                          upd(key as keyof UserSettings, isNaN(parsed) ? 1024 : parsed)
-                        }}
-                        style={{
-                          fontFamily: 'JetBrains Mono, monospace', fontSize: '.85rem',
-                          color: 'hsl(var(--accent))', fontWeight: 700,
-                          padding: '.25rem .5rem',
-                          background: 'hsl(var(--accent) / .1)',
-                          borderRadius: '6px',
-                          border: '1.5px solid hsl(var(--accent) / .2)',
-                          width: '80px', textAlign: 'center',
-                          outline: 'none',
-                        }}
-                      />
-                    </div>
-                    <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', margin: 0, lineHeight: 1.4 }}>
-                      {desc}
-                    </p>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-
-          <button
-            className={`btn ${settingsSaved ? 'btn-success' : 'btn-primary'}`}
-            onClick={handleSaveSettings}
-            disabled={savingSettings}
-            style={{ marginTop: '1.5rem', padding: '.75rem 1.75rem', fontSize: '.95rem' }}
-            id="save-settings-btn"
-          >
-            {savingSettings ? <Loader size={16} className="spin" /> : settingsSaved ? <CheckCircle size={16} /> : <Save size={16} />}
-            {settingsSaved ? 'Settings Saved!' : savingSettings ? 'Saving…' : 'Save Settings'}
-          </button>
-        </section>
-      )}
-
-      {/* ─── Prompt Templates Section ─── */}
-      <section className="animate-slide-up" style={{ marginTop: '2.5rem', marginBottom: '2.5rem', animationDelay: '0.25s', animationFillMode: 'both' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{
-              width: '36px', height: '36px', borderRadius: '9px',
-              background: 'hsl(260,70%,60% / .12)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              border: '1.5px solid hsl(260,70%,60% / .25)',
-            }}>
-              <Code size={18} style={{ color: 'hsl(260,70%,60%)' }} />
-            </div>
-            <div>
-              <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', margin: 0 }}>
-                Prompt Templates
-              </h2>
-              <p style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', margin: 0, fontFamily: 'Inter, sans-serif' }}>
-                Customize and manage AI prompt templates used throughout the application.
-              </p>
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button
-              onClick={handleExportPrompts}
-              className="btn btn-secondary"
-              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', height: '36px' }}
-              title="Export all custom and default templates to a JSON file"
-            >
-              <Download size={14} /> Export
-            </button>
-            <label
-              className="btn btn-secondary"
-              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', height: '36px', margin: 0 }}
-              title="Import templates from a JSON export file"
-            >
-              <Upload size={14} /> {importing ? 'Importing…' : 'Import'}
-              <input type="file" accept=".json" onChange={handleImportPrompts} style={{ display: 'none' }} disabled={importing} />
-            </label>
-            <button
-              onClick={handleResetAllPrompts}
-              className="btn btn-secondary"
-              style={{ padding: '.5rem 1rem', fontSize: '.82rem', display: 'flex', alignItems: 'center', gap: '6px', color: 'hsl(var(--destructive))', borderColor: 'hsl(var(--destructive) / .3)', height: '36px' }}
-              title="Reset all prompt templates to defaults"
-            >
-              <RotateCcw size={14} /> Reset All
-            </button>
-          </div>
-        </div>
-
-        {loadingPrompts ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '4rem', flexDirection: 'column', gap: '1rem' }}>
-            <Loader size={28} className="spin" style={{ color: 'hsl(var(--accent))' }} />
-            <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.9rem', color: 'hsl(var(--pencil))' }}>Loading prompt templates…</p>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {/* Category tabs */}
-            <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid hsl(var(--border) / .3)', paddingBottom: '.5rem', overflowX: 'auto' }}>
-              {['MoM', 'Raw MoM', 'Summaries', 'Analysis', 'Speaker'].map(cat => {
-                const isActive = activeCategory === cat
-                const count = prompts.filter(p => p.category === cat).length
-                return (
-                  <button
-                    key={cat}
-                    onClick={() => setActiveCategory(cat)}
-                    style={{
-                      padding: '.5rem 1rem', borderRadius: '8px', border: 'none',
-                      background: isActive ? 'hsl(var(--accent) / .12)' : 'transparent',
-                      color: isActive ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
-                      fontWeight: isActive ? 700 : 500, fontSize: '.85rem',
-                      cursor: 'pointer', transition: 'all .15s', fontFamily: 'Inter',
-                      display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap'
-                    }}
-                  >
-                    {cat}
-                    <span style={{
-                      fontSize: '.72rem', fontWeight: isActive ? 700 : 500,
-                      background: isActive ? 'hsl(var(--accent) / .15)' : 'hsl(var(--muted))',
-                      color: isActive ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
-                      padding: '1px 6px', borderRadius: '999px',
-                    }}>
-                      {count}
-                    </span>
+                {/* Bulk Actions */}
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <button onClick={handleResetAllPrompts} className="btn btn-secondary" style={{ fontSize: '.74rem', padding: '.35rem .7rem' }}>
+                    <RotateCcw size={12} /> Reset All Defaults
                   </button>
-                )
-              })}
-            </div>
+                  <button onClick={handleExportPrompts} className="btn btn-secondary" style={{ fontSize: '.74rem', padding: '.35rem .7rem' }}>
+                    <Download size={12} /> Export JSON
+                  </button>
+                  <label className="btn btn-secondary" style={{ fontSize: '.74rem', padding: '.35rem .7rem', cursor: 'pointer' }}>
+                    <Upload size={12} /> {importing ? 'Importing...' : 'Import JSON'}
+                    <input type="file" accept=".json" onChange={handleImportPrompts} style={{ display: 'none' }} disabled={importing} />
+                  </label>
+                </div>
+              </div>
 
-            {/* Prompt Cards */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {prompts.filter(p => p.category === activeCategory).map(p => {
-                const currentVal = editingTemplates[p.key] !== undefined ? editingTemplates[p.key] : p.template
-                const hasChanges = currentVal !== p.template
-                const isModified = p.is_modified
-                const isSaving = savingKeys.has(p.key)
-                const isSaved = savedKeys.has(p.key)
+              {/* Category Pills */}
+              <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 4 }}>
+                {promptCategories.map(cat => {
+                  const active = activePromptCategory === cat
+                  return (
+                    <button
+                      key={cat}
+                      onClick={() => setActivePromptCategory(cat)}
+                      style={{
+                        padding: '.35rem .85rem', borderRadius: 20, fontSize: '.76rem', fontWeight: active ? 700 : 500,
+                        background: active ? (cat === 'ROM' ? 'hsl(280,75%,60%)' : 'hsl(var(--accent))') : 'hsl(var(--muted)/.4)',
+                        color: active ? 'white' : 'hsl(var(--ink))',
+                        border: 'none', cursor: 'pointer', fontFamily: 'Inter', flexShrink: 0,
+                        boxShadow: active ? '0 2px 8px rgba(0,0,0,0.15)' : 'none'
+                      }}
+                    >
+                      {cat} {cat !== 'All' && `(${prompts.filter(p => p.category === cat).length})`}
+                    </button>
+                  )
+                })}
+              </div>
 
-                return (
-                  <div key={p.key} style={{
-                    padding: '1.5rem', background: 'hsl(var(--card))',
-                    border: '1.5px solid hsl(var(--border) / .4)', borderRadius: '12px',
-                    display: 'flex', flexDirection: 'column', gap: '1rem',
-                    transition: 'box-shadow .2s',
-                  }}
-                  className="sketch-border"
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
-                      <div>
-                        <h3 style={{ margin: 0, fontSize: '.98rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter' }}>
-                          {p.name}
-                        </h3>
-                        <p style={{ margin: '4px 0 0', fontSize: '.8rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, fontFamily: 'Inter, sans-serif' }}>
-                          {p.description}
-                        </p>
+              {/* Global System Prompt Card */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1rem 1.15rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.5rem' }}>
+                  <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>System-Wide Global System Prompt</div>
+                  {promptSaving && <span style={{ fontSize: '.7rem', color: 'hsl(var(--pencil))' }}>Saving...</span>}
+                  {promptSaved && <span style={{ fontSize: '.7rem', color: 'hsl(140,70%,45%)', fontWeight: 700 }}>Saved!</span>}
+                </div>
+                <textarea
+                  value={globalPrompt}
+                  onChange={e => handlePromptChange(e.target.value)}
+                  rows={2}
+                  placeholder="Enter system-wide instructions injected into all AI calls..."
+                  style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 8, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--paper)/.4)', fontSize: '.78rem', fontFamily: 'Inter', lineHeight: 1.45, color: 'hsl(var(--ink))' }}
+                />
+              </div>
+
+              {/* Prompt Templates List */}
+              {loadingPrompts ? (
+                <div style={{ textAlign: 'center', padding: '3rem', color: 'hsl(var(--pencil))' }}><Loader size={24} className="spin" /> Loading prompt templates...</div>
+              ) : filteredPrompts.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '3rem', color: 'hsl(var(--pencil))' }}>No prompt templates found for this filter.</div>
+              ) : (
+                filteredPrompts.map(pt => {
+                  const isSaving = savingKeys.has(pt.key)
+                  const isSaved = savedKeys.has(pt.key)
+                  const currentVal = editingTemplates[pt.key] ?? pt.template
+                  const isExpanded = expandedPromptKey === pt.key
+
+                  return (
+                    <div key={pt.key} style={{ borderRadius: 12, border: pt.is_modified ? '1.5px solid hsl(35,90%,50%/.6)' : '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.1rem 1.25rem', display: 'flex', flexDirection: 'column', gap: '.7rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: '.92rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{pt.name}</span>
+                            <span style={{ fontSize: '.65rem', fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: pt.category === 'ROM' ? 'hsl(280,75%,60%/.15)' : 'hsl(var(--muted))', color: pt.category === 'ROM' ? 'hsl(280,75%,60%)' : 'hsl(var(--pencil))' }}>{pt.category}</span>
+                            <span style={{ fontSize: '.65rem', fontFamily: 'JetBrains Mono', color: 'hsl(var(--pencil))' }}>key: {pt.key}</span>
+                            {pt.is_modified && <span style={{ fontSize: '.65rem', fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: 'hsl(35,90%,50%/.15)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)' }}>Customized</span>}
+                          </div>
+                          <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', marginTop: 3 }}>{pt.description}</div>
+                        </div>
+
+                        {/* Prompt Action Buttons */}
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <button
+                            onClick={() => handleCopyPrompt(pt.key, currentVal)}
+                            title="Copy prompt template text"
+                            style={{ padding: '.25rem .55rem', borderRadius: 6, border: '1px solid hsl(var(--border)/.4)', background: 'transparent', fontSize: '.7rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+                          >
+                            {copiedKey === pt.key ? <Check size={10} style={{ color: 'hsl(140,70%,45%)' }} /> : <Copy size={10} />}
+                            {copiedKey === pt.key ? 'Copied' : 'Copy'}
+                          </button>
+                          <button
+                            onClick={() => setExpandedPromptKey(isExpanded ? null : pt.key)}
+                            title={isExpanded ? 'Collapse editor' : 'Expand editor'}
+                            style={{ padding: '.25rem .55rem', borderRadius: 6, border: '1px solid hsl(var(--border)/.4)', background: 'transparent', fontSize: '.7rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+                          >
+                            {isExpanded ? <Minimize2 size={10} /> : <Maximize2 size={10} />}
+                            {isExpanded ? 'Collapse' : 'Expand'}
+                          </button>
+                          {pt.is_modified && (
+                            <button onClick={() => handleResetPromptTemplate(pt.key)} title="Reset to default" style={{ padding: '.25rem .55rem', borderRadius: 6, border: '1px solid hsl(var(--border)/.4)', background: 'transparent', fontSize: '.7rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <RotateCcw size={10} /> Reset
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleSavePromptTemplate(pt.key)}
+                            disabled={isSaving}
+                            style={{
+                              padding: '.32rem .8rem', borderRadius: 6, fontSize: '.74rem', fontWeight: 700,
+                              background: isSaved ? 'hsl(140,70%,45%)' : 'hsl(var(--accent))',
+                              color: 'white', border: 'none', cursor: isSaving ? 'not-allowed' : 'pointer',
+                              display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'Inter'
+                            }}
+                          >
+                            {isSaving ? <Loader size={10} className="spin" /> : isSaved ? <CheckCircle size={10} /> : <Save size={10} />}
+                            {isSaving ? 'Saving' : isSaved ? 'Saved' : 'Save Template'}
+                          </button>
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                        {isModified && (
-                          <span style={{
-                            fontSize: '.7rem', fontWeight: 600, color: 'hsl(220,80%,60%)',
-                            background: 'hsl(220,80%,60% / .1)', border: '1px solid hsl(220,80%,60% / .25)',
-                            padding: '1px 6px', borderRadius: '4px', fontFamily: 'Inter, sans-serif'
-                          }}>
-                            Customized
-                          </span>
-                        )}
-                        {hasChanges && (
-                          <span style={{
-                            fontSize: '.7rem', fontWeight: 600, color: 'hsl(35,90%,50%)',
-                            background: 'hsl(35,90%,50% / .1)', border: '1px solid hsl(35,90%,50% / .25)',
-                            padding: '1px 6px', borderRadius: '4px', fontFamily: 'Inter, sans-serif'
-                          }}>
-                            Unsaved Changes
-                          </span>
-                        )}
-                      </div>
-                    </div>
 
-                    {/* Fills variables badges */}
-                    {p.variables?.length > 0 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
-                        <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.03em', fontFamily: 'Inter, sans-serif' }}>Required variables:</span>
-                        {p.variables.map(v => (
-                          <code key={v} style={{
-                            fontFamily: 'JetBrains Mono, monospace', fontSize: '.72rem',
-                            color: 'hsl(var(--accent))', background: 'hsl(var(--accent) / .08)',
-                            padding: '2px 6px', borderRadius: '4px', border: '1px solid hsl(var(--accent) / .15)'
-                          }}>
-                            {v}
-                          </code>
-                        ))}
-                      </div>
-                    )}
+                      {/* Variables pill list (Clicking variable inserts it into prompt!) */}
+                      {pt.variables?.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center', background: 'hsl(var(--muted)/.2)', padding: '.35rem .65rem', borderRadius: 6 }}>
+                          <span style={{ fontSize: '.67rem', color: 'hsl(var(--pencil))', fontWeight: 600 }}>Click variable to insert:</span>
+                          {pt.variables.map((v, vi) => (
+                            <button
+                              key={vi}
+                              onClick={() => handleInsertVariable(pt.key, v)}
+                              title="Click to insert variable into template"
+                              style={{ fontSize: '.66rem', padding: '1px 6px', borderRadius: 4, background: 'hsl(205,90%,55%/.12)', color: 'hsl(205,90%,55%)', border: '1px solid hsl(205,90%,55%/.25)', fontFamily: 'JetBrains Mono', cursor: 'pointer' }}
+                            >
+                              + {v}
+                            </button>
+                          ))}
+                        </div>
+                      )}
 
-                    {/* Textarea */}
-                    <div style={{ position: 'relative' }}>
+                      {/* Template Textarea */}
                       <textarea
                         value={currentVal}
-                        onChange={e => setEditingTemplates(prev => ({ ...prev, [p.key]: e.target.value }))}
-                        rows={10}
+                        onChange={e => setEditingTemplates({ ...editingTemplates, [pt.key]: e.target.value })}
+                        rows={isExpanded ? 16 : 7}
                         style={{
-                          width: '100%', padding: '.75rem', borderRadius: '8px',
-                          background: 'hsl(var(--muted) / .3)', border: '1.5px solid hsl(var(--border) / .6)',
-                          color: 'hsl(var(--ink))', fontFamily: 'JetBrains Mono, monospace',
-                          fontSize: '.8rem', lineHeight: 1.6, resize: 'vertical',
-                          outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s',
+                          width: '100%', padding: '.65rem .8rem', borderRadius: 8,
+                          border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--paper)/.5)',
+                          fontSize: '.76rem', fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.45,
+                          color: 'hsl(var(--ink))', whiteSpace: 'pre-wrap', transition: 'height .2s ease'
                         }}
-                        onFocus={e => (e.currentTarget.style.borderColor = 'hsl(var(--accent) / .5)')}
-                        onBlur={e => (e.currentTarget.style.borderColor = 'hsl(var(--border) / .6)')}
                       />
                     </div>
-
-                    {/* Card Actions */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
-                        {currentVal.length} characters
-                      </div>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        {isModified && (
-                          <button
-                            onClick={() => {
-                              handleResetPromptTemplate(p.key)
-                              setEditingTemplates(prev => {
-                                const next = { ...prev }
-                                delete next[p.key]
-                                return next
-                              })
-                            }}
-                            className="btn btn-secondary"
-                            style={{ padding: '.4rem .85rem', fontSize: '.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-                          >
-                            <RotateCcw size={12} /> Reset to Default
-                          </button>
-                        )}
-                        {hasChanges && (
-                          <button
-                            onClick={() => {
-                              setEditingTemplates(prev => {
-                                const next = { ...prev }
-                                delete next[p.key]
-                                return next
-                              })
-                            }}
-                            className="btn btn-secondary"
-                            style={{ padding: '.4rem .85rem', fontSize: '.78rem' }}
-                          >
-                            Discard
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            handleSavePromptTemplate(p.key, currentVal)
-                            setEditingTemplates(prev => {
-                              const next = { ...prev }
-                              delete next[p.key]
-                              return next
-                            })
-                          }}
-                          disabled={!hasChanges || isSaving}
-                          className={`btn ${isSaved ? 'btn-success' : 'btn-primary'}`}
-                          style={{ padding: '.4rem 1.25rem', fontSize: '.78rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-                        >
-                          {isSaving ? <Loader size={12} className="spin" /> : isSaved ? <CheckCircle size={12} /> : <Save size={12} />}
-                          {isSaved ? 'Saved!' : isSaving ? 'Saving…' : 'Save Changes'}
-                        </button>
-                      </div>
-                    </div>
-
-                  </div>
-                )
-              })}
+                  )
+                })
+              )}
             </div>
-            {/* ─── Global Transcription Prompt ─── */}
-      <section className="animate-slide-up" style={{ marginBottom: '2.5rem', animationDelay: '0.02s', animationFillMode: 'both' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1.25rem' }}>
-          <div style={{
-            width: '36px', height: '36px', borderRadius: '9px',
-            background: 'hsl(280,70%,60% / .12)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: '1.5px solid hsl(280,70%,60% / .25)',
-          }}>
-            <MessageSquare size={18} style={{ color: 'hsl(280,70%,60%)' }} />
-          </div>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))' }}>
-            Global Transcription Prompt
-          </h2>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {promptSaving && <Loader size={13} className="spin" style={{ color: 'hsl(var(--pencil))' }} />}
-            {promptSaved && <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '.78rem', color: 'hsl(130,60%,45%)', fontFamily: 'Inter, sans-serif', fontWeight: 600 }}>
-              <CheckCircle size={13} /> Saved
-            </span>}
-          </div>
-        </div>
+          )}
 
-        <div style={{
-          padding: '1.25rem',
-          background: 'hsl(var(--card))',
-          border: '1.5px solid hsl(var(--ink) / .1)',
-          borderRadius: '12px',
-        }}>
-          <textarea
-            id="global-prompt-textarea"
-            value={globalPrompt}
-            onChange={e => handlePromptChange(e.target.value)}
-            placeholder="Enter a global system prompt for all transcriptions…\n\nExamples:\n\u2022 This is a technical meeting in the healthcare domain.\n\u2022 The participants speak English with Indian accents.\n\u2022 Use formal language and preserve acronyms as-is."
-            rows={5}
-            style={{
-              width: '100%',
-              padding: '.75rem',
-              borderRadius: '8px',
-              background: 'hsl(var(--muted) / .4)',
-              border: '1.5px solid hsl(var(--ink) / .1)',
-              color: 'hsl(var(--ink))',
-              fontFamily: 'Inter, sans-serif',
-              fontSize: '.88rem',
-              lineHeight: 1.7,
-              resize: 'vertical',
-              outline: 'none',
-              boxSizing: 'border-box',
-              transition: 'border-color .15s',
-            }}
-            onFocus={e => (e.currentTarget.style.borderColor = 'hsl(280,70%,60% / .5)')}
-            onBlur={e => (e.currentTarget.style.borderColor = 'hsl(var(--ink) / .1)')}
-          />
-          <p style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', marginTop: '.6rem', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
-            This prompt is automatically included in every Whisper transcription request.
-            Keep it under 200 words for best results. Auto-saved as you type.
-          </p>
-        </div>
-      </section>
+          {/* 🎙️ TAB: VOICE & DIARIZATION */}
+          {activeTab === 'voice' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
+              {/* Recognition Thresholds */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(205,90%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Sliders size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Diarization &amp; Speaker Matching
+                </h3>
+                {settings && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.1rem' }}>
+                    <SettingCard
+                      title="Speaker Similarity Threshold"
+                      description="Cosine similarity threshold for assigning speaker labels (0.50–0.99)."
+                      value={settings.speaker_similarity_threshold}
+                      min={0.50} max={0.99} step={0.01}
+                      onChange={v => setSettings({ ...settings, speaker_similarity_threshold: v })}
+                    />
+                    <SettingCard
+                      title="Min Segment Duration (secs)"
+                      description="Minimum audio segment length to consider for speaker identification."
+                      value={settings.min_segment_duration}
+                      min={0.1} max={10.0} step={0.1}
+                      onChange={v => setSettings({ ...settings, min_segment_duration: v })}
+                    />
+                    <SettingCard
+                      title="Word Confidence Low"
+                      description="Low word confidence threshold for transcript highlighting."
+                      value={settings.word_conf_low}
+                      min={0.1} max={1.0} step={0.05}
+                      onChange={v => setSettings({ ...settings, word_conf_low: v })}
+                    />
+                    <SettingCard
+                      title="Word Confidence Mid"
+                      description="Mid word confidence threshold for transcript highlighting."
+                      value={settings.word_conf_mid}
+                      min={0.1} max={1.0} step={0.05}
+                      onChange={v => setSettings({ ...settings, word_conf_mid: v })}
+                    />
+                  </div>
+                )}
+              </div>
 
-          </div>
-        )}
-      
-      </section>
+              {/* Voice Profiles List */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Mic size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Voice Profiles ({profiles.length})
+                </h3>
+                {loadingProfiles ? (
+                  <div style={{ textAlign: 'center', padding: '2rem' }}><Loader size={20} className="spin" /></div>
+                ) : profiles.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '2rem', color: 'hsl(var(--pencil))' }}>No voice profiles saved yet.</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {profiles.map((p, idx) => {
+                      const color = PROFILE_COLORS[idx % PROFILE_COLORS.length]
+                      return (
+                        <div key={p.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '.75rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', borderLeft: `4px solid ${color}`, border: '1px solid hsl(var(--border)/.3)' }}>
+                          <div>
+                            {editingId === p.id ? (
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <input value={editLabel} onChange={e => setEditLabel(e.target.value)} style={{ padding: '3px 7px', borderRadius: 6, fontSize: '.8rem', border: '1px solid hsl(var(--border))' }} />
+                                <button onClick={() => handleRename(p.id)} disabled={savingLabel} style={{ padding: '3px 8px', borderRadius: 6, background: 'hsl(var(--accent))', color: 'white', border: 'none', fontSize: '.74rem', cursor: 'pointer' }}>{savingLabel ? 'Saving' : 'Save'}</button>
+                              </div>
+                            ) : (
+                              <div style={{ fontWeight: 700, fontSize: '.86rem', color: 'hsl(var(--ink))' }}>{p.label} {p.is_self && <span style={{ fontSize: '.65rem', background: 'hsl(205,90%,55%/.15)', color: 'hsl(205,90%,55%)', padding: '1px 6px', borderRadius: 4, marginLeft: 4 }}>You</span>}</div>
+                            )}
+                            <div style={{ fontSize: '.71rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>{p.sample_count} audio samples recorded</div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button onClick={() => { setEditingId(p.id); setEditLabel(p.label) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))' }}><Pencil size={12} /></button>
+                            <button onClick={() => handleDelete(p.id)} disabled={deletingId === p.id} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))' }}><Trash2 size={12} /></button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ⚡ TAB: LLM INFERENCE */}
+          {activeTab === 'llm' && settings && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(35,90%,50%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Cpu size={16} style={{ color: 'hsl(35,90%,50%)' }} /> Ollama Inference Server &amp; Tuning
+                </h3>
+                
+                {/* Connection Controls */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+                  <SettingInput label="Ollama Server URL" val={settings.ollama_server_url ?? 'http://localhost:11434'} onChange={v => setSettings({ ...settings, ollama_server_url: v })} />
+                  <SettingCard title="Ollama Port" description="Standard port 11434" value={settings.ollama_port ?? 11434} min={1} max={65535} step={1} onChange={v => setSettings({ ...settings, ollama_port: Math.round(v) })} />
+                </div>
+
+                <button onClick={handleTestOllamaConnection} disabled={testingOllama} className="btn btn-secondary" style={{ fontSize: '.78rem', padding: '.45rem 1rem', marginBottom: '1rem' }}>
+                  {testingOllama ? <Loader size={12} className="spin" /> : <Zap size={12} />} {testingOllama ? 'Testing Connection...' : 'Test Ollama Connection'}
+                </button>
+
+                {ollamaTestResult && (
+                  <div style={{ padding: '.75rem 1rem', borderRadius: 8, background: ollamaTestResult.success ? 'hsl(140,70%,45%/.1)' : 'hsl(0,80%,50%/.1)', border: `1px solid ${ollamaTestResult.success ? 'hsl(140,70%,45%/.3)' : 'hsl(0,80%,50%/.3)'}`, fontSize: '.78rem', marginBottom: '1rem' }}>
+                    <div style={{ fontWeight: 700, color: ollamaTestResult.success ? 'hsl(140,70%,40%)' : 'hsl(0,80%,45%)' }}>{ollamaTestResult.message}</div>
+                    {ollamaTestResult.available_models?.length ? <div style={{ marginTop: 4, color: 'hsl(var(--ink))' }}>Available Models: {ollamaTestResult.available_models.join(', ')}</div> : null}
+                  </div>
+                )}
+
+                {/* Hyperparameters */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: '1rem' }}>
+                  <SettingCard title="Context Window (Num Ctx)" description="Maximum context tokens passed to Ollama (default: 32768)." value={settings.ollama_num_ctx ?? 32768} min={512} max={131072} step={1024} onChange={v => setSettings({ ...settings, ollama_num_ctx: Math.round(v) })} />
+                  <SettingCard title="Temperature" description="Sampling temperature (0.0 = deterministic)." value={settings.ollama_temperature ?? 0.0} min={0.0} max={2.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_temperature: v })} />
+                  <SettingCard title="Top-P" description="Nucleus sampling threshold (0.0–1.0)." value={settings.ollama_top_p ?? 0.9} min={0.0} max={1.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_top_p: v })} />
+                  <SettingCard title="Repeat Penalty" description="Penalty for repeating identical tokens." value={settings.ollama_repeat_penalty ?? 1.15} min={0.0} max={3.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_repeat_penalty: v })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 📚 TAB: RAG & VECTOR SEARCH */}
+          {activeTab === 'rag' && settings && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(200,80%,50%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Database size={16} style={{ color: 'hsl(200,80%,50%)' }} /> RAG Chunking &amp; Vector Search
+                </h3>
+
+                {/* Embedding Model selector */}
+                {embeddingModels.length > 0 && (
+                  <div style={{ marginBottom: '1.25rem', padding: '.85rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.4)' }}>
+                    <div style={{ fontSize: '.8rem', fontWeight: 700, marginBottom: 4, color: 'hsl(var(--ink))' }}>Embedding Model</div>
+                    <select
+                      value={settings.embedding_model ?? 'Qwen3-Embedding-0.6B'}
+                      onChange={e => setSettings({ ...settings, embedding_model: e.target.value })}
+                      style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', fontSize: '.78rem', color: 'hsl(var(--ink))', fontFamily: 'Inter' }}
+                    >
+                      {embeddingModels.map(m => (
+                        <option key={m.id} value={m.id}>{m.name} ({m.description})</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                  <SettingCard title="RAG Chunk Size" description="Token chunk size for document vectorization." value={settings.rag_chunk_size ?? 400} min={50} max={2000} step={50} onChange={v => setSettings({ ...settings, rag_chunk_size: Math.round(v) })} />
+                  <SettingCard title="RAG Chunk Overlap" description="Overlapping tokens between consecutive chunks." value={settings.rag_chunk_overlap ?? 50} min={0} max={500} step={10} onChange={v => setSettings({ ...settings, rag_chunk_overlap: Math.round(v) })} />
+                  <SettingCard title="Retrieval K (Global Context)" description="Global organizational documents retrieved per search." value={settings.rag_retrieval_k_global ?? 2} min={0} max={20} step={1} onChange={v => setSettings({ ...settings, rag_retrieval_k_global: Math.round(v) })} />
+                  <SettingCard title="Retrieval K (Meeting Context)" description="Meeting supporting documents retrieved per search." value={settings.rag_retrieval_k_meeting ?? 3} min={0} max={20} step={1} onChange={v => setSettings({ ...settings, rag_retrieval_k_meeting: Math.round(v) })} />
+                  <SettingCard title="Retrieval K (Transcript)" description="Audio transcript chunks retrieved per query." value={settings.rag_retrieval_k_transcript ?? 10} min={0} max={50} step={1} onChange={v => setSettings({ ...settings, rag_retrieval_k_transcript: Math.round(v) })} />
+                  <SettingCard title="Score Cutoff Threshold" description="Minimum relative similarity score cutoff (0.00–0.50)." value={settings.rag_relative_score_cutoff ?? 0.01} min={0.0} max={0.5} step={0.01} onChange={v => setSettings({ ...settings, rag_relative_score_cutoff: v })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 🎛️ TAB: VAD & AUDIO */}
+          {activeTab === 'audio' && settings && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(330,75%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Volume2 size={16} style={{ color: 'hsl(330,75%,55%)' }} /> Voice Activity Detection &amp; Audio Processing
+                </h3>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle label="Master Voice Activity Detection (VAD)" checked={settings.enable_vad ?? true} onChange={v => setSettings({ ...settings, enable_vad: v })} />
+                  <SettingToggle label="Audio Normalization" checked={settings.enable_audio_normalization ?? true} onChange={v => setSettings({ ...settings, enable_audio_normalization: v })} />
+                  <SettingCard title="Target Normalization dBFS" description="Target dBFS signal level for low-volume audio." value={settings.norm_target_dbfs ?? -3.0} min={-30.0} max={0.0} step={0.5} onChange={v => setSettings({ ...settings, norm_target_dbfs: v })} />
+                  <SettingCard title="Adaptive VAD Speech Threshold" description="Probability threshold to classify audio as speech." value={settings.vad_speech_threshold ?? 0.15} min={0.01} max={0.99} step={0.01} onChange={v => setSettings({ ...settings, vad_speech_threshold: v })} />
+                  <SettingCard title="Min Speech Duration (ms)" description="Minimum duration of speech in milliseconds." value={settings.vad_min_speech_ms ?? 250} min={50} max={2000} step={50} onChange={v => setSettings({ ...settings, vad_min_speech_ms: Math.round(v) })} />
+                  <SettingCard title="Speech Padding (ms)" description="Padding added to speech segment boundaries." value={settings.speech_pad_ms ?? 400} min={0} max={2000} step={50} onChange={v => setSettings({ ...settings, speech_pad_ms: Math.round(v) })} />
+                </div>
+              </div>
+
+              {/* Audio Validation & Pre-Check Settings */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(205,90%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Shield size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Audio Upload &amp; Recording Validation
+                </h3>
+                <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
+                  Validate uploaded files &amp; live recordings for audio duration and signal amplitude thresholds before queuing pipelines.
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle
+                    label="Enable Audio Validation Pre-Check"
+                    checked={settings.enable_audio_validation ?? true}
+                    onChange={v => setSettings({ ...settings, enable_audio_validation: v })}
+                  />
+                  <SettingCard
+                    title="Minimum Audio Duration (secs)"
+                    description="Rejects audio files shorter than this minimum threshold (e.g. 2.0s)."
+                    value={settings.min_audio_duration_seconds ?? 2.0}
+                    min={0.1} max={30.0} step={0.5}
+                    onChange={v => setSettings({ ...settings, min_audio_duration_seconds: v })}
+                  />
+                  <SettingCard
+                    title="Minimum Audio RMS Threshold"
+                    description="Minimum peak 1-second RMS signal strength required (default 0.003)."
+                    value={settings.min_audio_rms_threshold ?? 0.003}
+                    min={0.0001} max={0.05} step={0.0005}
+                    onChange={v => setSettings({ ...settings, min_audio_rms_threshold: v })}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 📊 TAB: TASK TOKEN LIMITS */}
+          {activeTab === 'tokens' && settings && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 1000, margin: '0 auto' }}>
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(250,70%,60%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <SlidersHorizontal size={16} style={{ color: 'hsl(250,70%,60%)' }} /> Maximum Token Output Limits
+                </h3>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '.85rem' }}>
+                  <TokenInput label="MoM Final Generation" val={settings.max_tokens_mom ?? 1500} onChange={v => setSettings({ ...settings, max_tokens_mom: v })} />
+                  <TokenInput label="MoM Section Merge" val={settings.max_tokens_mom_merge ?? 3072} onChange={v => setSettings({ ...settings, max_tokens_mom_merge: v })} />
+                  <TokenInput label="Raw MoM → Final MoM" val={settings.max_tokens_raw_mom_to_mom ?? 3000} onChange={v => setSettings({ ...settings, max_tokens_raw_mom_to_mom: v })} />
+                  <TokenInput label="Raw MoM Extraction" val={settings.max_tokens_raw_mom_extraction ?? 1024} onChange={v => setSettings({ ...settings, max_tokens_raw_mom_extraction: v })} />
+                  <TokenInput label="Executive Summary" val={settings.max_tokens_executive_summary ?? 700} onChange={v => setSettings({ ...settings, max_tokens_executive_summary: v })} />
+                  <TokenInput label="Detailed Summary" val={settings.max_tokens_detailed_summary ?? 3000} onChange={v => setSettings({ ...settings, max_tokens_detailed_summary: v })} />
+                  <TokenInput label="Short Summary" val={settings.max_tokens_short_summary ?? 120} onChange={v => setSettings({ ...settings, max_tokens_short_summary: v })} />
+                  <TokenInput label="Key Points" val={settings.max_tokens_key_points ?? 1028} onChange={v => setSettings({ ...settings, max_tokens_key_points: v })} />
+                  <TokenInput label="Action Items" val={settings.max_tokens_action_items ?? 1028} onChange={v => setSettings({ ...settings, max_tokens_action_items: v })} />
+                  <TokenInput label="Key Decisions" val={settings.max_tokens_key_decisions ?? 1028} onChange={v => setSettings({ ...settings, max_tokens_key_decisions: v })} />
+                  <TokenInput label="Collection Chat Response" val={settings.max_tokens_collection_chat ?? 1500} onChange={v => setSettings({ ...settings, max_tokens_collection_chat: v })} />
+                  <TokenInput label="Vocab Extractor" val={settings.max_tokens_vocab_extractor ?? 512} onChange={v => setSettings({ ...settings, max_tokens_vocab_extractor: v })} />
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
       </div>
+    </div>
+  )
+}
+
+// Helper components for settings controls
+function SettingCard({ title, description, value, min, max, step, onChange }: { title: string; description: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
+  return (
+    <div style={{ padding: '.85rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.4)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{title}</span>
+        <span style={{ fontSize: '.76rem', fontWeight: 700, color: 'hsl(var(--accent))', background: 'hsl(var(--accent)/.1)', padding: '1px 6px', borderRadius: 4, fontFamily: 'JetBrains Mono' }}>{value}</span>
+      </div>
+      <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', lineHeight: 1.35 }}>{description}</div>
+      <input
+        type="range"
+        min={min} max={max} step={step} value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        style={{ width: '100%', accentColor: 'hsl(var(--accent))', cursor: 'pointer', marginTop: 4 }}
+      />
+    </div>
+  )
+}
+
+function SettingInput({ label, val, onChange }: { label: string; val: string; onChange: (v: string) => void }) {
+  return (
+    <div style={{ padding: '.85rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.4)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{label}</span>
+      <input
+        type="text"
+        value={val}
+        onChange={e => onChange(e.target.value)}
+        style={{ width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', fontSize: '.78rem', color: 'hsl(var(--ink))', fontFamily: 'Inter' }}
+      />
+    </div>
+  )
+}
+
+function SettingToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div style={{ padding: '.85rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.4)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <span style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        style={{ width: 16, height: 16, cursor: 'pointer', accentColor: 'hsl(var(--accent))' }}
+      />
+    </div>
+  )
+}
+
+function TokenInput({ label, val, onChange }: { label: string; val: number; onChange: (v: number) => void }) {
+  return (
+    <div style={{ padding: '.65rem .8rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <span style={{ fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--ink))' }}>{label}</span>
+      <input
+        type="number"
+        value={val}
+        onChange={e => onChange(parseInt(e.target.value) || 1024)}
+        style={{ width: 75, padding: '3px 6px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', fontSize: '.74rem', fontWeight: 700, color: 'hsl(var(--ink))', textAlign: 'right', fontFamily: 'JetBrains Mono' }}
+      />
     </div>
   )
 }

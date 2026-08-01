@@ -2,211 +2,70 @@
 doc_extractor.py — Offline text extraction from uploaded agenda/context files.
 
 Supported formats:
-  - PDF   : PyMuPDF (fitz) text extraction + PyMuPDF embedded image extraction + Tesseract OCR
-  - DOCX  : python-docx text extraction + inline image extraction + Tesseract OCR
-  - PPTX  : python-pptx text extraction + picture shape extraction + Tesseract OCR
+  - PDF   : PyMuPDF (fitz) text extraction + PyMuPDF embedded image extraction + RapidOCR
+  - DOCX  : python-docx text extraction + inline image extraction + RapidOCR
+  - PPTX  : python-pptx text extraction + picture shape extraction + RapidOCR
   - TXT   : plain read
   - MD    : plain read
-  - PNG / JPG / JPEG / WEBP : pytesseract OCR
+  - PNG / JPG / JPEG / WEBP : RapidOCR (PP-OCRv4 / ONNX Runtime)
   - XLSX / XLS / CSV        : pandas spreadsheet sheet-by-sheet extraction + row indices tracking
 
-Tesseract is always invoked with CREATE_NO_WINDOW so no console/cmd window
-flickers in the packaged (.exe) application.  The pytesseract subprocess flags
-are applied once at import time via _configure_tesseract_subprocess().
+OCR is provided by ocr_engine.py which uses RapidOCR + ONNX Runtime with bundled
+PP-OCRv4 models. No external OCR binary (Tesseract) is required.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
-import io
-import subprocess
 import sys
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Windows silent-subprocess constants ────────────────────────────────────────
-# CREATE_NO_WINDOW (0x08000000) prevents a cmd/console window from appearing
-# when tesseract.exe is spawned from a windowed / packaged Python process.
-_CREATE_NO_WINDOW = 0x08000000
-
-# ── Tesseract availability (cached after first check) ─────────────────────────
-_TESSERACT_AVAILABLE: Optional[bool] = None
-_TESSERACT_CONFIGURED: bool = False
-
-
-def _get_bundled_tesseract_path() -> Optional[str]:
-    """
-    Return the path to a bundled tesseract.exe when running inside a
-    PyInstaller-frozen executable, or None if running in development.
-
-    Convention: the installer places Tesseract-OCR inside
-      <app_root>/runtime/tesseract/tesseract.exe
-    where <app_root> is the directory that contains backend.exe / launcher.exe.
-    """
-    if not getattr(sys, "frozen", False):
-        return None  # development mode — rely on system PATH
-
-    # sys.executable → …/Application/backend/backend.exe
-    # app_root       → …/Application/
+# ── OCR engine (RapidOCR) ─────────────────────────────────────────────────────────
+try:
+    from services.ocr_engine import ocr_image_bytes as _ocr_bytes_engine
+    from services.ocr_engine import ocr_image_file as _ocr_file_engine
+    from services.ocr_engine import is_ocr_available as _ocr_ready
+except ImportError:
     try:
-        exe_dir = os.path.dirname(sys.executable)
-        app_root = os.path.dirname(exe_dir)
-        candidate = os.path.join(app_root, "runtime", "tesseract", "tesseract.exe")
-        if os.path.isfile(candidate):
-            return candidate
-    except Exception:
-        pass
-    return None
-
-
-def _configure_tesseract_subprocess() -> None:
-    """
-    Patch pytesseract's internal subprocess call once so that:
-      1. The correct tesseract.exe is used in the packaged app.
-      2. No console/cmd window ever appears (CREATE_NO_WINDOW + SW_HIDE).
-
-    This must be called before the first pytesseract.image_to_string() call.
-    It is idempotent — repeated calls are a no-op.
-    """
-    global _TESSERACT_CONFIGURED
-    if _TESSERACT_CONFIGURED:
-        return
-
-    try:
-        import pytesseract
-
-        # ── 1. Point to bundled binary if available ────────────────────────────
-        bundled = _get_bundled_tesseract_path()
-        if bundled:
-            pytesseract.pytesseract.tesseract_cmd = bundled
-            logger.info(f"[DocExtractor] Using bundled Tesseract: {bundled}")
-
-        # ── 2. Patch subprocess so no window ever appears ─────────────────────
-        # pytesseract.run_tesseract() uses subprocess.Popen internally.
-        # We monkey-patch the module-level Popen reference so that every call
-        # automatically carries CREATE_NO_WINDOW + STARTF_USESHOWWINDOW.
-        if sys.platform == "win32":
-            _orig_popen = subprocess.Popen
-
-            class _SilentPopen(_orig_popen):  # type: ignore[misc]
-                """Subprocess.Popen subclass that always hides the console window."""
-
-                def __init__(self, *args, **kwargs):
-                    # Build STARTUPINFO
-                    si = kwargs.pop("startupinfo", None) or subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = subprocess.SW_HIDE
-                    kwargs["startupinfo"] = si
-
-                    # Merge creation flags
-                    flags = kwargs.pop("creationflags", 0)
-                    kwargs["creationflags"] = flags | _CREATE_NO_WINDOW
-
-                    super().__init__(*args, **kwargs)
-
-            # Patch only the subprocess reference inside the pytesseract module
-            # so we do not affect the rest of the application.
-            import pytesseract.pytesseract as _pt_core
-            _pt_core.subprocess.Popen = _SilentPopen  # type: ignore[attr-defined]
-            logger.debug("[DocExtractor] Patched pytesseract to use CREATE_NO_WINDOW")
-
-        _TESSERACT_CONFIGURED = True
-
-    except Exception as exc:
-        logger.warning(f"[DocExtractor] Could not configure Tesseract subprocess: {exc}")
-
-
-def _check_tesseract() -> bool:
-    """Return True if Tesseract is installed and callable (result is cached)."""
-    global _TESSERACT_AVAILABLE
-    if _TESSERACT_AVAILABLE is not None:
-        return _TESSERACT_AVAILABLE
-    try:
-        _configure_tesseract_subprocess()
-        import pytesseract
-        pytesseract.get_tesseract_version()
-        _TESSERACT_AVAILABLE = True
-        logger.info("[DocExtractor] Tesseract OCR is available")
-    except Exception as exc:
-        _TESSERACT_AVAILABLE = False
-        logger.warning(f"[DocExtractor] Tesseract OCR not available: {exc}")
-    return _TESSERACT_AVAILABLE
+        from backend.services.ocr_engine import ocr_image_bytes as _ocr_bytes_engine
+        from backend.services.ocr_engine import ocr_image_file as _ocr_file_engine
+        from backend.services.ocr_engine import is_ocr_available as _ocr_ready
+    except ImportError:
+        def _ocr_bytes_engine(b, *, label="") -> str: return ""  # type: ignore[misc]
+        def _ocr_file_engine(p) -> str: return ""  # type: ignore[misc]
+        def _ocr_ready() -> bool: return False  # type: ignore[misc]
+        logger.warning("[DocExtractor] ocr_engine not available — image OCR disabled.")
 
 
 def _ocr_image_bytes(image_bytes: bytes, *, label: str = "<bytes>") -> str:
     """
-    Run pytesseract OCR on in-memory image bytes.
+    Run RapidOCR on in-memory image bytes.
 
     Retries at most once on transient failure.  If the retry also fails,
     the image is silently skipped and an empty string is returned.
     """
-    if not _check_tesseract():
+    if not _ocr_ready():
+        logger.warning(f"[DocExtractor] OCR engine not available — skipping image ({label}).")
         return ""
-
-    max_attempts = 2
-    last_exc: Optional[Exception] = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            from PIL import Image
-            import pytesseract
-            _configure_tesseract_subprocess()
-            img = Image.open(io.BytesIO(image_bytes))
-            return pytesseract.image_to_string(img).strip()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < max_attempts:
-                logger.warning(
-                    f"[DocExtractor] OCR attempt {attempt}/{max_attempts} failed for {label}: {exc} — retrying"
-                )
-            else:
-                logger.warning(
-                    f"[DocExtractor] OCR skipped after {max_attempts} attempt(s) for {label}: {exc}"
-                )
-
-    return ""
+    return _ocr_bytes_engine(image_bytes, label=label)
 
 
 def _ocr_image_file(path: str) -> str:
     """
-    Run pytesseract OCR directly on an image file path.
+    Run RapidOCR directly on an image file path.
 
-    Retries at most once on transient failure.  If the retry also fails,
-    the image is silently skipped.
+    Returns "" if OCR is unavailable or fails.
     """
-    if not _check_tesseract():
+    if not _ocr_ready():
         logger.warning(
-            f"[DocExtractor] Tesseract OCR not available — skipping image {os.path.basename(path)}. "
-            "Install Tesseract-OCR to enable image text extraction."
+            f"[DocExtractor] OCR engine not available — skipping image {os.path.basename(path)}. "
+            "Install rapidocr-onnxruntime to enable image text extraction."
         )
         return ""
-
-    max_attempts = 2
-    last_exc: Optional[Exception] = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            from PIL import Image
-            import pytesseract
-            _configure_tesseract_subprocess()
-            img = Image.open(path)
-            return pytesseract.image_to_string(img).strip()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < max_attempts:
-                logger.warning(
-                    f"[DocExtractor] OCR attempt {attempt}/{max_attempts} failed for "
-                    f"{os.path.basename(path)}: {exc} — retrying"
-                )
-            else:
-                logger.warning(
-                    f"[DocExtractor] OCR skipped after {max_attempts} attempt(s) for "
-                    f"{os.path.basename(path)}: {exc}"
-                )
-
-    return ""
+    return _ocr_file_engine(path)
 
 
 def _is_duplicate(selectable_text: str, ocr_text: str) -> bool:
@@ -818,7 +677,7 @@ def _convert_legacy_doc_or_ppt(file_path: str, target_ext: str) -> str | None:
         ]
         kw = {}
         if sys.platform == "win32":
-            kw["creationflags"] = _CREATE_NO_WINDOW
+            kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, **kw)
         if proc.returncode == 0:
             base_name = os.path.splitext(os.path.basename(file_path))[0]

@@ -27,6 +27,12 @@ export interface SpeakerSummaryData {
   action_items: string[]
 }
 
+export interface VideoTranscriptBlock {
+  start: number
+  end: number
+  text: string
+}
+
 export interface ProcessingResult {
   filename?: string
   transcript?: TranscriptSegment[]
@@ -37,6 +43,8 @@ export interface ProcessingResult {
   action_items?: string[]
   speakers_detected?: string[]
   speaker_summary?: Record<string, SpeakerSummaryData> | null
+  source_type?: string
+  video_transcript?: VideoTranscriptBlock[] | null
   [key: string]: unknown
 }
 
@@ -47,6 +55,8 @@ export interface RecordingDetail extends ProcessingResult {
   duration: number
   status: string
   created_at: string
+  source_type?: string
+  video_transcript?: VideoTranscriptBlock[] | null
 }
 
 export interface Collection {

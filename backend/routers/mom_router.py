@@ -39,6 +39,8 @@ class MoMData(BaseModel):
     duration: float = 0.0
     planned_start_time: str = ""
     actual_start_time: str = ""
+    planned_end_time: str = ""
+    actual_end_time: str = ""
     participants: List[str] = []
     introduction: str = ""
     points_discussed: List[str] = []
@@ -61,9 +63,27 @@ def _normalize_action_items(items: list) -> list:
     return result
 
 
+def _normalize_point_discussed(pt) -> str:
+    """Convert a points_discussed entry (str or dict) to a clean 'Topic: Summary' string."""
+    if isinstance(pt, str):
+        return pt
+    if isinstance(pt, dict):
+        topic = str(pt.get('topic', '')).strip()
+        summary = str(pt.get('summary') or pt.get('discussion_point') or pt.get('text', '')).strip()
+        if topic and summary and not summary.lower().startswith(topic.lower()):
+            return f"{topic}: {summary}"
+        return summary or topic or str(pt)
+    return str(pt)
+
+
 def _mom_row_to_dict(mom) -> dict:
     """Convert a SQLite row for MoM into a clean dict with JSON fields deserialized."""
     raw_action_items = from_json(mom["action_items"], [])
+    raw_points = from_json(mom["points_discussed"], []) or []
+    # Guard: if LLM stored points_discussed as a plain string (not a list), wrap it
+    if isinstance(raw_points, str):
+        raw_points = [ln.strip() for ln in raw_points.splitlines() if ln.strip()] or [raw_points]
+    clean_points = [_normalize_point_discussed(p) for p in raw_points if _normalize_point_discussed(p)]
     return {
         "id": mom["id"],
         "recording_id": mom["recording_id"],
@@ -73,9 +93,11 @@ def _mom_row_to_dict(mom) -> dict:
         "duration": mom.get("duration") or 0,
         "planned_start_time": mom.get("planned_start_time") or "",
         "actual_start_time": mom.get("actual_start_time") or "",
+        "planned_end_time": mom.get("planned_end_time") or "",
+        "actual_end_time": mom.get("actual_end_time") or "",
         "participants": from_json(mom["participants"], []) or [],
         "introduction": mom.get("introduction") or "",
-        "points_discussed": from_json(mom["points_discussed"], []) or [],
+        "points_discussed": clean_points,
         "action_items": _normalize_action_items(raw_action_items),
         "conclusion": mom.get("conclusion") or "",
         "is_draft": bool(mom.get("is_draft", False)),
@@ -94,10 +116,23 @@ async def get_mom(recording_id: str, current_user: dict = Depends(get_current_us
         )
         mom = r.mappings().fetchone()
 
+        r_spk = await db.execute(
+            text("SELECT speaker_mappings FROM recordings WHERE id = :id AND user_id = :uid"),
+            {"id": recording_id, "uid": user_id},
+        )
+        rec_spk = r_spk.mappings().fetchone()
+
     if not mom:
         raise HTTPException(status_code=404, detail="MoM not found")
 
-    return _mom_row_to_dict(mom)
+    mom_dict = _mom_row_to_dict(mom)
+    if rec_spk and rec_spk.get("speaker_mappings"):
+        spk_mappings = from_json(rec_spk["speaker_mappings"], {})
+        if spk_mappings and isinstance(spk_mappings, dict):
+            from services.speaker_sync import apply_speaker_mappings_to_mom_dict
+            mom_dict = apply_speaker_mappings_to_mom_dict(mom_dict, spk_mappings)
+
+    return mom_dict
 
 
 @router.post("/{recording_id}/generate")
@@ -217,6 +252,8 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                         "duration": mom_data.get("duration", 0),
                         "planned_start_time": mom_data.get("planned_start_time", ""),
                         "actual_start_time": mom_data.get("actual_start_time", ""),
+                        "planned_end_time": mom_data.get("planned_end_time", ""),
+                        "actual_end_time": mom_data.get("actual_end_time", ""),
                         "participants": to_json(mom_data.get("participants", [])),
                         "introduction": mom_data.get("introduction", ""),
                         "points_discussed": to_json(mom_data.get("points_discussed", [])),
@@ -255,6 +292,8 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
                         "duration": mom_data.get("duration", 0),
                         "planned_start_time": mom_data.get("planned_start_time", ""),
                         "actual_start_time": mom_data.get("actual_start_time", ""),
+                        "planned_end_time": mom_data.get("planned_end_time", ""),
+                        "actual_end_time": mom_data.get("actual_end_time", ""),
                         "participants": to_json(mom_data.get("participants", [])),
                         "introduction": mom_data.get("introduction", ""),
                         "points_discussed": to_json(mom_data.get("points_discussed", [])),
@@ -327,6 +366,8 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
                     title = :title, date = :date, duration = :duration,
                     planned_start_time = :planned_start_time,
                     actual_start_time = :actual_start_time,
+                    planned_end_time = :planned_end_time,
+                    actual_end_time = :actual_end_time,
                     participants = :participants,
                     introduction = :introduction,
                     points_discussed = :points_discussed,
@@ -341,6 +382,8 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
                 "duration": update_data.get("duration", 0),
                 "planned_start_time": update_data.get("planned_start_time", ""),
                 "actual_start_time": update_data.get("actual_start_time", ""),
+                "planned_end_time": update_data.get("planned_end_time", ""),
+                "actual_end_time": update_data.get("actual_end_time", ""),
                 "participants": to_json(update_data.get("participants", [])),
                 "introduction": update_data.get("introduction", ""),
                 "points_discussed": to_json(update_data.get("points_discussed", [])),
@@ -556,4 +599,119 @@ async def export_mom_pdf(
         buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="MoM_{safe_title}.pdf"'},
+    )
+
+
+@router.get("/{recording_id}/docx")
+async def download_mom_docx(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """Download the main MoM as a Word (.docx) document."""
+    user_id = current_user["id"]
+    async with get_db() as db_session:
+        r_rec = await db_session.execute(
+            text("SELECT filename, speaker_mappings FROM recordings WHERE id = :id AND user_id = :uid"),
+            {"id": recording_id, "uid": user_id},
+        )
+        rec_row = r_rec.mappings().fetchone()
+
+        r_mom = await db_session.execute(
+            text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        mom_row = r_mom.mappings().fetchone()
+
+    if not mom_row:
+        raise HTTPException(status_code=404, detail="MoM not found")
+
+    mom = _mom_row_to_dict(mom_row)
+    if rec_row and rec_row.get("speaker_mappings"):
+        spk_mappings = from_json(rec_row["speaker_mappings"], {})
+        if spk_mappings and isinstance(spk_mappings, dict):
+            from services.speaker_sync import apply_speaker_mappings_to_mom_dict
+            mom = apply_speaker_mappings_to_mom_dict(mom, spk_mappings)
+
+    from docx import Document
+    doc = Document()
+
+    title = mom.get("title") or (rec_row.get("filename") if rec_row else "Minutes of Meeting")
+    h = doc.add_heading(title, level=0)
+    for r in h.runs:
+        r.bold = True
+
+    if mom.get("date"):
+        p = doc.add_paragraph()
+        run = p.add_run("Date: ")
+        run.bold = True
+        p.add_run(str(mom["date"]))
+
+    if mom.get("duration"):
+        p = doc.add_paragraph()
+        run = p.add_run("Duration: ")
+        run.bold = True
+        p.add_run(str(mom["duration"]))
+
+    participants = mom.get("participants", [])
+    if participants:
+        p = doc.add_paragraph()
+        run = p.add_run("Participants: ")
+        run.bold = True
+        p.add_run(", ".join(str(part) for part in participants))
+
+    if mom.get("introduction"):
+        h1 = doc.add_heading("1. Introduction & Overview", level=1)
+        for r in h1.runs: r.bold = True
+        doc.add_paragraph(mom["introduction"])
+
+    pts = mom.get("points_discussed", [])
+    if pts:
+        h2 = doc.add_heading("2. Key Discussion Points", level=1)
+        for r in h2.runs: r.bold = True
+        for idx, pt in enumerate(pts, 1):
+            if isinstance(pt, dict):
+                h_sub = doc.add_heading(f"2.{idx} {pt.get('topic', 'Discussion')}", level=2)
+                for r in h_sub.runs: r.bold = True
+                if pt.get("summary"):
+                    doc.add_paragraph(pt["summary"])
+            else:
+                doc.add_paragraph(f"• {str(pt)}")
+
+    actions = mom.get("action_items", [])
+    if actions:
+        h3 = doc.add_heading("3. Action Items", level=1)
+        for r in h3.runs: r.bold = True
+        tbl = doc.add_table(rows=1, cols=4)
+        tbl.style = 'Table Grid'
+        hdr = tbl.rows[0].cells
+        hdr[0].text = "#"
+        hdr[1].text = "Action Item"
+        hdr[2].text = "Owner"
+        hdr[3].text = "Deadline"
+        for cell in hdr:
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.bold = True
+
+        for idx, act in enumerate(actions, 1):
+            r_cells = tbl.add_row().cells
+            r_cells[0].text = str(idx)
+            r_cells[1].text = act.get("task") or act.get("item") or act.get("description") or "-"
+            r_cells[2].text = act.get("owner") or "Unassigned"
+            r_cells[3].text = act.get("deadline") or "ASAP"
+
+    if mom.get("conclusion"):
+        h4 = doc.add_heading("4. Conclusion", level=1)
+        for r in h4.runs: r.bold = True
+        doc.add_paragraph(mom["conclusion"])
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    safe_title = str(mom.get("title") or "Meeting").replace(" ", "_").replace("/", "-")
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="MoM_{safe_title}.docx"'},
     )

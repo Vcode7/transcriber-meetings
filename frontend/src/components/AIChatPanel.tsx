@@ -44,7 +44,7 @@ interface Props {
 }
 
 // ── Proper Markdown renderer using the lib ───────────────────
-function MarkdownContent({ content, className }: { content: string; className?: string }) {
+function MarkdownContent({ content, className }: { content: any; className?: string }) {
   return (
     <div
       className={`prose-ai ${className ?? ''}`}
@@ -173,6 +173,46 @@ type ProcessState = 'idle' | 'processing' | 'done' | 'error'
 function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string }) {
   const navigate = useNavigate()
   const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+
+  // Defensively normalize mom properties to prevent crashes if raw backend shapes differ
+  const safeTitle = typeof mom?.title === 'string' ? mom.title : ''
+  const safeDate = typeof mom?.date === 'string' ? mom.date : ''
+  const safeIntro = typeof mom?.introduction === 'string' ? mom.introduction : ''
+  const safeConclusion = typeof mom?.conclusion === 'string' ? mom.conclusion : ''
+
+  const participantsList: string[] = Array.isArray(mom?.participants)
+    ? mom.participants.map(String)
+    : typeof mom?.participants === 'string' && (mom.participants as string).trim()
+    ? (mom.participants as string).split(',').map((s) => s.trim()).filter(Boolean)
+    : []
+
+  const pointsDiscussedList: string[] = Array.isArray(mom?.points_discussed)
+    ? mom.points_discussed.map((pt: any) => {
+        if (typeof pt === 'string') return pt
+        if (pt && typeof pt === 'object') {
+          if (pt.topic && pt.summary) return `${pt.topic}: ${pt.summary}`
+          if (pt.summary) return String(pt.summary)
+          if (pt.discussion_point) return String(pt.discussion_point)
+          if (pt.text) return String(pt.text)
+          return JSON.stringify(pt)
+        }
+        return String(pt)
+      }).filter(Boolean)
+    : []
+
+  const actionItemsList: { task: string; owner?: string; deadline?: string }[] = Array.isArray(mom?.action_items)
+    ? mom.action_items.map((ai: any) => {
+        if (typeof ai === 'string') return { task: ai }
+        if (ai && typeof ai === 'object') {
+          return {
+            task: String(ai.task || ai.item || ai.description || JSON.stringify(ai)),
+            owner: ai.owner ? String(ai.owner) : undefined,
+            deadline: ai.deadline ? String(ai.deadline) : undefined,
+          }
+        }
+        return { task: String(ai) }
+      }).filter(a => Boolean(a.task))
+    : []
 
   // ── Attachment state ──────────────────────────────────────────
   const [contextPanelOpen, setContextPanelOpen] = useState(false)
@@ -487,31 +527,25 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
               </div>
 
               {contextFiles.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginTop: '2px' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px' }}>
                   {contextFiles.map(f => (
-                    <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '3px 6px', borderRadius: '5px', background: 'hsl(var(--muted) / .4)', fontSize: '0.72rem', fontFamily: 'Inter, sans-serif' }}>
-                      <FileText size={10} style={{ flexShrink: 0, color: 'hsl(var(--pencil))' }} />
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'hsl(var(--ink))' }}>{f.filename}</span>
-                      <button onClick={() => handleDeleteFile(f.id, 'context')} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '1px', color: 'hsl(var(--destructive))', flexShrink: 0 }}>
-                        <Trash2 size={10} />
+                    <span key={f.id} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '4px',
+                      padding: '2px 6px', borderRadius: '4px',
+                      background: 'hsl(var(--card))', border: '1px solid hsl(var(--border) / .3)',
+                      fontSize: '.67rem', color: 'hsl(var(--ink-soft))', fontFamily: 'Inter, sans-serif',
+                    }}>
+                      📁 {f.filename}
+                      <button
+                        onClick={() => handleDeleteFile(f.id, 'context')}
+                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, color: 'hsl(var(--pencil))' }}
+                      >
+                        <Trash2 size={9} />
                       </button>
-                    </div>
+                    </span>
                   ))}
                 </div>
               )}
-
-              <div
-                onClick={() => contextInputRef.current?.click()}
-                style={{
-                  border: '1.2px dashed hsl(var(--border) / .6)', borderRadius: '6px',
-                  padding: '0.45rem', textAlign: 'center', cursor: 'pointer',
-                  fontSize: '0.72rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
-                  background: 'hsl(var(--paper) / .3)',
-                }}
-              >
-                <Upload size={10} /> Upload Context
-              </div>
 
               {referenceSummary && (
                 <div style={{ padding: '0.45rem 0.55rem', borderRadius: '6px', background: 'hsl(#8b5cf6 / .07)', border: '1px solid hsl(#8b5cf6 / .2)', borderColor: '#8b5cf620', marginTop: '2px' }}>
@@ -526,7 +560,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
       </div>
 
       {/* Title */}
-      {mom.title && (
+      {safeTitle && (
         <div style={{
           fontFamily: 'Inter, sans-serif',
           fontSize: '.95rem',
@@ -535,26 +569,26 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
           letterSpacing: '-.01em',
           lineHeight: 1.3,
         }}>
-          {mom.title}
+          {safeTitle}
         </div>
       )}
 
       {/* Meta row */}
-      {(mom.date || (mom.participants && mom.participants.length > 0)) && (
+      {(safeDate || participantsList.length > 0) && (
         <div style={{
           display: 'flex', gap: '8px', flexWrap: 'wrap',
           fontSize: '.7rem', color: 'hsl(var(--pencil))',
           fontFamily: 'Inter, sans-serif',
         }}>
-          {mom.date && <span>📅 {mom.date}</span>}
-          {mom.participants && mom.participants.length > 0 && (
-            <span>👥 {mom.participants.join(', ')}</span>
+          {safeDate && <span>📅 {safeDate}</span>}
+          {participantsList.length > 0 && (
+            <span>👥 {participantsList.join(', ')}</span>
           )}
         </div>
       )}
 
       {/* Introduction */}
-      {mom.introduction && (
+      {safeIntro && (
         <div style={{
           background: 'linear-gradient(135deg, hsl(var(--accent) / .06), hsl(var(--accent) / .02))',
           border: '1px solid hsl(var(--accent) / .2)',
@@ -573,13 +607,13 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
             fontSize: '.83rem', color: 'hsl(var(--ink-soft))',
             fontFamily: 'Inter, sans-serif', lineHeight: 1.65, margin: 0,
           }}>
-            {mom.introduction}
+            {safeIntro}
           </p>
         </div>
       )}
 
       {/* Points discussed */}
-      {mom.points_discussed && mom.points_discussed.length > 0 && (
+      {pointsDiscussedList.length > 0 && (
         <div style={{
           background: 'hsl(var(--card))',
           border: '1px solid hsl(var(--border) / .25)',
@@ -595,22 +629,33 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
             <ListChecks size={10} /> Points Discussed
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            {mom.points_discussed.map((pt, i) => (
-              <div key={i} style={{
-                fontSize: '.82rem', color: 'hsl(var(--ink-soft))',
-                paddingLeft: '.9rem', position: 'relative',
-                lineHeight: 1.55, fontFamily: 'Inter, sans-serif',
-              }}>
-                <span style={{ position: 'absolute', left: 0, color: 'hsl(280,70%,50%)', fontWeight: 700 }}>•</span>
-                {pt}
-              </div>
-            ))}
+            {pointsDiscussedList.map((pt, i) => {
+              // If point has "Topic: Summary" format, bold the topic
+              const colonIdx = pt.indexOf(': ')
+              const topic = colonIdx > 0 && colonIdx < 80 ? pt.slice(0, colonIdx) : null
+              const body = topic ? pt.slice(colonIdx + 2) : pt
+              return (
+                <div key={i} style={{
+                  fontSize: '.82rem', color: 'hsl(var(--ink-soft))',
+                  paddingLeft: '.9rem', position: 'relative',
+                  lineHeight: 1.55, fontFamily: 'Inter, sans-serif',
+                }}>
+                  <span style={{ position: 'absolute', left: 0, color: 'hsl(280,70%,50%)', fontWeight: 700 }}>•</span>
+                  {topic ? (
+                    <>
+                      <span style={{ fontWeight: 700, color: 'hsl(var(--ink))' }}>{topic}:</span>{' '}
+                      {body}
+                    </>
+                  ) : pt}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Action items */}
-      {mom.action_items && mom.action_items.length > 0 && (
+      {actionItemsList.length > 0 && (
         <div style={{
           background: 'hsl(var(--card))',
           border: '1px solid hsl(var(--success) / .2)',
@@ -626,7 +671,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
             <CheckCircle size={10} /> Action Items
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            {mom.action_items.map((ai, i) => (
+            {actionItemsList.map((ai, i) => (
               <div key={i} style={{
                 fontSize: '.8rem', color: 'hsl(var(--ink-soft))',
                 lineHeight: 1.55, fontFamily: 'Inter, sans-serif',
@@ -635,7 +680,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
                 <span style={{ color: 'hsl(var(--success))', fontSize: '.9rem', flexShrink: 0 }}>☐</span>
                 <span>
                   {ai.task}
-                  {ai.owner && ai.owner !== 'Unassigned' && (
+                  {ai.owner && (
                     <span style={{ color: 'hsl(var(--pencil))', fontSize: '.72rem', marginLeft: '4px' }}>— {ai.owner}</span>
                   )}
                   {ai.deadline && (
@@ -649,7 +694,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
       )}
 
       {/* Conclusion */}
-      {mom.conclusion && (
+      {safeConclusion && (
         <div style={{
           background: 'hsl(var(--muted) / .5)',
           border: '1px solid hsl(var(--border) / .2)',
@@ -666,7 +711,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
             fontSize: '.82rem', color: 'hsl(var(--ink-soft))',
             fontFamily: 'Inter, sans-serif', lineHeight: 1.65, margin: 0,
           }}>
-            {mom.conclusion}
+            {safeConclusion}
           </p>
         </div>
       )}
@@ -728,7 +773,19 @@ function ActionItemsRenderer({ items }: { items: string[] }) {
     sections.push(current)
 
     for (const raw of items) {
-      const line = raw.trim()
+      if (raw === null || raw === undefined) continue
+
+      let line = ''
+      if (typeof raw === 'object') {
+        const itemObj = raw as any
+        const taskText = itemObj.task || itemObj.text || itemObj.action || itemObj.description || JSON.stringify(itemObj)
+        const owner = itemObj.owner ? ` (${itemObj.owner})` : ''
+        const deadline = itemObj.deadline ? ` [${itemObj.deadline}]` : ''
+        current.items.push(`${taskText}${owner}${deadline}`)
+        continue
+      } else {
+        line = String(raw).trim()
+      }
 
       if (!line) continue
 

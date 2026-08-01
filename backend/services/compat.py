@@ -148,6 +148,93 @@ def patch_torch_cuda_memory_apis() -> None:
         pass
 
 
+def patch_pyannote_audio_decoder() -> None:
+    """
+    pyannote.audio 3.3.x relies on torchcodec for audio decoding.
+    If torchcodec fails to import (e.g. on Windows without C++ runtime / FFmpeg DLLs),
+    pyannote's try/except block leaves `AudioDecoder` undefined, resulting in:
+        NameError: name 'AudioDecoder' is not defined
+    We patch `pyannote.audio.core.io` with a soundfile/torchaudio fallback AudioDecoder.
+    """
+    try:
+        import pyannote.audio.core.io as pyannote_io
+        if hasattr(pyannote_io, "AudioDecoder") and getattr(pyannote_io, "AudioDecoder") is not None:
+            return  # AudioDecoder is already defined and working!
+
+        import soundfile as sf
+        import torch
+
+        class FallbackMetadata:
+            def __init__(self, duration: float, sample_rate: int, num_channels: int):
+                self.duration_seconds_from_header = duration
+                self.sample_rate = sample_rate
+                self.num_channels = num_channels
+                self.num_audio_channels = num_channels
+
+        class FallbackAudioSamples:
+            def __init__(self, data: torch.Tensor, sample_rate: int):
+                self.data = data
+                self.sample_rate = sample_rate
+
+        class FallbackAudioDecoder:
+            def __init__(self, file_path_or_obj):
+                self.file_path = file_path_or_obj
+                self._info = None
+                try:
+                    self._info = sf.info(file_path_or_obj)
+                    self.metadata = FallbackMetadata(
+                        duration=float(self._info.duration),
+                        sample_rate=int(self._info.samplerate),
+                        num_channels=int(self._info.channels),
+                    )
+                except Exception:
+                    try:
+                        import torchaudio
+                        info = torchaudio.info(file_path_or_obj)
+                        duration = info.num_frames / info.sample_rate if info.sample_rate else 0.0
+                        self.metadata = FallbackMetadata(
+                            duration=float(duration),
+                            sample_rate=int(info.sample_rate),
+                            num_channels=int(info.num_channels),
+                        )
+                    except Exception as ex:
+                        logger.warning(f"[Compat] FallbackAudioDecoder failed metadata check: {ex}")
+                        self.metadata = FallbackMetadata(0.0, 16000, 1)
+
+            def get_all_samples(self) -> FallbackAudioSamples:
+                try:
+                    data, sr = sf.read(self.file_path, dtype="float32")
+                    if data.ndim == 1:
+                        tensor_data = torch.from_numpy(data).unsqueeze(0)
+                    else:
+                        tensor_data = torch.from_numpy(data.T)
+                    return FallbackAudioSamples(tensor_data, sr)
+                except Exception:
+                    import torchaudio
+                    wav, sr = torchaudio.load(self.file_path)
+                    return FallbackAudioSamples(wav, sr)
+
+            def get_samples_in_range(self, start_frame: int, end_frame: int) -> FallbackAudioSamples:
+                try:
+                    data, sr = sf.read(self.file_path, start=start_frame, stop=end_frame, dtype="float32")
+                    if data.ndim == 1:
+                        tensor_data = torch.from_numpy(data).unsqueeze(0)
+                    else:
+                        tensor_data = torch.from_numpy(data.T)
+                    return FallbackAudioSamples(tensor_data, sr)
+                except Exception:
+                    samples = self.get_all_samples()
+                    cropped = samples.data[:, start_frame:end_frame]
+                    return FallbackAudioSamples(cropped, samples.sample_rate)
+
+        pyannote_io.AudioDecoder = FallbackAudioDecoder
+        pyannote_io.AudioStreamMetadata = FallbackMetadata
+        pyannote_io.AudioSamples = FallbackAudioSamples
+        logger.info("[Compat] Successfully patched pyannote.audio.core.io with FallbackAudioDecoder.")
+    except Exception as e:
+        logger.warning(f"[Compat] Failed to patch pyannote.audio.core.io: {e}")
+
+
 def apply_compatibility_patches() -> None:
     """
     Apply all compatibility patches in the correct order.
@@ -161,6 +248,7 @@ def apply_compatibility_patches() -> None:
          import so the lazy-import machinery never attempts the real import.
       3. Fix torchaudio API differences (also needed before pyannote).
       4. Patch legacy PyTorch CUDA memory APIs.
+      5. Patch pyannote AudioDecoder fallback.
     """
     global _patches_applied
     if _patches_applied:
@@ -171,6 +259,7 @@ def apply_compatibility_patches() -> None:
     patch_torchaudio()
     patch_torchaudio_backend()
     patch_torch_cuda_memory_apis()
+    patch_pyannote_audio_decoder()
 
     _patches_applied = True
     logger.debug("[Compat] All compatibility patches applied.")

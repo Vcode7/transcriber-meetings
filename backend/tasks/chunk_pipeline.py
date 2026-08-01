@@ -130,10 +130,23 @@ async def run_chunk_pipeline(
         logger.warning(f"[ChunkPipeline] {chunk_id} — Failed to fetch metadata, cancel status, or language cache: {e}")
 
     # ── Transcribe + align ───────────────────────────────────────────────
+    user_settings_dict = {}
+    try:
+        async with get_db() as db:
+            r = await db.execute(
+                text("SELECT * FROM user_settings WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+            us_row = r.mappings().fetchone()
+            if us_row:
+                user_settings_dict = dict(us_row)
+    except Exception:
+        pass
+
     try:
         t_result = await loop.run_in_executor(
             None,
-            lambda: transcribe(chunk_wav_path, initial_prompt=initial_prompt, language=detected_language),
+            lambda: transcribe(chunk_wav_path, initial_prompt=initial_prompt, language=detected_language, user_settings=user_settings_dict),
         )
     except Exception as e:
         logger.error(f"[ChunkPipeline] {chunk_id} — Transcription FAILED: {e}", exc_info=True)

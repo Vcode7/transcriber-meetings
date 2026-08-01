@@ -93,24 +93,33 @@ async def get_recording(recording_id: str, current_user: dict = Depends(get_curr
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found.")
 
+    rec_dict = dict(rec)
+    spk_mappings = from_json(rec_dict.get("speaker_mappings"), {})
+    if spk_mappings and isinstance(spk_mappings, dict):
+        from services.speaker_sync import apply_speaker_mappings_to_recording_dict
+        rec_dict = apply_speaker_mappings_to_recording_dict(rec_dict, spk_mappings)
+
     return {
-        "id": rec["id"],
-        "filename": rec.get("filename", ""),
-        "duration": rec.get("duration", 0),
-        "status": rec.get("status"),
-        "file_path": rec.get("file_path"),
-        "transcript": json.loads(rec["transcript"] or "[]"),
-        "raw_text": rec.get("raw_text", ""),
-        "summary": rec.get("summary", ""),
-        "short_summary": rec.get("short_summary", "") or "",
-        "detailed_summary": rec.get("detailed_summary", "") or "",
-        "key_points": json.loads(rec["key_points"] or "[]"),
-        "action_items": json.loads(rec["action_items"] or "[]"),
-        "speakers_detected": json.loads(rec["speakers_detected"] or "[]"),
-        "language": rec.get("language", "en"),
-        "speaker_summary": json.loads(rec["speaker_summary"]) if rec.get("speaker_summary") else None,
-        "created_at": rec["created_at"],
-        "processed_at": rec.get("processed_at"),
+        "id": rec_dict["id"],
+        "filename": rec_dict.get("filename", ""),
+        "duration": rec_dict.get("duration", 0),
+        "status": rec_dict.get("status"),
+        "file_path": rec_dict.get("file_path"),
+        "source_type": rec_dict.get("source_type", "audio"),
+        "video_transcript": from_json(rec_dict["video_transcript"]) if rec_dict.get("video_transcript") else None,
+        "transcript": from_json(rec_dict["transcript"], []) if isinstance(rec_dict["transcript"], str) else rec_dict.get("transcript", []),
+        "raw_text": rec_dict.get("raw_text", ""),
+        "summary": rec_dict.get("summary", ""),
+        "short_summary": rec_dict.get("short_summary", "") or "",
+        "detailed_summary": rec_dict.get("detailed_summary", "") or "",
+        "key_points": from_json(rec_dict["key_points"], []) if isinstance(rec_dict["key_points"], str) else rec_dict.get("key_points", []),
+        "action_items": from_json(rec_dict["action_items"], []) if isinstance(rec_dict["action_items"], str) else rec_dict.get("action_items", []),
+        "speakers_detected": from_json(rec_dict["speakers_detected"], []) if isinstance(rec_dict["speakers_detected"], str) else rec_dict.get("speakers_detected", []),
+        "language": rec_dict.get("language", "en"),
+        "speaker_summary": from_json(rec_dict["speaker_summary"]) if isinstance(rec_dict.get("speaker_summary"), str) else rec_dict.get("speaker_summary"),
+        "speaker_mappings": from_json(rec_dict.get("speaker_mappings"), {}) if isinstance(rec_dict.get("speaker_mappings"), str) else rec_dict.get("speaker_mappings", {}),
+        "created_at": rec_dict["created_at"],
+        "processed_at": rec_dict.get("processed_at"),
     }
 
 
@@ -631,3 +640,176 @@ async def reidentify_speakers(
         "recording_id": recording_id,
         "message": "Speaker re-identification started. Poll /audio/jobs/{recording_id} for progress.",
     }
+
+
+@router.post("/{recording_id}/rerun")
+async def rerun_recording_pipeline(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Re-run the entire processing pipeline for an existing recording.
+
+    - Reuses the existing recording_id, source media file, uploaded attachments, and metadata.
+    - Cancels any in-flight task for this recording.
+    - Clears previous transcript, diarization, MOM, AI Insights, ROM, and Video OCR outputs.
+    - Re-executes the processing pipeline using the user's current application settings.
+    """
+    import asyncio as _asyncio
+    import os as _os
+    from tasks.pipeline import run_pipeline, cancel_task, register_task
+    from tasks.upload_chunk_pipeline import run_upload_chunk_pipeline, UPLOAD_CHUNK_THRESHOLD_SEC
+
+    user_id = current_user["id"]
+
+    # 1. Fetch recording details
+    async with get_db() as db:
+        r = await db.execute(
+            text("""
+                SELECT id, filename, file_path, duration, meeting_prompt,
+                       participant_voice_ids, use_vocabulary, speaker_summary,
+                       source_type
+                FROM recordings
+                WHERE id = :id AND user_id = :uid
+            """),
+            {"id": recording_id, "uid": user_id},
+        )
+        rec = r.mappings().fetchone()
+
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+
+    file_path = rec.get("file_path", "")
+    if not file_path or not _os.path.exists(file_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Source media file is no longer available on disk. Cannot re-run processing pipeline.",
+        )
+
+    # 2. Cancel existing task if running
+    await cancel_task(recording_id)
+
+    # 3. Reset outputs in DB
+    async with get_db() as db:
+        await db.execute(
+            text("""
+                UPDATE recordings SET
+                    status = 'pending',
+                    progress = 'queued',
+                    transcript = '[]',
+                    raw_text = NULL,
+                    summary = NULL,
+                    short_summary = NULL,
+                    detailed_summary = NULL,
+                    key_points = '[]',
+                    action_items = '[]',
+                    speakers_detected = '[]',
+                    speaker_summary = NULL,
+                    context_summary = NULL,
+                    context_summary_hash = NULL,
+                    agenda_summary = NULL,
+                    agenda_summary_hash = NULL,
+                    reference_summary = NULL,
+                    reference_summary_hash = NULL,
+                    raw_mom = NULL,
+                    rom_data = NULL,
+                    video_transcript = NULL,
+                    transcript_embedded = 0,
+                    meeting_context_embedded = 0,
+                    error_message = NULL,
+                    processed_at = NULL
+                WHERE id = :id AND user_id = :uid
+            """),
+            {"id": recording_id, "uid": user_id},
+        )
+        try:
+            await db.execute(
+                text("DELETE FROM minutes_of_meeting WHERE recording_id = :id"),
+                {"id": recording_id},
+            )
+        except Exception:
+            pass  # table might not exist
+        await db.commit()
+
+    # 4. Parse metadata
+    meeting_prompt = rec.get("meeting_prompt") or ""
+    pv_json = rec.get("participant_voice_ids")
+    participant_voice_ids = from_json(pv_json, []) if pv_json else []
+    use_vocabulary = bool(rec.get("use_vocabulary"))
+    speaker_summary = bool(rec.get("speaker_summary"))
+    duration = float(rec.get("duration") or 0.0)
+    source_type = rec.get("source_type") or "audio"
+
+    # 5. Launch existing pipeline task
+    logger.info(f"[HistoryRerun] Rerunning pipeline for recording={recording_id} (source_type={source_type}, duration={duration:.1f}s)")
+
+    if source_type == "video":
+        wav_path = file_path
+        from services.video_processing_service import is_supported_video, extract_audio_from_video, extract_video_ocr_timeline
+        if is_supported_video(file_path):
+            try:
+                wav_path = extract_audio_from_video(file_path)
+            except Exception as ve:
+                logger.warning(f"[HistoryRerun] Audio extraction from video failed: {ve}")
+
+        async def _run_video_pipeline():
+            try:
+                ocr_task = _asyncio.create_task(extract_video_ocr_timeline(recording_id, file_path))
+                if duration > UPLOAD_CHUNK_THRESHOLD_SEC:
+                    await run_upload_chunk_pipeline(
+                        recording_id=recording_id,
+                        file_path=wav_path,
+                        user_id=user_id,
+                        meeting_prompt=meeting_prompt,
+                        participant_voice_ids=participant_voice_ids,
+                        use_vocabulary=use_vocabulary,
+                        speaker_summary=speaker_summary,
+                    )
+                else:
+                    await run_pipeline(
+                        recording_id=recording_id,
+                        file_path=wav_path,
+                        user_id=user_id,
+                        meeting_prompt=meeting_prompt,
+                        participant_voice_ids=participant_voice_ids,
+                        use_vocabulary=use_vocabulary,
+                        speaker_summary=speaker_summary,
+                    )
+                await ocr_task
+            except Exception as e:
+                logger.error(f"[HistoryRerun] Video pipeline failed for {recording_id}: {e}", exc_info=True)
+
+        task = _asyncio.create_task(_run_video_pipeline())
+    elif duration > UPLOAD_CHUNK_THRESHOLD_SEC:
+        task = _asyncio.create_task(
+            run_upload_chunk_pipeline(
+                recording_id=recording_id,
+                file_path=file_path,
+                user_id=user_id,
+                meeting_prompt=meeting_prompt,
+                participant_voice_ids=participant_voice_ids,
+                use_vocabulary=use_vocabulary,
+                speaker_summary=speaker_summary,
+            )
+        )
+    else:
+        task = _asyncio.create_task(
+            run_pipeline(
+                recording_id=recording_id,
+                file_path=file_path,
+                user_id=user_id,
+                meeting_prompt=meeting_prompt,
+                participant_voice_ids=participant_voice_ids,
+                use_vocabulary=use_vocabulary,
+                speaker_summary=speaker_summary,
+            )
+        )
+
+    register_task(recording_id, task)
+
+    return {
+        "status": "pending",
+        "recording_id": recording_id,
+        "message": "Pipeline rerun initiated. Poll /audio/jobs/{recording_id} for progress.",
+    }
+

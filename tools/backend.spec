@@ -45,6 +45,8 @@ metadata_packages = [
     # Web / API
     "fastapi", "uvicorn", "aiohttp", "pydantic", "Jinja2",
     "httpx", "aiofiles",
+    # OCR / Image processing
+    "rapidocr_onnxruntime", "cv2", "opencv-python", "opencv-python-headless", "opencv-contrib-python", "opencv-contrib-python-headless", "pyclipper", "shapely", "rank_bm25",
     # Others probed by pyannote/speechbrain
     "onnxruntime", "psutil", "pygments", "rich", "optree",
     "optimum_quanto", "gammatone", "pesq", "piq", "pystoi",
@@ -65,6 +67,8 @@ data_packages = [
     "onnxruntime",
     "speechbrain",
     "pptx",
+    "rapidocr_onnxruntime",
+    "cv2",
 ]
 collected_datas = []
 for pkg in data_packages:
@@ -80,6 +84,8 @@ submodule_packages = [
     "pyannote",
     "speechbrain",
     "onnxruntime",
+    "rapidocr_onnxruntime",
+    "cv2",
 ]
 collected_submodules = []
 for pkg in submodule_packages:
@@ -109,6 +115,8 @@ full_copy_packages = [
     "reportlab",
     "fitz",
     "pymupdf",
+    "rapidocr_onnxruntime",
+    "cv2",
 ]
 collected_full_packages = []
 for pkg in full_copy_packages:
@@ -166,7 +174,7 @@ a = Analysis(
         "jose.jwt",
         "passlib.handlers.bcrypt",
         "passlib.handlers.pbkdf2",
-        # ML / Audio
+        # ML / Audio / OCR
         "torch",
         "torchaudio",
         "whisperx",
@@ -174,6 +182,11 @@ a = Analysis(
         "pyannote.audio",
         "pyannote.audio.pipelines",
         "speechbrain",
+        "rapidocr_onnxruntime",
+        "cv2",
+        "pyclipper",
+        "shapely",
+        "rank_bm25",
         # SpeechBrain submodules required for ECAPA-TDNN speaker embeddings
         "speechbrain.utils",
         "speechbrain.utils.fetching",
@@ -257,6 +270,8 @@ a = Analysis(
         "routers.prompt_templates_router",
         "routers.collections_router",
         "routers.collection_ai_router",
+        "routers.rom_router",
+        "routers.video_router",
         # App modules — services
         "services.diarization",
         "services.embedding",
@@ -281,6 +296,10 @@ a = Analysis(
         "services.text_embedding_service",
         "services.vector_store",
         "services.collection_ai_service",
+        "services.ocr_engine",
+        "services.video_processing_service",
+        "services.rom_service",
+        "services.bm25",
         # App modules — utils & core
         "utils.audio_utils",
         "utils.storage",

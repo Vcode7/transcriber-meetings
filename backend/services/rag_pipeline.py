@@ -147,8 +147,13 @@ def embed_global_context_doc(
     relative_path: Optional[str] = None,
 ) -> int:
     """
-    Extract text from a document, chunk it, embed it, and store in the
-    per-user global context FAISS index.
+    Extract text from a document, chunk it using structure-aware chunking,
+    embed it, and store in the per-user global context FAISS index.
+
+    Uses chunk_document() which preserves logical document structure
+    (headings, tables, requirements, procedures, algorithms, equations)
+    and enriches each chunk with rich metadata (section hierarchy, keywords,
+    technical entities, acronyms, page numbers, document type).
 
     Parameters
     ----------
@@ -163,7 +168,7 @@ def embed_global_context_doc(
     Number of chunks added to the index.
     """
     from services.doc_extractor import extract_text_from_file
-    from services.text_chunker import chunk_text
+    from services.text_chunker import chunk_document
     from services.vector_store import get_global_context_store
     from config import settings
 
@@ -174,11 +179,15 @@ def embed_global_context_doc(
         logger.warning(f"[RAG] No text extracted from {filename} — skipping embed")
         return 0
 
+    # chunk_size user setting → max_chunk_words; overlap → min_chunk_words
     chunk_size, overlap, _, _, _, _ = _get_rag_settings(user_id)
-    chunks = chunk_text(
+    chunks = chunk_document(
         text,
-        chunk_size=chunk_size,
-        overlap=overlap,
+        filename=filename,
+        doc_scope="global_context",
+        doc_name=filename,
+        min_chunk_words=max(20, overlap),
+        max_chunk_words=max(200, chunk_size),
     )
     if not chunks:
         logger.warning(f"[RAG] No chunks produced for {filename}")
@@ -214,18 +223,35 @@ def embed_global_context_doc(
 
     metadatas = [
         {
-            "doc_id": doc_id,
-            "filename": filename,
+            # Identity
+            "doc_id":        doc_id,
+            "filename":      filename,
             "relative_path": relative_path or filename,
-            "chunk_index": c["chunk_index"],
-            "source": "global_context",
-            "user_id": user_id,
+            "chunk_index":   c["chunk_index"],
+            "source":        "global_context",
+            "user_id":       user_id,
+            # Structure metadata (from chunk_document)
+            "block_type":    c.get("block_type", "paragraph"),
+            "chapter":       c.get("chapter"),
+            "section":       c.get("section"),
+            "subsection":    c.get("subsection"),
+            "heading":       c.get("heading"),
+            "heading_level": c.get("heading_level", 0),
+            "page_number":   c.get("page_number"),
+            # Semantic metadata
+            "keywords":           c.get("keywords", []),
+            "technical_entities": c.get("technical_entities", []),
+            "acronyms":           c.get("acronyms", []),
+            # Document metadata
+            "document_name": c.get("document_name", filename),
+            "document_type": c.get("document_type"),
+            "scope":         "global_context",
         }
         for c in chunks
     ]
 
     added = store.add(texts, metadatas, embeddings=embeddings)
-    logger.info(f"[RAG] Added {added} chunks for global context doc {doc_id}")
+    logger.info(f"[RAG] Added {added} structure-aware chunks for global context doc {doc_id}")
     return added
 
 
@@ -243,11 +269,13 @@ def remove_global_context_doc(doc_id: str, user_id: str) -> int:
 
 def embed_meeting_context(recording_id: str, user_id: str) -> int:
     """
-    Embed all 'context' type attachments for a recording.
+    Embed all 'context' type attachments for a recording using structure-aware
+    chunking.
 
-    Reads attachments from the DB, extracts text, chunks, embeds, and stores
-    in a per-recording FAISS index. Clears any previous meeting context index
-    first to ensure freshness.
+    Reads attachments from the DB, extracts text, chunks using chunk_document()
+    (which preserves logical document structure and enriches chunks with rich
+    metadata), embeds, and stores in a per-recording FAISS index.  Clears any
+    previous meeting context index first to ensure freshness.
 
     Returns
     -------
@@ -255,7 +283,7 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
     """
     import asyncio
     from services.doc_extractor import extract_text_from_file
-    from services.text_chunker import chunk_text
+    from services.text_chunker import chunk_document
     from services.vector_store import get_meeting_context_store
     from config import settings
 
@@ -298,11 +326,16 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         if not text_content.strip():
             continue
 
+        # chunk_size → max_chunk_words; overlap → min_chunk_words
         chunk_size, overlap, _, _, _, _ = _get_rag_settings(user_id)
-        chunks = chunk_text(
+        chunks = chunk_document(
             text_content,
-            chunk_size=chunk_size,
-            overlap=overlap,
+            filename=att["filename"],
+            doc_scope="meeting_context",
+            meeting_id=recording_id,
+            doc_name=att["filename"],
+            min_chunk_words=max(20, overlap),
+            max_chunk_words=max(200, chunk_size),
         )
         if not chunks:
             continue
@@ -328,18 +361,36 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
 
         metadatas = [
             {
+                # Identity
                 "recording_id": recording_id,
-                "filename": att["filename"],
-                "file_hash": att["file_hash"],
-                "chunk_index": c["chunk_index"],
-                "source": "meeting_context",
+                "filename":     att["filename"],
+                "file_hash":    att["file_hash"],
+                "chunk_index":  c["chunk_index"],
+                "source":       "meeting_context",
+                # Structure metadata (from chunk_document)
+                "block_type":   c.get("block_type", "paragraph"),
+                "chapter":      c.get("chapter"),
+                "section":      c.get("section"),
+                "subsection":   c.get("subsection"),
+                "heading":      c.get("heading"),
+                "heading_level": c.get("heading_level", 0),
+                "page_number":  c.get("page_number"),
+                # Semantic metadata
+                "keywords":           c.get("keywords", []),
+                "technical_entities": c.get("technical_entities", []),
+                "acronyms":           c.get("acronyms", []),
+                # Document metadata
+                "document_name": c.get("document_name", att["filename"]),
+                "document_type": c.get("document_type"),
+                "scope":         "meeting_context",
+                "meeting_id":    recording_id,
             }
             for c in chunks
         ]
 
         added = store.add(texts, metadatas, embeddings=embeddings)
         total_added += added
-        logger.info(f"[RAG] Meeting context: added {added} chunks from {att['filename']}")
+        logger.info(f"[RAG] Meeting context: added {added} structure-aware chunks from {att['filename']}")
 
     logger.info(f"[RAG] Total meeting context chunks: {total_added}")
     return total_added

@@ -18,9 +18,37 @@ marked.setOptions({
  * Convert raw Markdown text to sanitized HTML.
  * Returns an empty string for null / undefined / empty input.
  */
-export function renderMarkdown(text: string | undefined | null): string {
-  if (!text) return ''
-  const raw = marked.parse(text) as string
+export function renderMarkdown(text: any): string {
+  if (text === null || text === undefined) return ''
+
+  let strInput: string
+  if (typeof text === 'string') {
+    strInput = text
+  } else if (typeof text === 'object') {
+    if (typeof text.text === 'string') {
+      strInput = text.text
+    } else if (typeof text.polished_text === 'string') {
+      strInput = text.polished_text
+    } else if (typeof text.discussion_point === 'string') {
+      strInput = text.discussion_point
+    } else if (typeof text.task === 'string') {
+      strInput = text.owner ? `${text.task} (Owner: ${text.owner})` : text.task
+    } else if (typeof text.content === 'string') {
+      strInput = text.content
+    } else {
+      try {
+        strInput = JSON.stringify(text, null, 2)
+      } catch {
+        strInput = String(text)
+      }
+    }
+  } else {
+    strInput = String(text)
+  }
+
+  if (!strInput || !strInput.trim()) return ''
+
+  const raw = marked.parse(strInput) as string
   return DOMPurify.sanitize(raw, {
     // Allow basic formatting tags; block scripts and event handlers
     ALLOWED_TAGS: [

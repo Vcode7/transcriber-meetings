@@ -60,6 +60,50 @@ class UserSettings(BaseModel):
     max_tokens_collection_topic_growth: int = Field(default=1500, ge=1)
     max_tokens_vocab_extractor: int = Field(default=512, ge=1)
 
+    # ROM Pipeline Settings
+    rom_transcript_window: float = Field(default=2.0, ge=0.5, le=10.0)
+    rom_meeting_top_k: int = Field(default=5, ge=1, le=50)
+    rom_global_top_k: int = Field(default=3, ge=1, le=50)
+    rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
+
+    max_tokens_rom_discussion: int = Field(default=2048, ge=1)
+    max_tokens_rom_polish: int = Field(default=4096, ge=1)
+    max_tokens_rom_enhance_window: int = Field(default=4096, ge=1)
+    max_tokens_rom_deduplicate: int = Field(default=2048, ge=1)
+    max_tokens_rom_agenda: int = Field(default=2048, ge=1)
+    max_tokens_rom_mom_expansion: int = Field(default=3000, ge=1)
+    max_tokens_rom_agenda_assign_batch: int = Field(default=4096, ge=1)
+    max_tokens_rom_agenda_doc_points: int = Field(default=1024, ge=1)
+
+    # Low-Volume Speech Transcription Pipeline Enhancements
+    enable_vad: bool = True
+    enable_transcription_vad: bool = True
+    enable_alignment_vad: bool = True
+    enable_audio_normalization: bool = True
+    norm_target_dbfs: float = Field(default=-3.0, ge=-30.0, le=0.0)
+    norm_compression_ratio: float = Field(default=2.0, ge=1.0, le=10.0)
+
+    enable_adaptive_vad: bool = True
+    vad_speech_threshold: float = Field(default=0.15, ge=0.01, le=0.99)
+    vad_silence_threshold: float = Field(default=0.10, ge=0.01, le=0.99)
+    vad_min_speech_ms: int = Field(default=250, ge=50, le=2000)
+    vad_min_silence_ms: int = Field(default=400, ge=50, le=3000)
+
+    enable_speech_padding: bool = True
+    speech_pad_ms: int = Field(default=400, ge=0, le=2000)
+
+    enable_speech_segment_merging: bool = True
+    max_merge_silence_ms: int = Field(default=500, ge=0, le=5000)
+
+    enable_low_volume_recovery: bool = True
+    recovery_energy_threshold: float = Field(default=-45.0, ge=-80.0, le=0.0)
+    recovery_min_duration_ms: int = Field(default=300, ge=50, le=3000)
+
+    # Audio Validation Settings
+    enable_audio_validation: bool = True
+    min_audio_duration_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
+    min_audio_rms_threshold: float = Field(default=0.003, ge=0.0001, le=0.1)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -120,5 +164,50 @@ class UserSettingsUpdate(BaseModel):
     max_tokens_collection_compare: int | None = Field(default=None, ge=1)
     max_tokens_collection_topic_growth: int | None = Field(default=None, ge=1)
     max_tokens_vocab_extractor: int | None = Field(default=None, ge=1)
+
+    # ROM Pipeline Settings
+    rom_transcript_window: float | None = Field(default=None, ge=0.5, le=10.0)
+    rom_meeting_top_k: int | None = Field(default=None, ge=1, le=50)
+    rom_global_top_k: int | None = Field(default=None, ge=1, le=50)
+    rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
+
+    max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
+    max_tokens_rom_polish: int | None = Field(default=None, ge=1)
+    max_tokens_rom_enhance_window: int | None = Field(default=None, ge=1)
+    max_tokens_rom_deduplicate: int | None = Field(default=None, ge=1)
+    max_tokens_rom_agenda: int | None = Field(default=None, ge=1)
+    max_tokens_rom_mom_expansion: int | None = Field(default=None, ge=1)
+    max_tokens_rom_agenda_assign_batch: int | None = Field(default=None, ge=1)
+    max_tokens_rom_agenda_doc_points: int | None = Field(default=None, ge=1)
+
+    # Low-Volume Speech Transcription Pipeline Enhancements
+    enable_vad: bool | None = None
+    enable_transcription_vad: bool | None = None
+    enable_alignment_vad: bool | None = None
+    enable_audio_normalization: bool | None = None
+    norm_target_dbfs: float | None = Field(default=None, ge=-30.0, le=0.0)
+    norm_compression_ratio: float | None = Field(default=None, ge=1.0, le=10.0)
+
+    enable_adaptive_vad: bool | None = None
+    vad_speech_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    vad_silence_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    vad_min_speech_ms: int | None = Field(default=None, ge=50, le=2000)
+    vad_min_silence_ms: int | None = Field(default=None, ge=50, le=3000)
+
+    enable_speech_padding: bool | None = None
+    speech_pad_ms: int | None = Field(default=None, ge=0, le=2000)
+
+    enable_speech_segment_merging: bool | None = None
+    max_merge_silence_ms: int | None = Field(default=None, ge=0, le=5000)
+
+    enable_low_volume_recovery: bool | None = None
+    recovery_energy_threshold: float | None = Field(default=None, ge=-80.0, le=0.0)
+    recovery_min_duration_ms: int | None = Field(default=None, ge=50, le=3000)
+
+    # Audio Validation Settings
+    enable_audio_validation: bool | None = None
+    min_audio_duration_seconds: float | None = Field(default=None, ge=0.1, le=30.0)
+    min_audio_rms_threshold: float | None = Field(default=None, ge=0.0001, le=0.1)
+
 
 

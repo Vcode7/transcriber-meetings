@@ -238,6 +238,18 @@ async def delete_attachment(
             await db.commit()
             logger.info(f"[Attachments] Cleared {summary_col} for {recording_id} (no files remain)")
 
+            if att_type == "context":
+                try:
+                    from services.vector_store import get_meeting_context_store
+                    from services.text_embedding_service import get_text_embedder
+                    embedder = get_text_embedder()
+                    dim = embedder.embedding_dim()
+                    store = get_meeting_context_store(recording_id, dim)
+                    store.clear()
+                    logger.info(f"[Attachments] Cleared FAISS vector store for {recording_id}")
+                except Exception as e:
+                    logger.warning(f"[Attachments] Failed to clear FAISS store on delete: {e}")
+
         if att_type == "agenda":
             await db.execute(
                 text("UPDATE recordings SET parsed_agenda_json = NULL WHERE id = :id AND user_id = :uid"),

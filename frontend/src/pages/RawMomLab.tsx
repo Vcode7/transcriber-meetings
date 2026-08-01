@@ -1950,7 +1950,7 @@ export default function RawMomLab() {
                         {finalMomResult.participants?.length > 0 && <span><Users size={10} style={{ display: 'inline', marginRight: 2 }} />{finalMomResult.participants.join(', ')}</span>}
                       </div>
                     </div>
-                    <button onClick={() => navigate(`/mom/${id}`)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '.38rem .75rem', borderRadius: 8, border: '1.5px solid hsl(220,80%,60%/.4)', background: 'hsl(220,80%,60%/.08)', color: 'hsl(220,80%,65%)', fontSize: '.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter' }}>
+                    <button onClick={() => navigate(`/dashboard/history/${id}/mom`)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '.38rem .75rem', borderRadius: 8, border: '1.5px solid hsl(220,80%,60%/.4)', background: 'hsl(220,80%,60%/.08)', color: 'hsl(220,80%,65%)', fontSize: '.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter' }}>
                       <ExternalLink size={12} /> View in MoM Editor
                     </button>
                   </div>

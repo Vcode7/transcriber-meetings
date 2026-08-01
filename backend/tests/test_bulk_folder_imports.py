@@ -10,7 +10,9 @@ from unittest.mock import patch, MagicMock
 
 # Mock optional heavy runtime modules if missing in dev test env
 for mod in ["librosa", "reportlab", "reportlab.lib", "reportlab.lib.pagesizes", "reportlab.lib.styles", "reportlab.platypus", "reportlab.lib.colors", "docx", "pptx", "fitz"]:
-    if mod not in sys.modules:
+    try:
+        __import__(mod)
+    except ImportError:
         m = MagicMock()
         m.__spec__ = MagicMock()
         sys.modules[mod] = m

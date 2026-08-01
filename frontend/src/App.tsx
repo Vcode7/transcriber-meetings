@@ -8,6 +8,7 @@ import Setup from "./pages/Setup";
 import Dashboard from "./pages/Dashboard";
 import Record from "./pages/Record";
 import Upload from "./pages/Upload";
+import VideoUpload from "./pages/VideoUpload";
 import TabAudio from "./pages/TabAudio";
 import History from "./pages/History";
 import HistoryDetail from "./pages/HistoryDetail";
@@ -19,17 +20,19 @@ import Landing from "./pages/Landing";
 import LicenseExpired from "./pages/LicenseExpired";
 import GlobalContext from "./pages/GlobalContext";
 import RawMomLab from "./pages/RawMomLab";
+import RomPage from "./pages/RomPage";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import SquiggleFilter from "@/components/sketch/SquiggleFilter";
 import SmoothScroll from "@/components/sketch/SmoothScroll";
 import GlobalJobTracker from "./components/GlobalJobTracker";
+import { recordingService } from "./services/recordingService";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
 // ── License expiry date (must match backend/license.py) ───────
-const LICENSE_EXPIRY = new Date("2026-07-30T23:59:59");
+const LICENSE_EXPIRY = new Date("2026-08-07T23:59:59");
 
 /**
  * AuthBootstrap — runs once on app mount.
@@ -85,6 +88,7 @@ function AuthBootstrap() {
     };
 
     bootstrap();
+    recordingService.checkCrashRecovery();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return null;
@@ -165,7 +169,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
  * LicenseGate — wraps the entire app.
  *
  * Checks the license expiry date on the client before any API call.
- * If the local date is past July 30 2026, renders the LicenseExpired
+ * If the local date is past August 7 2026, renders the LicenseExpired
  * blocker immediately (no backend contact needed).
  *
  * Additionally, the AuthBootstrap may receive a 503 from the backend with
@@ -248,6 +252,7 @@ export default function App() {
               <Route index element={<Record />} />
               <Route path="tab-audio" element={<TabAudio />} />
               <Route path="upload" element={<Upload />} />
+              <Route path="video-upload" element={<VideoUpload />} />
               <Route path="history" element={<History />} />
               <Route path="history/:id" element={<HistoryDetail />} />
               <Route path="history/:id/mom" element={<MomPage />} />
@@ -256,6 +261,7 @@ export default function App() {
               <Route path="dictionary" element={<Dictionary />} />
               <Route path="global-context" element={<GlobalContext />} />
               <Route path="history/:id/raw-mom" element={<RawMomLab />} />
+              <Route path="history/:id/rom" element={<RomPage />} />
             </Route>
 
             {/* Catch-all → landing */}
