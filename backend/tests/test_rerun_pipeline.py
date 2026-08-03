@@ -2,7 +2,7 @@ import pytest
 import os
 import json
 from sqlalchemy import text
-from database import get_db, to_json, connect_db
+from database import get_db, get_db_context, to_json, connect_db
 
 @pytest.mark.asyncio
 async def test_rerun_endpoint_logic(tmp_path):
@@ -14,7 +14,7 @@ async def test_rerun_endpoint_logic(tmp_path):
     recording_id = "test_rerun_rec_123"
     user_id = "test_user_rerun"
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         # Insert initial recording with mock outputs
         await db.execute(
             text("""
@@ -36,13 +36,13 @@ async def test_rerun_endpoint_logic(tmp_path):
         await db.commit()
 
     # Verify initial state in DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         row = (await db.execute(text("SELECT status, summary, transcript FROM recordings WHERE id = 'test_rerun_rec_123'"))).mappings().fetchone()
         assert row["status"] == "done"
         assert row["summary"] == "Old summary"
 
     # Reset outputs for rerun
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 UPDATE recordings SET
@@ -77,7 +77,7 @@ async def test_rerun_endpoint_logic(tmp_path):
         await db.commit()
 
     # Verify reset state in DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         row = (await db.execute(text("SELECT status, progress, summary, transcript FROM recordings WHERE id = 'test_rerun_rec_123'"))).mappings().fetchone()
         assert row["status"] == "pending"
         assert row["progress"] == "queued"
@@ -85,6 +85,6 @@ async def test_rerun_endpoint_logic(tmp_path):
         assert row["transcript"] == "[]"
 
     # Clean up test row
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(text("DELETE FROM recordings WHERE id = 'test_rerun_rec_123'"))
         await db.commit()

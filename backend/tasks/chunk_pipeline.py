@@ -22,7 +22,7 @@ import asyncio
 from typing import Optional
 
 from sqlalchemy import text
-from database import get_db, to_json
+from database import get_db, get_db_context, to_json
 from services.transcription import transcribe
 from services.prompt_builder import build_whisper_prompt
 from services.dictionary_service import get_global_prompt, list_vocabulary
@@ -37,7 +37,7 @@ async def _update_chunk_status(chunk_id: str, status: str, extra: dict = None):
     set_parts = [f"{k} = :{k}" for k in patch]
     set_clause = ", ".join(set_parts)
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(f"UPDATE recording_chunks SET {set_clause} WHERE id = :chunk_id"),
                 {**patch, "chunk_id": chunk_id},
@@ -72,7 +72,7 @@ async def run_chunk_pipeline(
     # ── Build Whisper initial_prompt ─────────────────────────────────────
     initial_prompt = ""
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             global_prompt = await get_global_prompt(db, user_id)
             vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
         vocab_words = [item["word"] for item in vocab_items]
@@ -91,7 +91,7 @@ async def run_chunk_pipeline(
     detected_language = None
 
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             row = await db.execute(
                 text("SELECT recording_id, chunk_index FROM recording_chunks WHERE id = :cid"),
                 {"cid": chunk_id}
@@ -102,7 +102,7 @@ async def run_chunk_pipeline(
                 chunk_index = chunk_info[1]
 
         if recording_id:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT status FROM recordings WHERE id = :rid"),
                     {"rid": recording_id}
@@ -118,7 +118,7 @@ async def run_chunk_pipeline(
                     return
 
         if recording_id and chunk_index > 0:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT language FROM recordings WHERE id = :rid"),
                     {"rid": recording_id}
@@ -132,7 +132,7 @@ async def run_chunk_pipeline(
     # ── Transcribe + align ───────────────────────────────────────────────
     user_settings_dict = {}
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT * FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
@@ -163,7 +163,7 @@ async def run_chunk_pipeline(
     # Save detected language on first chunk so later chunks can reuse it
     if recording_id and chunk_index == 0:
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("UPDATE recordings SET language = :lang WHERE id = :rid"),
                     {"lang": language, "rid": recording_id}

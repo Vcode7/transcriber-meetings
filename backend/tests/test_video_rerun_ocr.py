@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from database import connect_db, close_db, get_db, to_json, from_json
+from database import connect_db, close_db, get_db, get_db_context, to_json, from_json
 from routers.video_router import rerun_video_ocr, get_ocr_status, get_video_transcript, _run_ocr_task
 
 @pytest_asyncio.fixture(autouse=True)
@@ -31,7 +31,7 @@ async def test_rerun_video_ocr_missing_file(tmp_path):
     user = {"id": "user_test_456"}
     rec_id = "rec_missing_video_file"
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (id, user_id, filename, file_path, duration, status, source_type, created_at)
@@ -47,7 +47,7 @@ async def test_rerun_video_ocr_missing_file(tmp_path):
     assert "Video source file is no longer available" in exc_info.value.detail
 
     # Clean up DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(text("DELETE FROM recordings WHERE id = :id"), {"id": rec_id})
         await db.commit()
 
@@ -66,7 +66,7 @@ async def test_rerun_video_ocr_preserves_audio_and_summary_data(tmp_path):
     initial_key_points = ["Point 1", "Point 2"]
     old_video_transcript = [{"start": 0.0, "end": 10.0, "text": "Old Slide Text"}]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (
@@ -101,7 +101,7 @@ async def test_rerun_video_ocr_preserves_audio_and_summary_data(tmp_path):
         await _run_ocr_task(rec_id, str(video_file), 15.0)
 
     # Verify DB state after OCR task completion
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(text("SELECT * FROM recordings WHERE id = :id"), {"id": rec_id})
         rec = r.mappings().fetchone()
 
@@ -117,6 +117,6 @@ async def test_rerun_video_ocr_preserves_audio_and_summary_data(tmp_path):
     assert updated_vt != old_video_transcript
 
     # Clean up DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(text("DELETE FROM recordings WHERE id = :id"), {"id": rec_id})
         await db.commit()

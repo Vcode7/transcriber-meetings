@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from config import settings
-from database import get_db, dt_to_str, to_json, from_json
+from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from services.diarization import diarize, is_pyannote_available
 from services.identification import identify_speakers, refine_transcript_speakers_with_ecapa
 from tasks.pipeline import (
@@ -127,7 +127,7 @@ async def run_reidentify_pipeline(
     except asyncio.CancelledError:
         logger.info(f"[ReID] {recording_id} — Task CANCELLED.")
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 # Restore status to 'done' so the recording stays accessible.
                 await db.execute(
                     text(
@@ -179,7 +179,7 @@ async def _run_reidentify_impl(
     original_status: str = "done"
     raw_text: str = ""
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text(
                     "SELECT transcript, speakers_detected, status, raw_text "
@@ -220,7 +220,7 @@ async def _run_reidentify_impl(
     # ── Stage 2: Load voice profiles ──────────────────────────────────────────
     logger.info(f"[ReID] {recording_id} — STAGE 2: Loading voice profiles")
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT * FROM voice_profiles WHERE user_id = :uid LIMIT 100"),
                 {"uid": user_id},
@@ -239,7 +239,7 @@ async def _run_reidentify_impl(
     # Load user similarity threshold
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT speaker_similarity_threshold FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
@@ -344,7 +344,7 @@ async def _run_reidentify_impl(
     logger.info(f"[ReID] {recording_id} — STAGE 6: Persisting updated transcript")
     now = datetime.now(timezone.utc)
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(
                     "UPDATE recordings SET "
@@ -395,7 +395,7 @@ async def _run_reidentify_impl(
 async def _restore_status(recording_id: str, original_status: str, reason: str) -> None:
     """Restore the recording's status to its pre-reid value on failure."""
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(
                     "UPDATE recordings SET status = :st, progress = NULL "
@@ -473,7 +473,7 @@ async def _regenerate_mom(
                 "Will generate MoM without context."
             )
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT filename, created_at, duration FROM recordings WHERE id = :rid"),
                 {"rid": recording_id},
@@ -530,7 +530,7 @@ async def _regenerate_mom(
             import uuid
             mom_id = str(uuid.uuid4())
             now_str = dt_to_str(datetime.now(timezone.utc))
-            async with get_db() as db:
+            async with get_db_context() as db:
                 # Upsert: delete old MoM for this recording then insert fresh
                 await db.execute(
                     text("DELETE FROM minutes_of_meeting WHERE recording_id = :rid"),

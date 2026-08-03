@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 from sqlalchemy import text
 import hashlib
-from database import get_db, dt_to_str, to_json, from_json
+from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from services.transcription import transcribe
 from services.diarization import diarize, is_pyannote_available
 from services.identification import identify_speakers, refine_transcript_speakers_with_ecapa
@@ -245,7 +245,7 @@ async def _build_and_store_context_summary(
 
     # Check for an existing valid context
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             row = await db.execute(
                 text(
                     "SELECT context_summary, context_summary_hash "
@@ -280,7 +280,7 @@ async def _build_and_store_context_summary(
     # Persist to DB
     if ctx:
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text(
                         "UPDATE recordings SET "
@@ -457,7 +457,7 @@ async def _update_status_safe(recording_id: str, status_val: str, extra: dict = 
     set_clause = ", ".join(set_parts)
 
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(f"UPDATE recordings SET {set_clause} WHERE id = :recording_id"),
                 {**patch, "recording_id": recording_id},
@@ -490,7 +490,7 @@ async def run_pipeline(
     except asyncio.CancelledError:
         logger.info(f"[Pipeline] {recording_id} — Task was CANCELLED.")
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("UPDATE recordings SET status='cancelled', progress=NULL, error_message='Cancelled by user' WHERE id=:rid"),
                     {"rid": recording_id}
@@ -562,7 +562,7 @@ async def _run_pipeline_impl(
 
     initial_prompt = ""
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             global_prompt = await get_global_prompt(db, user_id)
             vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
 
@@ -593,7 +593,7 @@ async def _run_pipeline_impl(
 
         user_settings_dict = {}
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT * FROM user_settings WHERE user_id = :uid"),
                     {"uid": user_id},
@@ -670,7 +670,7 @@ async def _run_pipeline_impl(
         if participant_voice_ids:
             logger.info(f"[Pipeline] {recording_id} — Filtering to {len(participant_voice_ids)} selected voice profiles")
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT * FROM voice_profiles WHERE user_id = :uid LIMIT 100"),
                     {"uid": user_id},
@@ -699,7 +699,7 @@ async def _run_pipeline_impl(
             logger.info(f"[Pipeline] {recording_id} — Loaded {len(voice_profiles)} voice profiles")
 
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT * FROM user_settings WHERE user_id = :uid"),
                     {"uid": user_id},
@@ -837,7 +837,7 @@ async def _run_pipeline_impl(
 
         generate_mom_auto = True
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT generate_mom_auto FROM user_settings WHERE user_id = :uid"),
                     {"uid": user_id},
@@ -855,7 +855,7 @@ async def _run_pipeline_impl(
         try:
             if not generate_mom_auto:
                 logger.info(f"[Pipeline] {recording_id} — Automatic MoM generation disabled by settings; skipping LLM stages.")
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("""
                             UPDATE recordings SET
@@ -881,7 +881,7 @@ async def _run_pipeline_impl(
                 await _emit_analytics(_analytics)
                 return
             else:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("""
                             UPDATE recordings SET
@@ -978,7 +978,7 @@ async def _run_pipeline_impl(
             logger.warning(f"[Pipeline] {recording_id} — Context summary is empty or failed after recovery.")
 
         # Fetch recording metadata for MoM
-        async with get_db() as db:
+        async with get_db_context() as db:
             _rec_row = await db.execute(
                 text("SELECT filename, created_at, duration FROM recordings WHERE id = :rid"),
                 {"rid": recording_id},
@@ -1041,7 +1041,7 @@ async def _run_pipeline_impl(
         mom_id = str(uuid.uuid4())
         initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now_mom)}]
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             _existing = await db.execute(
                 text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
                 {"rid": recording_id, "uid": user_id},
@@ -1138,7 +1138,7 @@ async def _run_pipeline_impl(
     logger.info(f"[Pipeline] {recording_id} — STAGE 8: Marking recording done")
     try:
         now = datetime.now(timezone.utc)
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("""
                     UPDATE recordings SET
@@ -1164,7 +1164,7 @@ async def _run_pipeline_impl(
     _analytics["final_status"] = "done"
     _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             _dr = await db.execute(
                 text("SELECT duration FROM recordings WHERE id = :rid"),
                 {"rid": recording_id},
@@ -1441,7 +1441,7 @@ async def _generate_all_chunk_summaries(
                 ),
             )
             if summary:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
                         {"s": summary, "cid": chunk_id},
@@ -1544,7 +1544,7 @@ async def _generate_speaker_aware_chunk_summaries(
                 ),
             )
             if summary:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
                         {"s": summary, "cid": chunk_id},
@@ -1587,7 +1587,7 @@ async def run_finalize_pipeline(
     except asyncio.CancelledError:
         logger.info(f"[FinalPipeline] {recording_id} — Task was CANCELLED.")
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("UPDATE recordings SET status='cancelled', progress=NULL, error_message='Cancelled by user' WHERE id=:rid"),
                     {"rid": recording_id}
@@ -1664,7 +1664,7 @@ async def _run_finalize_pipeline_impl(
     if chunk_ids:
         logger.info(f"[FinalPipeline] {recording_id} — Waiting for {len(chunk_ids)} background chunks...")
         while waited < MAX_WAIT_SEC:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 placeholders = ", ".join([f":id{i}" for i in range(len(chunk_ids))])
                 params = {f"id{i}": cid for i, cid in enumerate(chunk_ids)}
                 r = await db.execute(
@@ -1696,7 +1696,7 @@ async def _run_finalize_pipeline_impl(
     chunk_rows: list = []  # populated below when chunk_ids is non-empty
 
     if chunk_ids:
-        async with get_db() as db:
+        async with get_db_context() as db:
             placeholders = ", ".join([f":id{i}" for i in range(len(chunk_ids))])
             params = {f"id{i}": cid for i, cid in enumerate(chunk_ids)}
             r = await db.execute(
@@ -1732,7 +1732,7 @@ async def _run_finalize_pipeline_impl(
     # Fetch pre-detected language from DB (reused from first chunk)
     detected_language = None
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT language FROM recordings WHERE id = :rid"),
                 {"rid": recording_id}
@@ -1775,7 +1775,7 @@ async def _run_finalize_pipeline_impl(
         # Build prompt
         initial_prompt = ""
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 global_prompt = await get_global_prompt(db, user_id)
                 vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
             vocab_words = [item["word"] for item in vocab_items]
@@ -1792,7 +1792,7 @@ async def _run_finalize_pipeline_impl(
 
         user_settings_dict = {}
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT * FROM user_settings WHERE user_id = :uid"),
                     {"uid": user_id},
@@ -1882,7 +1882,7 @@ async def _run_finalize_pipeline_impl(
     # ── Step 5: Load voice profiles ──────────────────────────────────────
     logger.info(f"[FinalPipeline] {recording_id} — Loading voice profiles")
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT * FROM voice_profiles WHERE user_id = :uid LIMIT 100"),
                 {"uid": user_id},
@@ -1903,7 +1903,7 @@ async def _run_finalize_pipeline_impl(
     # User similarity threshold
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT * FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
@@ -2033,7 +2033,7 @@ async def _run_finalize_pipeline_impl(
     # ── Check user settings for automatic MoM generation ──────────────
     generate_mom_auto = True
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT generate_mom_auto FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
@@ -2051,7 +2051,7 @@ async def _run_finalize_pipeline_impl(
     try:
         if not generate_mom_auto:
             logger.info(f"[FinalPipeline] {recording_id} — Automatic MoM generation disabled by settings; skipping LLM stages.")
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("""
                         UPDATE recordings SET
@@ -2091,7 +2091,7 @@ async def _run_finalize_pipeline_impl(
 
     # ── Save transcript immediately for Phase 2 (status=transcript_ready) ──
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("""
                     UPDATE recordings SET
@@ -2120,7 +2120,7 @@ async def _run_finalize_pipeline_impl(
     if chunk_ids:
         missing_chunks = []
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 cs_rows = await db.execute(
                     text(
                         "SELECT id, chunk_index, raw_text FROM recording_chunks "
@@ -2156,7 +2156,7 @@ async def _run_finalize_pipeline_impl(
                         ),
                     )
                     if summary:
-                        async with get_db() as db:
+                        async with get_db_context() as db:
                             await db.execute(
                                 text("UPDATE recording_chunks SET chunk_summary = :s WHERE id = :cid"),
                                 {"s": summary, "cid": cid},
@@ -2191,7 +2191,7 @@ async def _run_finalize_pipeline_impl(
         # Try to merge chunk summaries first (incremental path)
         chunk_summaries: List[str] = []
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 cs_rows = await db.execute(
                     text(
                         "SELECT chunk_summary FROM recording_chunks "
@@ -2282,7 +2282,7 @@ async def _run_finalize_pipeline_impl(
         if chunk_summaries and context_summary:
             current_hash = _raw_text_hash(raw_text)
             try:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text(
                             "UPDATE recordings SET "
@@ -2299,7 +2299,7 @@ async def _run_finalize_pipeline_impl(
             except Exception as e:
                 logger.warning(f"[FinalPipeline] {recording_id} — Failed to store context_summary: {e}")
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             _rec_row = await db.execute(
                 text("SELECT filename, created_at, duration FROM recordings WHERE id = :rid"),
                 {"rid": recording_id},
@@ -2361,7 +2361,7 @@ async def _run_finalize_pipeline_impl(
         mom_id = str(uuid.uuid4())
         initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now_mom)}]
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             _existing = await db.execute(
                 text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
                 {"rid": recording_id, "uid": user_id},
@@ -2454,7 +2454,7 @@ async def _run_finalize_pipeline_impl(
     # ── Save final result (no AI insight fields) ─────────────────────────
     now = datetime.now(timezone.utc)
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("""
                     UPDATE recordings SET
@@ -2480,7 +2480,7 @@ async def _run_finalize_pipeline_impl(
     _analytics_fin["final_status"] = "done"
     _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             _dr = await db.execute(
                 text("SELECT duration FROM recordings WHERE id = :rid"),
                 {"rid": recording_id},

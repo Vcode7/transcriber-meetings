@@ -427,11 +427,15 @@ def transcribe(
     recovery_energy_threshold = float(cfg.get("recovery_energy_threshold", getattr(settings, "RECOVERY_ENERGY_THRESHOLD", -45.0)))
     recovery_min_duration_ms = int(cfg.get("recovery_min_duration_ms", getattr(settings, "RECOVERY_MIN_DURATION_MS", 300)))
 
+    whisper_batch_size = int(cfg.get("whisper_batch_size", getattr(settings, "WHISPER_BATCH_SIZE", 8)))
+    whisper_batch_size = max(1, min(32, whisper_batch_size))
+
     logger.info(
         f"[Transcription Settings] "
         f"TranscriptionVAD={'Enabled (Region Processing)' if enable_transcription_vad else 'Disabled (Direct Full Audio)'}, "
         f"AlignmentVAD={'Enabled (Region Slicing)' if enable_alignment_vad else 'Disabled (Full Audio Single Pass)'}, "
-        f"AudioNormalization={'Enabled' if enable_audio_norm else 'Disabled'}"
+        f"AudioNormalization={'Enabled' if enable_audio_norm else 'Disabled'}, "
+        f"WhisperBatchSize={whisper_batch_size}"
     )
 
     device, compute_type = _resolve_device()
@@ -460,11 +464,11 @@ def transcribe(
     # ── Step 2: Primary Whisper Transcription Pass ─────────────────────────
     transcribe_target_path = alignment_audio_path if enable_audio_norm else file_path
     if enable_transcription_vad:
-        logger.info(f"[Transcription] Primary Whisper Pass: Transcribing {transcribe_target_path} on device={device} ...")
+        logger.info(f"[Transcription] Primary Whisper Pass: Transcribing {transcribe_target_path} on device={device} (batch_size={whisper_batch_size}) ...")
     else:
-        logger.info(f"[Transcription] Primary Whisper Pass (Transcription VAD Disabled): Sending complete audio {transcribe_target_path} directly to Whisper on device={device} ...")
+        logger.info(f"[Transcription] Primary Whisper Pass (Transcription VAD Disabled): Sending complete audio {transcribe_target_path} directly to Whisper on device={device} (batch_size={whisper_batch_size}) ...")
 
-    transcribe_kwargs = {"batch_size": 8}
+    transcribe_kwargs = {"batch_size": whisper_batch_size}
     if language:
         transcribe_kwargs["language"] = language
     if initial_prompt:

@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 import json
 from xml.sax.saxutils import escape
 
-from database import get_db, from_json
+from database import get_db, get_db_context, from_json
 from sqlalchemy import text
 from routers.auth import get_current_user
 from services.llm import generate_executive_summary, generate_key_decisions
@@ -744,7 +744,7 @@ async def generate_pdf_report(
     """
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -784,7 +784,7 @@ async def generate_pdf_report(
                 try:
                     ctx = await _loop.run_in_executor(None, _build_ctx, transcript)
                     if ctx:
-                        async with get_db() as db:
+                        async with get_db_context() as db:
                             await db.execute(
                                 text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
                                      "WHERE id = :id AND user_id = :uid"),

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
-from database import get_db
+from database import get_db, get_db_context
 from routers.auth import get_current_user
 from services import prompt_service
 
@@ -49,14 +49,14 @@ async def list_all_prompts(current_user: dict = Depends(get_current_user)):
     Each item includes: key, name, category, description, variables,
     template (active), default_template, is_modified, updated_at.
     """
-    async with get_db() as db:
+    async with get_db_context() as db:
         return await prompt_service.list_prompts(db)
 
 
 @router.get("/export")
 async def export_all_prompts(current_user: dict = Depends(get_current_user)):
     """Download all active templates as a JSON export."""
-    async with get_db() as db:
+    async with get_db_context() as db:
         data = await prompt_service.export_prompts(db)
     return JSONResponse(
         content=data,
@@ -69,7 +69,7 @@ async def get_single_prompt(key: str, current_user: dict = Depends(get_current_u
     """Return the active template (custom or default) for a single key."""
     if key not in prompt_service.VALID_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown prompt key: {key!r}")
-    async with get_db() as db:
+    async with get_db_context() as db:
         template = await prompt_service.get_prompt(db, key)
     default = prompt_service._defaults().get(key, "")
     return {
@@ -89,7 +89,7 @@ async def save_prompt(
     """Save a custom template for key. Takes effect immediately (no restart)."""
     if key not in prompt_service.VALID_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown prompt key: {key!r}")
-    async with get_db() as db:
+    async with get_db_context() as db:
         await prompt_service.set_prompt(db, key, body.template)
     return {"message": f"Prompt '{key}' saved.", "key": key, "length": len(body.template)}
 
@@ -99,7 +99,7 @@ async def reset_single_prompt(key: str, current_user: dict = Depends(get_current
     """Reset a single prompt to its hardcoded default."""
     if key not in prompt_service.VALID_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown prompt key: {key!r}")
-    async with get_db() as db:
+    async with get_db_context() as db:
         await prompt_service.reset_prompt(db, key)
     return {"message": f"Prompt '{key}' reset to default.", "key": key}
 
@@ -107,7 +107,7 @@ async def reset_single_prompt(key: str, current_user: dict = Depends(get_current
 @router.delete("")
 async def reset_all_prompts(current_user: dict = Depends(get_current_user)):
     """Reset ALL prompts to hardcoded defaults."""
-    async with get_db() as db:
+    async with get_db_context() as db:
         await prompt_service.reset_all_prompts(db)
     return {"message": "All prompts reset to defaults."}
 
@@ -118,7 +118,7 @@ async def import_prompts(
     current_user: dict = Depends(get_current_user),
 ):
     """Import prompt templates from a JSON export payload."""
-    async with get_db() as db:
+    async with get_db_context() as db:
         result = await prompt_service.import_prompts(db, body.model_dump())
     return {
         "message": f"Import complete: {result['imported']} imported, {result['skipped']} skipped.",

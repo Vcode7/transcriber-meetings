@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-AI Provider — 100% offline Qwen3 4B Instruct (4-bit quantized).
+AI Provider - 100% offline Qwen3 4B Instruct (4-bit quantized).
 
 Architecture:
   - Single provider: QwenProvider
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════
-# Prompt Templates — one per task, purpose-built for Qwen3
+# Prompt Templates - one per task, purpose-built for Qwen3
 # ══════════════════════════════════════════════════════════════
 
 
@@ -46,7 +47,7 @@ Answer each of the following questions concisely and professionally:
 Format your response EXACTLY as follows (use these section headers):
 
 MEETING PURPOSE:
-[2–5 sentences answering question 1]
+[2-5 sentences answering question 1]
 
 MAIN DISCUSSION POINTS:
 - [point derived from question 2]
@@ -771,14 +772,14 @@ The following information has been retrieved from the organization's Global Cont
 
 PURPOSE: Use this ONLY to improve your understanding of terminology, abbreviations, project names, department names, organization names, and technical background mentioned in the Agenda Document above.
 
-CRITICAL RULES — READ CAREFULLY:
+CRITICAL RULES - READ CAREFULLY:
 - Do NOT create additional agenda items from this section.
 - Do NOT add topics that appear in Global Context but are absent from the Agenda Document.
 - Do NOT modify the agenda structure in any way.
 - Do NOT merge or combine topics based on Global Context.
 - Do NOT change the number of agenda items.
 - The Agenda Document in Section 1 is the SOLE authority for all agenda items.
-- If the Agenda Document contains 5 items, your output must contain exactly 5 items — no more, no less.
+- If the Agenda Document contains 5 items, your output must contain exactly 5 items - no more, no less.
 - Global Context exists only to help you understand what the agenda items mean, not to create new ones.
 
 GLOBAL CONTEXT:
@@ -833,15 +834,12 @@ TRANSCRIPTION SUMMARY:
 JSON:"""
 
 
-# ══════════════════════════════════════════════════════════════
-# RAG Pipeline Prompts — used by Raw MoM pipeline ONLY
-# These prompts are completely independent of the MoM pipeline above.
-# ══════════════════════════════════════════════════════════════
+
 
 
 
 RAW_MOM_EXTRACTION_PROMPT = """\
-You are a precise information extractor for meeting records. Your ONLY job is structured extraction — not summarization.
+You are a precise information extractor for meeting records. Your ONLY job is structured extraction - not summarization.
 
 You will receive evidence retrieved from the transcript, presentation slides, and organizational documents for ONE agenda topic.
 The evidence is divided into clearly labelled sections:
@@ -872,7 +870,7 @@ Your task is to extract ALL factual information that is directly relevant to the
 ---
 CORE EXTRACTION REQUIREMENTS:
 
-1. EXTRACT ALL MEANINGFUL POINTS — no artificial limit. Capture every:
+1. EXTRACT ALL MEANINGFUL POINTS - no artificial limit. Capture every:
    - Decision made
    - Discussion point or topic covered
    - Question raised and answer provided
@@ -900,7 +898,7 @@ Extract discussion as a sequence of individual discussion points, similar to mee
    - Questions raised, responses provided, concerns discussed, and follow-up requests.
    - Action items with owner, deadline, and status when available.
 
-4. SOURCE ATTRIBUTION — every entry MUST include:
+4. SOURCE ATTRIBUTION - every entry MUST include:
    - "source_type": one of "Transcript", "Meeting Context", "Agenda Context", "Global Context"
    - "timeline": {{"start": <seconds as float>, "end": <seconds as float>}} if from transcript; null otherwise
    - "source_reference": the timestamp range "HH:MM:SS - HH:MM:SS" if from transcript; the document filename if from context; "Global Context" if from global knowledge
@@ -946,9 +944,9 @@ Return ONLY a valid JSON object matching this exact schema:
 }}
 
 Rules for discussion entries:
-- Extract ALL meaningful points — there is NO maximum limit. Completeness is the goal.
+- Extract ALL meaningful points - there is NO maximum limit. Completeness is the goal.
 - Group related facts together so each entry contains a complete, cohesive subset of discussion details.
-- "dates" array: include ONLY if the entry involves a specific actual calendar date or deadline (e.g. "July 8, 2026", "2026-07-08"). NEVER output transcript timestamps, timeline ranges, or offsets like 00:02–05:03 or 3975.18 as dates.
+- "dates" array: include ONLY if the entry involves a specific actual calendar date or deadline (e.g. "July 8, 2026", "2026-07-08"). NEVER output transcript timestamps, timeline ranges, or offsets like 00:02-05:03 or 3975.18 as dates.
 - "action": fill ONLY if the entry is an action item; set all fields to null otherwise.
 - "type" must be one of: decision, action, discussion, clarification, risk, milestone, dependency, reference.
 - "source_type" is REQUIRED on every entry. Use "Transcript" only for entries from the TRANSCRIPT section.
@@ -1018,7 +1016,7 @@ REPAIRED VALID JSON:"""
 RAW_MOM_TO_MOM_PROMPT = """\
 You are an experienced Executive Assistant responsible for producing professional, comprehensive, and detailed Minutes of Meeting (MoM).
 
-You will receive a structured Raw MoM — a collection of agenda items, each with extracted discussion entries including decisions, actions, risks, milestones, and clarifications.
+You will receive a structured Raw MoM - a collection of agenda items, each with extracted discussion entries including decisions, actions, risks, milestones, and clarifications.
 
 Your task is to convert this structured data into a polished, professional, and detailed Final Minutes of Meeting. Do not create brief summaries or one-line summaries. Generate complete, detailed documentation suitable for official records.
 
@@ -1055,7 +1053,7 @@ TITLE
 - Reflect the primary objectives of the meeting.
 
 INTRODUCTION
-- Write a well-structured executive introduction (3–5 sentences).
+- Write a well-structured executive introduction (3-5 sentences).
 - Summarize what was discussed across all agenda items.
 - Do NOT copy raw entries verbatim. Synthesize them professionally.
 
@@ -1162,7 +1160,7 @@ Decisions made:"""
 
 
 CHUNK_SUMMARY_PROMPT = """\
-Summarize the following meeting excerpt in 3–7 sentences. Focus on the main topics discussed and any decisions or outcomes.
+Summarize the following meeting excerpt in 3-7 sentences. Focus on the main topics discussed and any decisions or outcomes.
 Preserve all technical terms, acronyms, and project names exactly. Do not attribute to speakers.
 
 EXCERPT:
@@ -1172,7 +1170,7 @@ Summary:"""
 
 
 SPEAKER_SUMMARY_PROMPT = """\
-You are an expert meeting analyst. Summarize only {speaker}'s contributions from the transcript below in 2–4 sentences.
+You are an expert meeting analyst. Summarize only {speaker}'s contributions from the transcript below in 2-4 sentences.
 
 Focus on what {speaker} specifically discussed, proposed, or decided. Do NOT repeat verbatim sentences.
 Preserve all technical terms, acronyms, and project names exactly.
@@ -1184,7 +1182,7 @@ TRANSCRIPT (only {speaker}'s lines):
 
 
 SPEAKER_KEY_POINTS_PROMPT = """\
-You are an expert meeting analyst. Extract 3–6 key points from {speaker}'s contributions in the transcript below.
+You are an expert meeting analyst. Extract 3-6 key points from {speaker}'s contributions in the transcript below.
 
 Format:
 • [Key point title]: [One sentence explanation]
@@ -1209,7 +1207,7 @@ TRANSCRIPT (only {speaker}'s lines):
 
 
 # ══════════════════════════════════════════════════════════════
-# Collection AI Chat Prompts — used by Collection AI feature
+# Collection AI Chat Prompts - used by Collection AI feature
 # ══════════════════════════════════════════════════════════════
 
 COLLECTION_PLANNING_PROMPT = """\
@@ -1288,7 +1286,7 @@ Rules:
 - Be specific and reference actual discussion content from each meeting.
 - Cite which meeting each point comes from: [Meeting A: <name>] or [Meeting B: <name>]
 - Preserve all technical terms and project names exactly.
-- If a section has no relevant content, write "None identified." — do NOT omit the section.
+- If a section has no relevant content, write "None identified." - do NOT omit the section.
 - Do NOT invent information not present in the meeting data.
 
 MEETING A: {meeting_a_name} ({meeting_a_date})
@@ -1327,7 +1325,7 @@ Unresolved items and recommended next actions.
 
 Rules:
 - Only include meetings that actually discuss the topic.
-- Be specific — reference actual discussion content.
+- Be specific - reference actual discussion content.
 - Cite meetings: [Meeting: <name>]
 - Preserve all technical terms and project names exactly.
 - If a section has no relevant content, write "None identified."
@@ -1345,20 +1343,39 @@ Topic Growth Report:"""
 # ROM Prompts
 # ══════════════════════════════════════════════════════════════
 
-ROM_DISCUSSION_EXTRACTION_PROMPT = """You are an expert meeting analyst. Extract structured discussion points from the following transcript window.
+ROM_DISCUSSION_EXTRACTION_PROMPT = """You are an expert meeting analyst. Extract structured Stage 1 discussion points from the following transcript window.
 
-CRITICAL RULES:
-- DO NOT summarize. Extract precise, detailed discussion points.
-- DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract ONLY actual calendar dates or explicit calendar references mentioned in the text (e.g., "July 8, 2026", "2026-07-08", "April 8th", "next Monday"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02–05:03 or 3975.18 as dates.
-- Do NOT generate or decide timeline start/end values. Timelines are computed automatically by the system.
-- Preserve ALL technical terminology, abbreviations, acronyms, project names EXACTLY as spoken.
-- Examples of terms to preserve exactly: LCA Mk2, AMCA, DRDO, ADA, HAL, etc.
-- Never replace abbreviations with generic wording.
-- Each point must be information-dense and specific.
-- If you need additional information to understand a point, add it to required_information instead of guessing.
+CRITICAL RULES FOR TRANSCRIPT PRESERVATION & ACTION ITEMS:
 
+1. PRESERVE THE TRANSCRIPT EXACTLY:
+   - Do NOT rewrite, paraphrase, summarize, reinterpret, or change the meaning of any discussion point.
+   - The extracted discussion point MUST faithfully reflect what was actually spoken in the transcript.
+   - It should clearly capture WHO SAID WHAT, TO WHOM, AND THE DISCUSSION EXACTLY AS IT OCCURRED, while only making minor grammatical fixes if absolutely necessary for readability.
+   - NEVER introduce statements, assumptions, interpretations, or wording that was not present in the transcript.
+
+2. IMPROVE ACTION ITEM EXTRACTION:
+   - Every action item in "action_items" MUST explicitly identify:
+     * Who assigned the task (assigner / requester).
+     * Who is responsible for completing it (assignee / action owner).
+     * What needs to be done.
+     * Any deadline, timeframe, or conditions mentioned in the discussion.
+   - Always infer the assigner and assignee from the conversation context when they are explicitly mentioned.
+   - Preserve the original intent and wording from the transcript, and NEVER invent or alter responsibilities.
+
+3. DATES & TIMELINES:
+   - DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract ONLY actual calendar dates or explicit calendar references mentioned in the text (e.g., "July 8, 2026", "2026-07-08", "April 8th", "next Monday"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02-05:03 or 3975.18 as dates.
+   - Do NOT generate or decide timeline start/end values. Timelines are computed automatically by the system.
+
+4. TECHNICAL ACCURACY:
+   - Preserve ALL technical terminology, abbreviations, acronyms, project names EXACTLY as spoken (e.g., LCA Mk2, AMCA, DRDO, ADA, HAL).
+   - Never replace abbreviations with generic wording.
+   - If you need additional context to understand a point, add it to required_information instead of guessing.
+
+REFERENCE CONTEXT:
+Use the previous_context and video_context_section strictly as supporting reference only. They may help resolve clarify ambiguous references, or provide additional context. Never allow them to override, rewrite, or alter information extracted from the current transcript window. If there is any conflict, the TRANSCRIPT WINDOW is the single source of truth.
+previous_context : 
 {previous_context}
-
+video_context :
 {video_context_section}
 
 TRANSCRIPT WINDOW:
@@ -1369,16 +1386,22 @@ Extract discussion points as JSON:
 {{
   "discussion_points": [
     {{
-      "discussion_point": "Clear, detailed description of what was discussed",
+      "discussion_point": "Faithful capture of who said what to whom and what was discussed exactly as spoken",
       "speakers": ["Speaker Name"],
-      "action_owner": "Person responsible or null",
       "decisions": ["Any decisions made"],
       "questions": ["Any questions raised"],
       "technical_terms": ["Exact abbreviations and technical terms used"],
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
       "project_names": ["Any project names mentioned"],
-      "action_items": ["Any action items identified"],
+      "action_items": [{{
+            "assigner": "Person who assigned/requested the task or null",
+            "assignee": "Person responsible for the task or null",
+            "task": "Task exactly as requested in the transcript",
+            "deadline": "Deadline/timeframe mentioned or null"
+        }}
+        ],
+      "action_owner": "Person responsible for completing the task (assignee) or null",
       "references": ["Any documents, standards, or references mentioned"],
       "required_information": ["Additional context needed to fully understand this point"]
     }}
@@ -1389,8 +1412,10 @@ Extract discussion points as JSON:
 ROM_POLISH_PROMPT = """You are an expert meeting analyst. Enhance and merge the following discussion points using the retrieved context.
 
 CRITICAL RULES & MERGING INSTRUCTIONS:
-- DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract/preserve ONLY actual calendar dates or explicit calendar references (e.g., "July 8, 2026", "April 8th"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02–05:03 or 3975.18 as dates.
-- INFORMATION-DENSE SUMMARY: The enhanced point (`polished_text`) must be a clear, informative, and detailed summary of what was discussed, preserving all important facts, decisions, dates, numbers, and outcomes.
+- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT rewrite, paraphrase, summarize away, or reinterpret the actual spoken meaning, statements, who said what to whom, or original responsibilities.
+- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned (e.g., "John assigned Sarah to prepare the budget report by Friday." or "Speaker 1 requested Speaker 2 to submit the revised proposal before next week's meeting."). Never alter or invent responsibilities.
+- DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract/preserve ONLY actual calendar dates or explicit calendar references (e.g., "July 8, 2026", "April 8th"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02-05:03 or 3975.18 as dates.
+- INFORMATION-DENSE SUMMARY: The enhanced point (`polished_text`) must be a clear, informative, and detailed summary of what was discussed, preserving all important facts, who said what to whom, decisions, dates, numbers, and outcomes.
 - MERGE DUPLICATES & SIMILAR POINTS: Identify discussion points in the batch that refer to the same topic, decision, project, or issue. Combine/merge duplicate or highly similar points into a single enriched, comprehensive point. Do NOT output redundant points.
 - ENRICH WITH CONTEXT: Use the retrieved context (if any) to add precision, technical details, background, and clarity to the merged points.
 - PRESERVE ALL FACTS: Retain ALL technical terminology, project names, acronyms, action owners, decisions, action items, dates, and numbers from the original points.
@@ -1408,15 +1433,15 @@ Return merged and enhanced discussion points as JSON:
   "polished_points": [
     {{
       "original_point_ids": ["id-1", "id-2"],
-      "polished_text": "Clear, detailed, information-dense summary of what was discussed",
+      "polished_text": "Clear, detailed, information-dense summary of what was discussed, capturing who said what to whom",
       "speakers": ["Speaker Name"],
-      "action_owner": "Person responsible or null",
       "decisions": ["Decisions"],
       "technical_terms": ["Terms"],
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Numbers"],
       "references": ["References"],
-      "action_items": ["Action items"]
+      "action_items": ["Action item with assigner, assignee, task, and deadline mentioned in the discussion"],
+      "action_owner": "Person responsible for completing the task (assignee) or null",
     }}
   ]
 }}
@@ -1425,15 +1450,16 @@ Return merged and enhanced discussion points as JSON:
 ROM_ENHANCE_WINDOW_PROMPT = """You are an expert meeting analyst. Your task is to ENHANCE a window of consecutive discussion points extracted from a meeting transcript using two independently retrieved reference sources: Meeting Context and Global Context.
 
 ENHANCEMENT RULES:
-- PRESERVE ALL ORIGINAL FACTS: Never remove or contradict any information from the original discussion points.
+- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT rewrite, paraphrase, summarize away, or reinterpret the actual spoken statements, who said what to whom, or original responsibilities. Never remove or contradict any information from the original discussion points.
+- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned. Never alter or invent responsibilities.
 - VERIFY TECHNICAL TERMINOLOGY: If the retrieved context confirms or clarifies a technical term, incorporate the clarification.
 - EXPAND ABBREVIATIONS: If the context makes an abbreviation's full form clear, expand it the first time it appears in enhanced_text (e.g., "SRS (Software Requirements Specification)").
 - ADD MISSING TECHNICAL DETAILS: Only add details that are DIRECTLY supported by the retrieved context. NEVER invent or hallucinate.
 - IMPROVE CLARITY: Make the enhanced point clearer and more complete while preserving the original meaning.
 - INFORMATION-DENSE: Write clear, professional prose.
-- DATES — CALENDAR DATES ONLY: In the "dates" array, output ONLY actual calendar dates (e.g., "July 8, 2026", "Q3 2026"). NEVER include transcript timestamps, audio offsets, or values like "3975.18" or "00:02-05:03".
+- DATES - CALENDAR DATES ONLY: In the "dates" array, output ONLY actual calendar dates (e.g., "July 8, 2026", "Q3 2026"). NEVER include transcript timestamps, audio offsets, or values like "3975.18" or "00:02-05:03".
 - MERGE DUPLICATES: If any two points in the window refer to the same topic, decision, or fact, merge them into a single, comprehensive point. Return `original_point_ids` listing all merged IDs.
-- CONTEXT USAGE REPORT: For EVERY enhanced point, you MUST fill in the `context_usage_report` object honestly. If a field is false, set it to false — do not set everything to true.
+- CONTEXT USAGE REPORT: For EVERY enhanced point, you MUST fill in the `context_usage_report` object honestly. If a field is false, set it to false - do not set everything to true.
 
 DISCUSSION WINDOW (points to enhance):
 {window_json}
@@ -1452,12 +1478,12 @@ Return the enhanced points as a JSON object:
       "original_point_ids": ["id-1", "id-2"],
       "enhanced_text": "Clear, information-dense enhanced discussion point text.",
       "speakers": ["Speaker Name"],
-      "action_owner": "Person responsible or null",
       "decisions": ["Decisions made"],
       "technical_terms": ["Technical terms used"],
       "dates": ["Actual calendar dates only"],
       "numbers": ["Numbers and quantities"],
       "references": ["Document or section references"],
+      "action_owner": "Person responsible or null",
       "action_items": ["Action items"],
       "context_usage_report": {{
         "verified": true,
@@ -1498,13 +1524,13 @@ Return result as JSON:
       "original_point_ids": ["id-1", "id-2"],
       "polished_text": "Single comprehensive description combining all details if duplicate/complementary, or individual texts if different",
       "speakers": ["Speaker Name"],
-      "action_owner": "Person responsible or null",
       "decisions": ["Decisions"],
       "technical_terms": ["Terms"],
       "dates": ["Dates"],
       "numbers": ["Numbers"],
       "references": ["References"],
       "action_items": ["Action items"]
+      "action_owner": "Person responsible or null",
     }}
   ]
 }}
@@ -1646,7 +1672,7 @@ def _get_prompt(key: str) -> str:
 
     Lookup order:
     1. In-process cache in services.prompt_service (populated from DB on first request).
-    2. Hardcoded module-level constant string (always available — never removed).
+    2. Hardcoded module-level constant string (always available - never removed).
 
     This function is synchronous and safe to call from worker threads.
     It NEVER hits the database directly.
@@ -1662,7 +1688,7 @@ def _get_prompt(key: str) -> str:
     _CONSTANT_MAP = {
         "mom": MOM_PROMPT,
         "mom_merge": MOM_MERGE_PROMPT,
-        "raw_mom_to_mom": RAW_MOM_TO_MOM_PROMPT,
+        "raw_mom_to_mom": "",
         "rom_discussion": ROM_DISCUSSION_EXTRACTION_PROMPT,
         "rom_polish": ROM_POLISH_PROMPT,
         "rom_enhance_window": ROM_ENHANCE_WINDOW_PROMPT,
@@ -1671,7 +1697,7 @@ def _get_prompt(key: str) -> str:
         "rom_mom_expansion": ROM_MOM_EXPANSION_PROMPT,
         "rom_agenda_assign_batch": ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         "rom_agenda_doc_points": ROM_AGENDA_DOC_POINTS_PROMPT,
-        "raw_mom_extraction": RAW_MOM_EXTRACTION_PROMPT,
+        "raw_mom_extraction": "",
         "agenda_compress": AGENDA_COMPRESS_PROMPT,
         "agenda_compress_with_context": AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
         "reference_compress": REFERENCE_COMPRESS_PROMPT,
@@ -1686,7 +1712,7 @@ def _get_prompt(key: str) -> str:
         "speaker_summary": SPEAKER_SUMMARY_PROMPT,
         "speaker_key_points": SPEAKER_KEY_POINTS_PROMPT,
         "speaker_action_items": SPEAKER_ACTION_ITEMS_PROMPT,
-        "raw_mom_repair": RAW_MOM_REPAIR_PROMPT,
+        "raw_mom_repair": "",
         "collection_planning": COLLECTION_PLANNING_PROMPT,
         "collection_chat": COLLECTION_CHAT_PROMPT,
         "collection_compare": COLLECTION_COMPARE_PROMPT,
@@ -1707,7 +1733,7 @@ def _format_transcript(transcript: List[Dict]) -> str:
 
 
 def _format_for_summary(transcript: List[Dict]) -> str:
-    """Convert transcript into plain text with no speaker labels — for prose summaries."""
+    """Convert transcript into plain text with no speaker labels - for prose summaries."""
     parts = []
     for seg in transcript:
         text = seg.get("text", "").strip()
@@ -1896,7 +1922,7 @@ class QwenProvider(AIProvider):
 
     Qwen3 specifics:
       - Thinking mode is disabled (enable_thinking=False) for structured
-        document generation tasks — ensures clean, deterministic output
+        document generation tasks - ensures clean, deterministic output
         without <think>...</think> preamble blocks.
       - Uses the standard chat template via apply_chat_template.
     """
@@ -2120,9 +2146,6 @@ class QwenProvider(AIProvider):
             "ollama_num_gpu": -1,
             "max_tokens_mom": 1500,
             "max_tokens_mom_merge": 3072,
-            "max_tokens_raw_mom_to_mom": 3000,
-            "max_tokens_raw_mom_extraction": 1024,
-            "max_tokens_raw_mom_repair": 1024,
             "max_tokens_agenda_compress": 2000,
             "max_tokens_reference_compress": 2000,
             "max_tokens_agenda_from_summary": 1024,
@@ -2155,11 +2178,14 @@ class QwenProvider(AIProvider):
         if db_path:
             try:
                 conn = sqlite3.connect(db_path, timeout=5.0)
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM user_settings ORDER BY id DESC LIMIT 1")
-                row = cursor.fetchone()
-                conn.close()
+                try:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM user_settings ORDER BY id DESC LIMIT 1")
+                    row = cursor.fetchone()
+                finally:
+                    conn.close()
+
                 if row:
                     for k in cfg:
                         try:
@@ -2476,7 +2502,7 @@ class QwenProvider(AIProvider):
             output = pipe(
                 text,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,          # deterministic — enterprise doc quality
+                do_sample=False,          # deterministic - enterprise doc quality
                 temperature=1.0,          # ignored when do_sample=False
                 repetition_penalty=rep_penalty,  # reduce repetitive output
                 return_full_text=False,
@@ -2499,7 +2525,7 @@ class QwenProvider(AIProvider):
 
     def generate(self, prompt: str, max_new_tokens: int = 512, temperature: float = 1.0) -> str:
         """
-        Public generate method — used by vocab_extractor for AI-assisted extraction.
+        Public generate method - used by vocab_extractor for AI-assisted extraction.
         Delegates to _infer.
         """
         return self._infer(prompt, max_new_tokens=max_new_tokens, task_key="vocab_extractor")
@@ -2513,7 +2539,7 @@ class QwenProvider(AIProvider):
         if word_count <= 1500:
             return text  # Short enough to use directly
 
-        logger.info(f"[QwenAI] Long transcript ({word_count} words) — applying hierarchical chunking")
+        logger.info(f"[QwenAI] Long transcript ({word_count} words) - applying hierarchical chunking")
         chunks = _chunk_text(text, max_words=700)
         logger.info(f"[QwenAI] Split into {len(chunks)} chunks")
 
@@ -2794,7 +2820,7 @@ class QwenProvider(AIProvider):
             speaker_segments.setdefault(label, []).append(seg)
 
         if not speaker_segments:
-            logger.info("[QwenAI] No named speakers found — skipping per-speaker summaries")
+            logger.info("[QwenAI] No named speakers found - skipping per-speaker summaries")
             return {}
 
         logger.info(f"[QwenAI] Generating per-speaker summaries for: {list(speaker_segments.keys())}")
@@ -2927,7 +2953,7 @@ class QwenProvider(AIProvider):
         """
         Parse an agenda document into a list of {topic, speaker} dicts.
 
-        The topic is copied VERBATIM from the agenda — no rewriting or shortening.
+        The topic is copied VERBATIM from the agenda - no rewriting or shortening.
         The speaker is the presenter/owner if explicitly mentioned, else None.
 
         Returns
@@ -2986,7 +3012,7 @@ class QwenProvider(AIProvider):
                         ]
                 except Exception:
                     pass
-            logger.warning(f"[QwenAI] Agenda parsing failed: {e} — raw: {raw[:200]}")
+            logger.warning(f"[QwenAI] Agenda parsing failed: {e} - raw: {raw[:200]}")
             return []
 
     def parse_agenda_items_with_context(
@@ -3000,7 +3026,7 @@ class QwenProvider(AIProvider):
 
         The agenda document (Section 1) is the SOLE authority for agenda generation.
         The global context (Section 2) may only improve the model's understanding
-        of terminology, project names, and organizational background — it must NOT
+        of terminology, project names, and organizational background - it must NOT
         be used to create, modify, add, or remove agenda items.
 
         Falls back to parse_agenda_items() if global_context is empty.
@@ -3074,200 +3100,11 @@ class QwenProvider(AIProvider):
                 except Exception:
                     pass
             logger.warning(
-                f"[QwenAI] Agenda parsing with context failed: {e} — "
+                f"[QwenAI] Agenda parsing with context failed: {e} - "
                 f"falling back to standard parsing"
             )
             # Final fallback: parse without context
             return self.parse_agenda_items(agenda_text)
-
-
-    def extract_raw_mom_for_agenda(
-        self,
-        agenda_topic: str,
-        agenda_speaker: Optional[str],
-        evidence: str,
-    ) -> Dict:
-        """
-        Extract structured Raw MoM facts for ONE agenda item using retrieved evidence.
-
-        The LLM performs ONLY extraction — no summarization, no introduction,
-        no conclusion. All facts are preserved verbatim.
-
-        Parameters
-        ----------
-        agenda_topic   : Exact topic text from the agenda (verbatim).
-        agenda_speaker : Presenter/owner from the agenda, or None.
-        evidence       : Merged retrieved context from all three FAISS stores.
-
-        Returns
-        -------
-        Dict matching the raw_mom agenda schema:
-        {
-            "agenda_topic": str,
-            "agenda_speaker": str|None,
-            "discussion": [...]
-        }
-        Empty discussion list on failure.
-        """
-        if not evidence or not evidence.strip():
-            return {
-                "agenda_topic": agenda_topic,
-                "agenda_speaker": agenda_speaker,
-                "discussion": [],
-            }
-
-        raw = self._infer(
-            _get_prompt("raw_mom_extraction").format(
-                agenda_topic=agenda_topic,
-                agenda_speaker=agenda_speaker or "Not specified",
-                evidence=evidence.strip(),
-            ),
-            max_new_tokens=4096,
-            task_key="raw_mom_extraction",
-        )
-
-        if not raw:
-            return {
-                "agenda_topic": agenda_topic,
-                "agenda_speaker": agenda_speaker,
-                "discussion": [],
-            }
-
-        # Clean markdown fences using a robust regex
-        raw = raw.strip()
-        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
-        if json_match:
-            raw_clean = json_match.group(1).strip()
-        else:
-            raw_clean = raw
-
-        data = None
-        try:
-            data = json.loads(raw_clean)
-        except json.JSONDecodeError:
-            # Fallback: extract the largest JSON object matching {...}
-            match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group())
-                except Exception:
-                    data = None
-
-        # Automatic JSON Repair Fallback if initial parsing failed
-        if data is None:
-            logger.info(f"[QwenAI] Initial Raw MoM JSON parsing failed. Triggering automatic JSON repair fallback...")
-            try:
-                repaired_raw = self._infer(
-                    # Use str.replace instead of .format() because raw JSON contains
-                    # literal curly braces that Python's str.format() mistakes for
-                    # named format specifiers, causing a KeyError.
-                    _get_prompt("raw_mom_repair").replace("{raw_json}", raw),
-                    max_new_tokens=1024,
-                    task_key="raw_mom_repair",
-                )
-                if repaired_raw:
-                    repaired_raw = repaired_raw.strip()
-                    json_match_repaired = re.search(r'```(?:json)?\s*(.*?)\s*```', repaired_raw, re.DOTALL)
-                    if json_match_repaired:
-                        repaired_clean = json_match_repaired.group(1).strip()
-                    else:
-                        repaired_clean = repaired_raw
-
-                    try:
-                        data = json.loads(repaired_clean)
-                        logger.info("[QwenAI] Automatic JSON repair succeeded.")
-                    except json.JSONDecodeError:
-                        # Fallback for repaired: extract the largest JSON object matching {...}
-                        match_repaired = re.search(r'\{.*\}', repaired_clean, re.DOTALL)
-                        if match_repaired:
-                            try:
-                                data = json.loads(match_repaired.group())
-                                logger.info("[QwenAI] Automatic JSON repair (curly-brace fallback) succeeded.")
-                            except Exception:
-                                data = None
-            except Exception as repair_err:
-                logger.error(f"[QwenAI] Automatic JSON repair failed: {repair_err}", exc_info=True)
-
-        if isinstance(data, dict):
-            discussion = data.get("discussion", [])
-            if not isinstance(discussion, list):
-                discussion = []
-
-            # Normalize each discussion entry, preserving all fields including
-            # new source attribution fields (source_type, timeline, source_reference)
-            normalized = []
-            for entry in discussion:
-                if not isinstance(entry, dict):
-                    continue
-                dates = entry.get("dates", [])
-                if not isinstance(dates, list):
-                    dates = []
-                action = entry.get("action", {})
-                if not isinstance(action, dict):
-                    action = {}
-
-                # Validate timeline: must be {start: float, end: float} or None
-                raw_timeline = entry.get("timeline")
-                if isinstance(raw_timeline, dict):
-                    try:
-                        timeline = {
-                            "start": float(raw_timeline.get("start", 0)),
-                            "end": float(raw_timeline.get("end", 0)),
-                        }
-                    except (TypeError, ValueError):
-                        timeline = None
-                else:
-                    timeline = None
-
-                # Sanitize dates to keep ONLY actual calendar dates
-                raw_dates_list = []
-                for d in dates:
-                    if isinstance(d, dict):
-                        val = str(d.get("value", "")).strip()
-                    else:
-                        val = str(d).strip()
-                    if val:
-                        raw_dates_list.append(val)
-                from services.rom_service import clean_calendar_dates
-                valid_calendar_dates = clean_calendar_dates(raw_dates_list)
-
-
-
-                normalized.append({
-                    "type": str(entry.get("type", "discussion")),
-                    "speaker": entry.get("speaker") or None,
-                    "point": str(entry.get("point", "")).strip(),
-                    # Source attribution fields
-                    "source_type": str(entry.get("source_type") or "Transcript"),
-                    "timeline": timeline,
-                    "source_reference": entry.get("source_reference") or None,
-                    "dates": [
-                        {"value": cd, "purpose": "calendar date"}
-                        for cd in valid_calendar_dates
-                    ],
-                    "action": {
-                        "owner": action.get("owner") or None,
-                        "description": action.get("description") or None,
-                        "deadline": action.get("deadline") or None,
-                        "status": action.get("status") or None,
-                    },
-                })
-
-            return {
-                "agenda_topic": agenda_topic,
-                "agenda_speaker": agenda_speaker,
-                "discussion": normalized,
-            }
-
-        # If all parsing failed, return raw string in discussion
-        logger.warning(
-            f"[QwenAI] Raw MoM extraction parsing failed for '{agenda_topic[:50]}' — raw output: {raw[:200]}"
-        )
-        return {
-            "agenda_topic": agenda_topic,
-            "agenda_speaker": agenda_speaker,
-            "discussion": raw,
-        }
 
     def extract_rom_discussion_points(
         self,
@@ -3288,10 +3125,10 @@ class QwenProvider(AIProvider):
         if previous_points_json:
             prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity - do not repeat, only add new points):\n{previous_points_json}"
 
-        # Build video context section — injected only when OCR text is present
+        # Build video context section - injected only when OCR text is present
         if video_context and video_context.strip():
             video_context_section = (
-                "VIDEO OCR TRANSCRIPT (Screen/Slide Frame Extraction — Use With Intelligence):\n"
+                "VIDEO OCR TRANSCRIPT (Screen/Slide Frame Extraction - Use With Intelligence):\n"
                 "This text was automatically extracted from video frames using OCR (Optical Character Recognition).\n"
                 "OCR extraction is imperfect: it may contain recognition errors, incomplete words, fragmented\n"
                 "sentences, repeated headers, or noisy text. Do NOT rely on exact wording.\n"
@@ -3311,7 +3148,7 @@ class QwenProvider(AIProvider):
                 "DO NOT create points from: decorative text, repeated slide headers/footers, company logos,\n"
                 "page numbers, navigation menus, or content that is insignificant or redundant with spoken content.\n"
                 "\n"
-                "OCR-ONLY POINTS — SPEAKER LABEL:\n"
+                "OCR-ONLY POINTS - SPEAKER LABEL:\n"
                 "If you create a discussion point that originates ONLY from the OCR transcript (not from the audio),\n"
                 "set the speakers field to [\"For Information\"] for that point. Do NOT add any other labels or categories.\n"
                 "\n"
@@ -3352,9 +3189,12 @@ class QwenProvider(AIProvider):
         
         return data if isinstance(data, dict) else {"discussion_points": []}
 
-
-    def polish_rom_discussion_points(self, original_points_json: str, retrieved_context: str) -> Dict:
-        """Enhance discussion points with retrieved context for ROM pipeline."""
+    def polish_rom_points(
+        self,
+        original_points_json: str,
+        retrieved_context: str,
+    ) -> Dict:
+        """Stage 2: Polish and enrich extracted ROM points with retrieved RAG context for ROM pipeline."""
         prompt = _get_prompt("rom_polish").replace("{original_points}", original_points_json).replace("{retrieved_context}", retrieved_context)
         raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_polish")
         
@@ -3569,7 +3409,7 @@ class QwenProvider(AIProvider):
         return data if isinstance(data, dict) else {"expansions": []}
 
     def assign_agenda_batch(self, batch_json: str, agenda_reference_json: str) -> Dict:
-        """Phase 4: Batch agenda assignment – LLM assigns each point to one of its Top-3 candidates.
+        """Phase 4: Batch agenda assignment - LLM assigns each point to one of its Top-3 candidates.
         Returns assignments list with point_id, assigned_agenda_id, confidence, reason.
         """
         prompt = (
@@ -3722,7 +3562,7 @@ class QwenProvider(AIProvider):
         if isinstance(points, list):
             points = [str(p) for p in points if p]
         elif isinstance(points, str) and points.strip():
-            # LLM returned a string instead of a list — split on newlines or wrap
+            # LLM returned a string instead of a list - split on newlines or wrap
             lines = [ln.strip().lstrip("•-*").strip() for ln in points.splitlines() if ln.strip()]
             points = lines if lines else [points.strip()]
         else:
@@ -3871,126 +3711,6 @@ class QwenProvider(AIProvider):
             "action_items": merged_action_items,
             "conclusion": " ".join(conclusions)[:1000],
         }
-
-    def generate_mom_from_raw_mom(
-        self,
-        raw_mom: dict,
-        recording_meta: dict,
-        char_limit: Optional[int] = None,
-        use_max_tokens: Optional[bool] = False,
-    ) -> dict:
-        """
-        Generate a final MoM from a structured Raw MoM JSON.
-
-        This pipeline is COMPLETELY INDEPENDENT of generate_mom() — it does NOT
-        use the transcript at all. Instead, it consumes the pre-extracted
-        structured Raw MoM (agendas → discussion entries) produced by the
-        RAG-based Raw MoM Lab pipeline and converts it into a polished final
-        MoM matching the standard minutes_of_meeting schema.
-
-        Parameters
-        ----------
-        raw_mom        : The Raw MoM dict ({"meeting": {"agendas": [...]}}).
-        recording_meta : Recording metadata (filename, created_at, duration,
-                         speakers_detected) for fallback population.
-        char_limit     : The max char limit (representing token budget).
-        use_max_tokens : If True, iteratively reduce discussion entries to fit char_limit.
-
-        Returns
-        -------
-        dict — A final MoM dict with keys: title, date, duration,
-               planned_start_time, actual_start_time, participants,
-               introduction, points_discussed, action_items, conclusion.
-        """
-        agendas = raw_mom.get("meeting", {}).get("agendas", []) or raw_mom.get("agendas", [])
-        if not agendas:
-            logger.warning("[QwenAI] generate_mom_from_raw_mom: no agendas in raw_mom — returning empty MoM")
-            return _empty_mom(recording_meta)
-
-        import copy
-        agendas_copy = copy.deepcopy(agendas)
-
-        def _format_raw_mom_to_text(items: list[dict]) -> str:
-            lines: list[str] = []
-            for idx, agenda in enumerate(items, start=1):
-                topic = agenda.get("agenda_topic", "")
-                speaker = agenda.get("agenda_speaker") or "Not specified"
-                discussion = agenda.get("discussion", [])
-                lines.append(f"AGENDA {idx}: {topic}")
-                lines.append(f"  Speaker/Owner: {speaker}")
-                if not discussion:
-                    lines.append("  (No discussion entries extracted)")
-                elif isinstance(discussion, str):
-                    lines.append(f"  Raw Discussion: {discussion}")
-                else:
-                    for entry in discussion:
-                        entry_type = str(entry.get("type", "discussion")).upper()
-                        entry_speaker = entry.get("speaker") or "Unknown"
-                        point = str(entry.get("point", "")).strip()
-                        lines.append(f"  [{entry_type}] {entry_speaker}: {point}")
-                        action = entry.get("action") or {}
-                        if action.get("description"):
-                            owner = action.get("owner") or "Unassigned"
-                            deadline = action.get("deadline") or "ASAP"
-                            status = action.get("status") or "open"
-                            lines.append(
-                                f"    → ACTION: {action['description']} | Owner: {owner} | "
-                                f"Deadline: {deadline} | Status: {status}"
-                            )
-                        for date_entry in (entry.get("dates") or []):
-                            lines.append(
-                                f"    → DATE ({date_entry.get('purpose', '')}): {date_entry.get('value', '')}"
-                            )
-                lines.append("")  # blank line between agendas
-            return "\n".join(lines).strip()
-
-        # Iterate and remove the last discussion point from each agenda until it fits the char limit (if enabled)
-        if use_max_tokens and char_limit is not None:
-            while True:
-                raw_mom_text = _format_raw_mom_to_text(agendas_copy)
-                if len(raw_mom_text) <= char_limit:
-                    break
-                removed_any = False
-                for agenda in agendas_copy:
-                    disc = agenda.get("discussion", [])
-                    if isinstance(disc, list) and len(disc) > 0:
-                        disc.pop()
-                        removed_any = True
-                if not removed_any:
-                    break  # no more entries to remove
-            logger.info(
-                f"[QwenAI] generate_mom_from_raw_mom: shrunk input to fit {char_limit} limit. "
-                f"Remaining chars: {len(raw_mom_text)}"
-            )
-        else:
-            raw_mom_text = _format_raw_mom_to_text(agendas_copy)
-
-        if not raw_mom_text:
-            logger.warning("[QwenAI] generate_mom_from_raw_mom: raw_mom_text is empty — returning empty MoM")
-            return _empty_mom(recording_meta)
-
-        logger.info(
-            f"[QwenAI] generate_mom_from_raw_mom: {len(agendas_copy)} agendas, "
-            f"{len(raw_mom_text)} chars of formatted input"
-        )
-
-        try:
-            raw_output = self._infer(
-                _get_prompt("raw_mom_to_mom").format(raw_mom_text=raw_mom_text),
-                max_new_tokens=3000,
-                task_key="raw_mom_to_mom",
-            )
-            data = self._parse_mom_json(raw_output, recording_meta)
-            if data and data.get("points_discussed"):
-                logger.info("[QwenAI] generate_mom_from_raw_mom: generation succeeded")
-                return data
-            logger.warning("[QwenAI] generate_mom_from_raw_mom: LLM returned empty points — returning empty MoM")
-            return _empty_mom(recording_meta)
-        except Exception as e:
-            logger.error(
-                f"[QwenAI] generate_mom_from_raw_mom failed: {e}", exc_info=True
-            )
-            return _empty_mom(recording_meta)
 
     def generate_mom(
         self,

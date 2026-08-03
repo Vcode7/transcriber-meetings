@@ -119,6 +119,26 @@ class GenerateAdvancedMomRequest(BaseModel):
     regenerate_conclusion: bool = False
 
 
+DEFAULT_REWRITE_INSTRUCTION = (
+    "Rewrite the ROM in a formal, professional writing style. "
+    "Improve grammar, sentence structure, readability, and formatting only. "
+    "Do not change, add, remove, or reinterpret any facts, discussion points, decisions, "
+    "action items, speakers, or context. "
+    "Preserve the exact meaning and structure while presenting it in polished formal language."
+)
+
+
+class RewriteRomRequest(BaseModel):
+    rewrite_instruction: str = DEFAULT_REWRITE_INSTRUCTION
+    mode: str = Field(default="window", description="'window', 'complete', or 'reference'")
+    window_size: int = Field(default=3, ge=1, le=10, description="Points per window (window/reference modes)")
+    writing_rules: str = Field(default="", description="Writing rules extracted from a reference document (reference mode)")
+
+
+class ExtractWritingRulesRequest(BaseModel):
+    reference_text: str = Field(..., description="Extracted text of the reference MoM/ROM document")
+
+
 # ── Defensive Auth Validation Helper ──────────────────────────────────────────
 
 def _validate_user_id(user_obj: Any) -> str:
@@ -228,6 +248,13 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
             f"[ROM Router] Stage 1: video recording but no OCR data yet for recording={recording_id}"
         )
         
+    r = await db.execute(
+        text("SELECT rom_parallel_window_processing FROM user_settings WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
+    us_row = r.fetchone()
+    parallel_concurrency = us_row[0] if us_row and us_row[0] is not None else 2
+
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None, 
@@ -237,6 +264,7 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
             user_id,
             video_transcript=video_transcript,
             source_type=source_type,
+            parallel_window_processing=parallel_concurrency,
         )
     )
     
@@ -389,13 +417,21 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
     if not points:
         raise HTTPException(status_code=400, detail="Stage 1 must be completed first")
         
+    r = await db.execute(
+        text("SELECT rom_parallel_window_processing FROM user_settings WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
+    us_row = r.fetchone()
+    parallel_concurrency = us_row[0] if us_row and us_row[0] is not None else 2
+
     loop = asyncio.get_event_loop()
     polished = await loop.run_in_executor(
         None,
         lambda: rom_service.enhance_discussion_points(
             points, recording_id, user_id,
             req.meeting_context_top_k, req.global_context_top_k,
-            req.discussion_window_size
+            req.discussion_window_size,
+            parallel_window_processing=parallel_concurrency,
         )
     )
     
@@ -1016,6 +1052,84 @@ async def update_final_rom(recording_id: str, req: UpdateFinalRomRequest, curren
     data["final_rom"] = apply_speaker_mappings_to_final_rom(final_rom)
     await _save_rom_data(recording_id, user_id, data, db)
     return {"status": "success", "final_rom": data["final_rom"]}
+
+@router.post("/{recording_id}/final/extract-writing-rules")
+async def extract_writing_rules(
+    recording_id: str,
+    req: ExtractWritingRulesRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Analyze a reference MoM/ROM document's writing style and return structured Writing Rules.
+    The rules describe style, tone, formatting, and structure — never any content from the document.
+    """
+    user_id = _validate_user_id(current_user)
+    await _get_recording_or_404(recording_id, user_id, db)  # Access control
+
+    reference_text = (req.reference_text or "").strip()
+    if not reference_text:
+        raise HTTPException(status_code=400, detail="reference_text must not be empty.")
+
+    loop = asyncio.get_event_loop()
+    writing_rules = await loop.run_in_executor(
+        None,
+        lambda: rom_service.extract_writing_style_rules(reference_text=reference_text)
+    )
+
+    return {
+        "status": "success",
+        "writing_rules": writing_rules,
+    }
+
+
+@router.post("/{recording_id}/final/rewrite")
+async def rewrite_final_rom(
+    recording_id: str,
+    req: RewriteRomRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Rewrite the writing style of the Final ROM discussion points using an LLM.
+    Modes: 'window' (default), 'complete', 'reference' (uses writing_rules from uploaded doc).
+    The rewritten result is returned but NOT saved; the user must explicitly save or revert.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    final_rom = data.get("final_rom") or {}
+    if not final_rom or not final_rom.get("agendas"):
+        raise HTTPException(
+            status_code=400,
+            detail="Final ROM must be generated before it can be rewritten."
+        )
+
+    instruction = (req.rewrite_instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="rewrite_instruction must not be empty.")
+
+    valid_modes = {"window", "complete", "reference"}
+    mode = (req.mode or "window").strip().lower()
+    if mode not in valid_modes:
+        mode = "window"
+
+    loop = asyncio.get_event_loop()
+    rewritten_final_rom = await loop.run_in_executor(
+        None,
+        lambda: rom_service.rewrite_final_rom(
+            final_rom=final_rom,
+            rewrite_instruction=instruction,
+            mode=mode,
+            window_size=req.window_size,
+            writing_rules=req.writing_rules or "",
+        )
+    )
+
+    return {
+        "status": "success",
+        "rewritten_final_rom": rewritten_final_rom,
+    }
+
 
 @router.get("/{recording_id}/final/download/docx")
 async def download_final_docx(recording_id: str, current_user: dict = Depends(get_current_user), db=Depends(get_db)):

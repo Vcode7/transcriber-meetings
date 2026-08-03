@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   History as HistoryIcon, Clock, FileAudio, Mic,
-  Loader, Trash2, ChevronRight, Search, X, Users, Calendar, Sparkles, FlaskConical, MoreVertical, FolderOpen
+  Loader, Trash2, ChevronRight, Search, X, Users, Calendar, Sparkles, FolderOpen
 } from 'lucide-react'
 import CollectionsPanel from '../components/collections/CollectionsPanel'
 import api from '../api/client'
@@ -62,7 +62,6 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [activeTab, setActiveTab] = useState<'meetings' | 'collections'>('meetings')
   const navigate = useNavigate()
@@ -401,62 +400,6 @@ export default function HistoryPage() {
                       </button>
                     )}
 
-                    {/* More (⋮) Menu Button */}
-                    <div style={{ position: 'relative' }}>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setMenuOpenId(menuOpenId === item.id ? null : item.id)
-                        }}
-                        className="icon-btn"
-                        title="More options"
-                        style={{
-                          width: '34px',
-                          height: '34px',
-                          color: menuOpenId === item.id ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
-                        }}
-                      >
-                        <MoreVertical size={16} />
-                      </button>
-
-                      {menuOpenId === item.id && (
-                        <div
-                          className="header-dropdown"
-                          style={{
-                            right: 0,
-                            top: '38px',
-                            width: '210px',
-                            position: 'absolute',
-                            zIndex: 100,
-                            display: 'flex',
-                            flexDirection: 'column',
-                          }}
-                        >
-                          <button
-                            className="dropdown-item"
-                            disabled={item.status !== 'done'}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setMenuOpenId(null)
-                              navigate(`/dashboard/history/${item.id}/raw-mom`)
-                            }}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '8px',
-                              textAlign: 'left',
-                              width: '100%',
-                              opacity: item.status !== 'done' ? 0.5 : 1,
-                              cursor: item.status !== 'done' ? 'not-allowed' : 'pointer'
-                            }}
-                          >
-                            <FlaskConical size={14} style={{ color: 'hsl(280,75%,65%)' }} />
-                            <span style={{ fontSize: '.82rem' }}>Generate Raw MoM (Lab)</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
                     <ChevronRight size={18} style={{ color: 'hsl(var(--accent))', transition: 'transform .2s' }} />
                   </div>
                 </div>
@@ -536,13 +479,6 @@ export default function HistoryPage() {
           ))}
         </div>
       </div>
-      )}
-      {/* Click-away overlay to dismiss dropdown */}
-      {menuOpenId && (
-        <div
-          onClick={() => setMenuOpenId(null)}
-          style={{ position: 'fixed', inset: 0, zIndex: 90, cursor: 'default' }}
-        />
       )}
     </div>
   )

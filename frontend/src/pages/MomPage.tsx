@@ -4,8 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Sparkles, Loader, FileDown, Copy, CheckCircle,
   AlertTriangle, Clock, RotateCcw, Plus, X, History, User, Users,
-  FileText, Upload, ChevronDown, ChevronUp, Trash2, Brain, Zap, ChevronRight,
-  Database, FlaskConical
+  FileText, Upload, ChevronDown, ChevronUp, Trash2, Brain, Zap, ChevronRight
 } from 'lucide-react'
 import api from '../api/client'
 import MomSection from '../components/MomSection'
@@ -242,244 +241,7 @@ function ActionPointsSection({
   )
 }
 
-// ── RAW MOM SECTION (completely independent) ══════════════════════
-function RawMomSection({
-  id,
-  pageState,
-}: {
-  id: string
-  pageState: PageState
-}) {
-  const [rawMom, setRawMom] = useState<any>(null)
-  const [rawMomLoading, setRawMomLoading] = useState(false)
-  const [rawMomError, setRawMomError] = useState<string | null>(null)
-  const [rawMomLoaded, setRawMomLoaded] = useState(false)
-  const [rawMomExpanded, setRawMomExpanded] = useState(true)
-  const [openAgendas, setOpenAgendas] = useState<Record<number, boolean>>({})
-  const [forceReembed, setForceReembed] = useState(false)
 
-  const handleGenerateRawMom = async () => {
-    setRawMomLoading(true)
-    setRawMomError(null)
-    try {
-      const res = await api.post(`/raw-mom/${id}/generate${forceReembed ? '?force_reembed=true' : ''}`)
-      setRawMom(res.data)
-      setRawMomLoaded(true)
-      setRawMomExpanded(true)
-      if (res.data?.meeting?.agendas?.length > 0) {
-        setOpenAgendas({ 0: true })
-      }
-    } catch (e: any) {
-      setRawMomError(e.response?.data?.detail || 'Failed to generate Raw MoM')
-    } finally {
-      setRawMomLoading(false)
-    }
-  }
-
-  // Load existing raw_mom on mount
-  useEffect(() => {
-    api.get(`/raw-mom/${id}`)
-      .then(res => {
-        setRawMom(res.data)
-        setRawMomLoaded(true)
-        if (res.data?.meeting?.agendas?.length > 0) {
-          setOpenAgendas({ 0: true })
-        }
-      })
-      .catch(() => { /* 404 = not generated yet */ })
-  }, [id])
-
-  const handleExportRawMomJson = () => {
-    if (!rawMom) return
-    const blob = new Blob([JSON.stringify(rawMom, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `raw-mom-${id}.json`
-    a.click()
-  }
-
-  return (
-    <div className='page-scroll-root' style={{
-      borderTop: '2px solid hsl(35,90%,55% / .2)',
-      background: 'linear-gradient(180deg, hsl(35,90%,55% / .04) 0%, transparent 100%)',
-      padding: '1.25rem 1.5rem',
-      flexShrink: 0,
-    }}>
-      {/* Header Row */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: rawMomExpanded ? '1rem' : 0 }}>
-        <div style={{
-          width: 30, height: 30, borderRadius: 8, flexShrink: 0,
-          background: 'hsl(35,90%,55% / .14)',
-          border: '1.5px solid hsl(35,90%,55% / .25)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <Database size={15} style={{ color: 'hsl(35,90%,55%)' }} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: '.85rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif' }}>
-            Raw MoM
-            <span style={{
-              marginLeft: 8, fontSize: '.68rem', fontWeight: 600,
-              color: 'hsl(35,90%,55%)',
-              background: 'hsl(35,90%,55% / .12)',
-              border: '1px solid hsl(35,90%,55% / .25)',
-              padding: '2px 7px', borderRadius: 999,
-            }}>RAG Pipeline</span>
-          </div>
-          <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
-            Per-agenda fact extraction via FAISS retrieval · independent of Generate MoM
-          </div>
-        </div>
-        {/* Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-          {rawMomLoaded && (
-            <button
-              className="btn btn-ghost"
-              onClick={handleExportRawMomJson}
-              style={{ fontSize: '.75rem', padding: '.3rem .65rem', gap: '5px', height: 32 }}
-            >
-              <FileDown size={13} /> JSON
-            </button>
-          )}
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: '5px',
-            fontSize: '.72rem', color: 'hsl(var(--pencil))', cursor: 'pointer',
-            userSelect: 'none', fontFamily: 'Inter, sans-serif',
-          }}>
-            <input
-              type="checkbox"
-              checked={forceReembed}
-              onChange={e => setForceReembed(e.target.checked)}
-              style={{ width: 13, height: 13, accentColor: 'hsl(35,90%,55%)' }}
-            />
-            Re-embed
-          </label>
-          <button
-            onClick={handleGenerateRawMom}
-            disabled={rawMomLoading || pageState === 'generating'}
-            className="btn"
-            style={{
-              fontSize: '.8rem', padding: '.38rem .85rem', gap: '6px', height: 32,
-              background: 'linear-gradient(135deg, hsl(35,90%,48%), hsl(28,90%,50%))',
-              color: '#fff', border: 'none',
-              opacity: (rawMomLoading || pageState === 'generating') ? 0.65 : 1,
-            }}
-          >
-            {rawMomLoading
-              ? <><Loader size={13} className="spin" /> Generating...</>
-              : <><Zap size={13} /> {rawMomLoaded ? 'Regenerate Raw MoM' : 'Generate Raw MoM'}</>
-            }
-          </button>
-          <button
-            onClick={() => setRawMomExpanded(v => !v)}
-            className="icon-btn"
-            style={{ color: 'hsl(var(--pencil))', width: 30, height: 30 }}
-          >
-            {rawMomExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-          </button>
-        </div>
-      </div>
-
-      {/* Expanded Content */}
-      {rawMomExpanded && (
-        <div>
-          {/* Error */}
-          {rawMomError && (
-            <div style={{
-              padding: '.65rem 1rem', borderRadius: 8, marginBottom: '.75rem',
-              background: 'hsl(var(--destructive) / .1)',
-              border: '1px solid hsl(var(--destructive) / .25)',
-              color: 'hsl(var(--destructive))', fontSize: '.82rem',
-              display: 'flex', alignItems: 'center', gap: '7px',
-              fontFamily: 'Inter, sans-serif',
-            }}>
-              <AlertTriangle size={13} style={{ flexShrink: 0 }} />
-              {rawMomError}
-            </div>
-          )}
-
-          {/* Loading Skeleton */}
-          {rawMomLoading && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {[120, 80, 140].map((h, i) => (
-                <div key={i} style={{
-                  height: h, borderRadius: 10,
-                  background: 'linear-gradient(90deg, hsl(35,90%,55% / .08) 0%, hsl(35,90%,55% / .03) 50%, hsl(35,90%,55% / .08) 100%)',
-                  backgroundSize: '200% 100%',
-                  animation: 'shimmer 1.6s ease-in-out infinite',
-                  animationDelay: `${i * 0.2}s`,
-                  border: '1px solid hsl(35,90%,55% / .12)',
-                }} />
-              ))}
-              <p style={{ fontSize: '.78rem', color: 'hsl(35,90%,55%)', fontFamily: 'Inter, sans-serif', textAlign: 'center', marginTop: 4 }}>
-                Retrieving evidence and extracting facts per agenda item…
-              </p>
-            </div>
-          )}
-
-          {/* No raw mom yet */}
-          {!rawMomLoading && !rawMomLoaded && !rawMomError && (
-            <div style={{
-              textAlign: 'center', padding: '1.5rem',
-              borderRadius: 10, border: '1.5px dashed hsl(35,90%,55% / .2)',
-              color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif',
-            }}>
-              <Database size={24} style={{ margin: '0 auto 8px', color: 'hsl(35,90%,55%)', opacity: 0.5 }} />
-              <p style={{ margin: 0, fontSize: '.85rem' }}>Click <strong>Generate Raw MoM</strong> to extract structured facts using the RAG pipeline.</p>
-              <p style={{ margin: '4px 0 0', fontSize: '.75rem', opacity: .7 }}>
-                Retrieves from transcript, meeting context files, and your Global Knowledge Base.
-              </p>
-            </div>
-          )}
-
-          {/* Agenda Panels */}
-          {!rawMomLoading && rawMom?.meeting?.agendas && rawMom.meeting.agendas.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {rawMom.meeting.agendas.map((agenda: any, idx: number) => (
-                <div key={idx} style={{
-                  borderRadius: 10,
-                  border: '1.5px solid hsl(35,90%,55% / .2)',
-                  background: 'hsl(35,90%,55% / .03)',
-                  overflow: 'hidden',
-                }}>
-                  {/* Agenda header */}
-                  <button
-                    onClick={() => setOpenAgendas(prev => ({ ...prev, [idx]: !prev[idx] }))}
-                    style={{
-                      width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
-                      padding: '.7rem .9rem',
-                      background: openAgendas[idx] ? 'hsl(35,90%,55% / .07)' : 'transparent',
-                      border: 'none', cursor: 'pointer', textAlign: 'left',
-                      borderBottom: openAgendas[idx] ? '1px solid hsl(35,90%,55% / .15)' : 'none',
-                      transition: 'background 0.15s',
-                    }}
-                  />
-                    <span style={{
-                      fontSize: '.68rem', fontWeight: 700, color: 'hsl(35,90%,50%)',
-                      background: 'hsl(35,90%,55% / .12)',
-                      border: '1px solid hsl(35,90%,55% / .2)',
-                      padding: '2px 6px', borderRadius: 6, flexShrink: 0,
-                    }}>A{idx + 1}</span>
-                    <span style={{ flex: 1, fontSize: '.82rem', fontWeight: 600, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif' }}>
-                      {agenda.agenda_topic}
-                    </span>
-                    {agenda.agenda_speaker && (
-                      <span style={{
-                        fontSize: '.7rem', color: 'hsl(var(--pencil))',
-                        background: 'hsl(var(--muted) / .6)', padding: '2px 7px',
-                        borderRadius: 999, flexShrink: 0, fontFamily: 'Inter, sans-serif',
-                      }}>{agenda.agenda_speaker}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-  )
-}
 
 // ── Label helper ──────────────────────────────────────────────
 function FieldLabel({ children }: { children: React.ReactNode }) {
@@ -615,77 +377,6 @@ export default function MomPage() {
       setError(getApiErrorDetail(e, 'Generation failed. Please try again.'))
       setPageState('idle')
     }
-  }
-
-  // ── Raw MoM state (completely independent of existing MoM) ───────────────
-  type RawAgendaDiscussion = {
-    type: string
-    speaker: string | null
-    point: string
-    dates: { value: string; purpose: string }[]
-    action: { owner: string | null; description: string | null; deadline: string | null; status: string | null }
-  }
-  type RawAgenda = {
-    agenda_topic: string
-    agenda_speaker: string | null
-    discussion: RawAgendaDiscussion[]
-  }
-  type RawMomData = { meeting: { agendas: RawAgenda[] } }
-
-  const [rawMom, setRawMom] = useState<RawMomData | null>(null)
-  const [rawMomLoading, setRawMomLoading] = useState(false)
-  const [rawMomError, setRawMomError] = useState<string | null>(null)
-  const [rawMomLoaded, setRawMomLoaded] = useState(false)
-  const [rawMomExpanded, setRawMomExpanded] = useState(true)
-  const [openAgendas, setOpenAgendas] = useState<Record<number, boolean>>({})
-  const [forceReembed, setForceReembed] = useState(false)
-
-  // Load existing raw_mom on mount (non-blocking)
-  useEffect(() => {
-    if (!id) return
-    api.get(`/raw-mom/${id}`)
-      .then(res => {
-        setRawMom(res.data)
-        setRawMomLoaded(true)
-        // Expand first agenda by default
-        if (res.data?.meeting?.agendas?.length > 0) {
-          setOpenAgendas({ 0: true })
-        }
-      })
-      .catch(() => { /* 404 means not generated yet */ })
-  }, [id])
-
-  const handleGenerateRawMom = async () => {
-    if (!id) return
-    setRawMomLoading(true)
-    setRawMomError(null)
-    try {
-      const res = await api.post(`/raw-mom/${id}/generate${forceReembed ? '?force_reembed=true' : ''}`)
-      setRawMom(res.data)
-      setRawMomLoaded(true)
-      setRawMomExpanded(true)
-      if (res.data?.meeting?.agendas?.length > 0) {
-        setOpenAgendas({ 0: true })
-      }
-    } catch (e: unknown) {
-      setRawMomError(getApiErrorDetail(e, 'Raw MoM generation failed. Please try again.'))
-    } finally {
-      setRawMomLoading(false)
-    }
-  }
-
-  const handleExportRawMomJson = () => {
-    if (!rawMom) return
-    const json = JSON.stringify(rawMom, null, 2)
-    const blob = new Blob([json], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `RawMoM_${id}.json`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
   }
 
   // ── Attachment handlers ────────────────────────────────────────
@@ -939,7 +630,7 @@ export default function MomPage() {
             <div>
               <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '.5rem' }}>No Minutes of Meeting Generated</h2>
               <p style={{ fontSize: '0.9rem', color: 'hsl(var(--pencil))', maxWidth: '420px', lineHeight: 1.6, fontFamily: 'Inter, sans-serif' }}>
-                Select an action below to generate a structured Minutes of Meeting or open the Raw MoM Lab.
+                Select an action below to generate a structured Minutes of Meeting.
               </p>
             </div>
             {error && (
@@ -951,9 +642,6 @@ export default function MomPage() {
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
               <button id="btn-generate-mom" className="btn btn-primary" onClick={handleGenerate} style={{ fontSize: '0.95rem', padding: '0.75rem 1.75rem', gap: '8px', borderRadius: '12px' }}>
                 <Sparkles size={16} /> Generate MoM
-              </button>
-              <button id="btn-open-raw-mom-lab" className="btn btn-ghost" onClick={() => navigate(`/dashboard/history/${id}/raw-mom`)} style={{ fontSize: '0.95rem', padding: '0.75rem 1.75rem', gap: '8px', borderRadius: '12px', border: '1.5px solid hsl(var(--border))' }}>
-                <FlaskConical size={16} style={{ color: 'hsl(280,75%,65%)' }} /> Open Raw MoM Lab
               </button>
             </div>
           </div>
@@ -1311,9 +999,6 @@ export default function MomPage() {
           )}
         </div>
       )}
-
-      {/* ══ Raw MoM Section (completely independent of MoM pipeline) ══ */}
-      {/* {id && <RawMomSection id={id} pageState={pageState} />} */}
 
     </div>
   )

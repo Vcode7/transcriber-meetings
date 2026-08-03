@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from sqlalchemy import text
 
 from config import settings
-from database import get_db
+from database import get_db, get_db_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -1284,7 +1284,7 @@ async def get_active_jobs():
     """Query recordings table for jobs currently in pending/processing state."""
     from tasks.pipeline import active_tasks
     jobs = []
-    async with get_db() as db:
+    async with get_db_context() as db:
         try:
             res = await db.execute(text(
                 "SELECT id, filename, duration, status, progress, created_at FROM recordings "
@@ -1361,7 +1361,7 @@ async def get_db_stats() -> dict:
     stats["size"] = db_size
     stats["tables"] = {}
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         for t in tables:
             try:
                 res = await db.execute(text(f"SELECT COUNT(*) FROM {t}"))
@@ -1429,7 +1429,7 @@ async def get_performance_metrics() -> dict:
         "avg_llm": 0.0,
         "count": 0
     }
-    async with get_db() as db:
+    async with get_db_context() as db:
         try:
             res = await db.execute(text("""
                 SELECT 
@@ -1460,7 +1460,7 @@ async def get_performance_metrics() -> dict:
 async def get_recent_activity() -> List[dict]:
     """Retrieve status timelines for the last 10 recordings."""
     activity = []
-    async with get_db() as db:
+    async with get_db_context() as db:
         try:
             res = await db.execute(text(
                 "SELECT id, filename, status, created_at FROM recordings "

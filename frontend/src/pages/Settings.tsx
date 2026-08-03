@@ -52,6 +52,10 @@ interface UserSettings {
   rom_meeting_top_k?: number
   rom_global_top_k?: number
   rom_windows_per_batch?: number
+  rom_parallel_window_processing?: number
+
+  // Whisper Settings
+  whisper_batch_size?: number
 
   max_tokens_rom_discussion?: number
   max_tokens_rom_polish?: number
@@ -565,6 +569,13 @@ export default function SettingsPage() {
                       min={1} max={20} step={1}
                       onChange={v => setSettings({ ...settings, rom_windows_per_batch: Math.round(v) })}
                     />
+                    <SettingCard
+                      title="Parallel Window Processing (Stage 1 & 2)"
+                      description="Max number of LLM window extraction calls running concurrently (1–5, default 2)."
+                      value={settings.rom_parallel_window_processing ?? 2}
+                      min={1} max={5} step={1}
+                      onChange={v => setSettings({ ...settings, rom_parallel_window_processing: Math.round(v) })}
+                    />
                   </div>
                 )}
               </div>
@@ -848,15 +859,48 @@ export default function SettingsPage() {
           {/* ⚡ TAB: LLM INFERENCE */}
           {activeTab === 'llm' && settings && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
-              <div style={{ borderRadius: 12, border: '1.5px solid hsl(35,90%,50%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+              <div style={{ borderRadius: 12, border: `1.5px solid ${settings.use_ollama ? 'hsl(35,90%,50%/.5)' : 'hsl(var(--border)/.4)'}`, background: 'hsl(var(--card))', padding: '1.25rem', transition: 'all .2s' }}>
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
                   <Cpu size={16} style={{ color: 'hsl(35,90%,50%)' }} /> Ollama Inference Server &amp; Tuning
                 </h3>
+
+                {/* Enable / Disable Ollama Master Toggle */}
+                <div style={{
+                  marginBottom: '1.25rem', padding: '1rem 1.15rem', borderRadius: 10,
+                  background: settings.use_ollama ? 'hsl(35,90%,50%/.08)' : 'hsl(var(--paper)/.5)',
+                  border: `1.5px solid ${settings.use_ollama ? 'hsl(35,90%,50%/.4)' : 'hsl(var(--border)/.5)'}`,
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all .2s'
+                }}>
+                  <div>
+                    <div style={{ fontSize: '.9rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      Enable Ollama Local Inference
+                      {settings.use_ollama ? (
+                        <span style={{ fontSize: '.65rem', padding: '2px 8px', borderRadius: 6, background: 'hsl(35,90%,50%/.2)', color: 'hsl(35,90%,40%)', border: '1px solid hsl(35,90%,50%/.4)', fontWeight: 700 }}>
+                          ACTIVE (ON)
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: '.65rem', padding: '2px 8px', borderRadius: 6, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', border: '1px solid hsl(var(--border))', fontWeight: 600 }}>
+                          DISABLED (OFF)
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', marginTop: 3, lineHeight: 1.4 }}>
+                      When enabled, AI features prioritize your local Ollama server before falling back to local PyTorch models. Turn off to force local PyTorch model usage exclusively.
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.use_ollama ?? false}
+                    onChange={e => setSettings({ ...settings, use_ollama: e.target.checked })}
+                    style={{ width: 20, height: 20, cursor: 'pointer', accentColor: 'hsl(35,90%,50%)', flexShrink: 0 }}
+                  />
+                </div>
                 
-                {/* Connection Controls */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+                {/* Connection & Priority Controls */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
                   <SettingInput label="Ollama Server URL" val={settings.ollama_server_url ?? 'http://localhost:11434'} onChange={v => setSettings({ ...settings, ollama_server_url: v })} />
                   <SettingCard title="Ollama Port" description="Standard port 11434" value={settings.ollama_port ?? 11434} min={1} max={65535} step={1} onChange={v => setSettings({ ...settings, ollama_port: Math.round(v) })} />
+                  <SettingInput label="Model Priority List (comma-separated)" val={settings.ollama_model_priority ?? 'gemma,qwen,llama,deepseek,mistral'} onChange={v => setSettings({ ...settings, ollama_model_priority: v })} />
                 </div>
 
                 <button onClick={handleTestOllamaConnection} disabled={testingOllama} className="btn btn-secondary" style={{ fontSize: '.78rem', padding: '.45rem 1rem', marginBottom: '1rem' }}>
@@ -867,15 +911,22 @@ export default function SettingsPage() {
                   <div style={{ padding: '.75rem 1rem', borderRadius: 8, background: ollamaTestResult.success ? 'hsl(140,70%,45%/.1)' : 'hsl(0,80%,50%/.1)', border: `1px solid ${ollamaTestResult.success ? 'hsl(140,70%,45%/.3)' : 'hsl(0,80%,50%/.3)'}`, fontSize: '.78rem', marginBottom: '1rem' }}>
                     <div style={{ fontWeight: 700, color: ollamaTestResult.success ? 'hsl(140,70%,40%)' : 'hsl(0,80%,45%)' }}>{ollamaTestResult.message}</div>
                     {ollamaTestResult.available_models?.length ? <div style={{ marginTop: 4, color: 'hsl(var(--ink))' }}>Available Models: {ollamaTestResult.available_models.join(', ')}</div> : null}
+                    {ollamaTestResult.running_models?.length ? <div style={{ marginTop: 2, color: 'hsl(var(--pencil))' }}>Running Models: {ollamaTestResult.running_models.join(', ')}</div> : null}
                   </div>
                 )}
 
                 {/* Hyperparameters */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: '1rem' }}>
-                  <SettingCard title="Context Window (Num Ctx)" description="Maximum context tokens passed to Ollama (default: 32768)." value={settings.ollama_num_ctx ?? 32768} min={512} max={131072} step={1024} onChange={v => setSettings({ ...settings, ollama_num_ctx: Math.round(v) })} />
-                  <SettingCard title="Temperature" description="Sampling temperature (0.0 = deterministic)." value={settings.ollama_temperature ?? 0.0} min={0.0} max={2.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_temperature: v })} />
-                  <SettingCard title="Top-P" description="Nucleus sampling threshold (0.0–1.0)." value={settings.ollama_top_p ?? 0.9} min={0.0} max={1.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_top_p: v })} />
-                  <SettingCard title="Repeat Penalty" description="Penalty for repeating identical tokens." value={settings.ollama_repeat_penalty ?? 1.15} min={0.0} max={3.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_repeat_penalty: v })} />
+                <div style={{ borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: '1rem' }}>
+                  <h4 style={{ fontSize: '.86rem', fontWeight: 700, marginBottom: '.85rem', color: 'hsl(var(--ink))' }}>Ollama Generation Hyperparameters</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                    <SettingToggle label="Dynamic Context Allocation" checked={settings.ollama_dynamic_ctx ?? true} onChange={v => setSettings({ ...settings, ollama_dynamic_ctx: v })} />
+                    <SettingCard title="Context Window (Num Ctx)" description="Maximum context tokens passed to Ollama (default: 32768)." value={settings.ollama_num_ctx ?? 32768} min={512} max={131072} step={1024} onChange={v => setSettings({ ...settings, ollama_num_ctx: Math.round(v) })} />
+                    <SettingCard title="Temperature" description="Sampling temperature (0.0 = deterministic)." value={settings.ollama_temperature ?? 0.0} min={0.0} max={2.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_temperature: v })} />
+                    <SettingCard title="Top-P" description="Nucleus sampling threshold (0.0–1.0)." value={settings.ollama_top_p ?? 0.9} min={0.0} max={1.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_top_p: v })} />
+                    <SettingCard title="Top-K" description="Top-K token sampling filter (default: 40)." value={settings.ollama_top_k ?? 40} min={0} max={200} step={5} onChange={v => setSettings({ ...settings, ollama_top_k: Math.round(v) })} />
+                    <SettingCard title="Repeat Penalty" description="Penalty for repeating identical tokens." value={settings.ollama_repeat_penalty ?? 1.15} min={0.0} max={3.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_repeat_penalty: v })} />
+                    <SettingInput label="Keep Alive Duration" val={settings.ollama_keep_alive ?? '5m'} onChange={v => setSettings({ ...settings, ollama_keep_alive: v })} />
+                  </div>
                 </div>
               </div>
             </div>
@@ -920,18 +971,64 @@ export default function SettingsPage() {
           {/* 🎛️ TAB: VAD & AUDIO */}
           {activeTab === 'audio' && settings && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 950, margin: '0 auto' }}>
+
+              {/* VAD Pipeline Mode Controls */}
               <div style={{ borderRadius: 12, border: '1.5px solid hsl(330,75%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Volume2 size={16} style={{ color: 'hsl(330,75%,55%)' }} /> Voice Activity Detection (VAD) Pipeline Controls
+                </h3>
+                <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
+                  Enable or disable VAD independently for transcription, forced alignment, and adaptive energy filtering.
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle label="Master Voice Activity Detection (VAD)" checked={settings.enable_vad ?? true} onChange={v => setSettings({ ...settings, enable_vad: v })} />
+                  <SettingToggle label="Transcription VAD (Speech Region Post-Processing)" checked={settings.enable_transcription_vad ?? true} onChange={v => setSettings({ ...settings, enable_transcription_vad: v })} />
+                  <SettingToggle label="Alignment VAD (Region-Chunked WhisperX Alignment)" checked={settings.enable_alignment_vad ?? true} onChange={v => setSettings({ ...settings, enable_alignment_vad: v })} />
+                  <SettingToggle label="Adaptive Energy VAD (Quantile Thresholding)" checked={settings.enable_adaptive_vad ?? true} onChange={v => setSettings({ ...settings, enable_adaptive_vad: v })} />
+                </div>
+              </div>
+
+              {/* VAD Thresholds & Timing Fine-Tuning */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Volume2 size={16} style={{ color: 'hsl(330,75%,55%)' }} /> Voice Activity Detection &amp; Audio Processing
+                  <Sliders size={16} style={{ color: 'hsl(280,75%,60%)' }} /> VAD Thresholds &amp; Duration Parameters
                 </h3>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-                  <SettingToggle label="Master Voice Activity Detection (VAD)" checked={settings.enable_vad ?? true} onChange={v => setSettings({ ...settings, enable_vad: v })} />
+                  <SettingCard title="Adaptive VAD Speech Threshold" description="Probability quantile threshold to classify audio as speech (0.01–0.99)." value={settings.vad_speech_threshold ?? 0.15} min={0.01} max={0.99} step={0.01} onChange={v => setSettings({ ...settings, vad_speech_threshold: v })} />
+                  <SettingCard title="Adaptive VAD Silence Threshold" description="Probability threshold below which frames are classified as silence." value={settings.vad_silence_threshold ?? 0.10} min={0.01} max={0.99} step={0.01} onChange={v => setSettings({ ...settings, vad_silence_threshold: v })} />
+                  <SettingCard title="Min Speech Duration (ms)" description="Minimum speech segment duration in milliseconds (default 250ms)." value={settings.vad_min_speech_ms ?? 250} min={50} max={2000} step={50} onChange={v => setSettings({ ...settings, vad_min_speech_ms: Math.round(v) })} />
+                  <SettingCard title="Min Silence Duration (ms)" description="Minimum silence duration between speech bursts (default 400ms)." value={settings.vad_min_silence_ms ?? 400} min={50} max={3000} step={50} onChange={v => setSettings({ ...settings, vad_min_silence_ms: Math.round(v) })} />
+                </div>
+              </div>
+
+              {/* Speech Padding, Merging & Low-Volume Recovery */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Activity size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Segment Padding, Merging &amp; Quiet Region Recovery
+                </h3>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle label="Enable Speech Segment Padding" checked={settings.enable_speech_padding ?? true} onChange={v => setSettings({ ...settings, enable_speech_padding: v })} />
+                  <SettingCard title="Speech Padding (ms)" description="Padding added before &amp; after speech segment boundaries." value={settings.speech_pad_ms ?? 400} min={0} max={2000} step={50} onChange={v => setSettings({ ...settings, speech_pad_ms: Math.round(v) })} />
+                  <SettingToggle label="Enable Speech Segment Merging" checked={settings.enable_speech_segment_merging ?? true} onChange={v => setSettings({ ...settings, enable_speech_segment_merging: v })} />
+                  <SettingCard title="Max Merge Silence (ms)" description="Merges speech segments separated by less than this silence duration." value={settings.max_merge_silence_ms ?? 500} min={0} max={5000} step={50} onChange={v => setSettings({ ...settings, max_merge_silence_ms: Math.round(v) })} />
+                  <SettingToggle label="Low-Volume Recovery Pass" checked={settings.enable_low_volume_recovery ?? true} onChange={v => setSettings({ ...settings, enable_low_volume_recovery: v })} />
+                  <SettingCard title="Recovery Energy Threshold (dBFS)" description="Energy threshold to detect and re-process quiet speech regions." value={settings.recovery_energy_threshold ?? -45.0} min={-80.0} max={0.0} step={0.5} onChange={v => setSettings({ ...settings, recovery_energy_threshold: v })} />
+                </div>
+              </div>
+
+              {/* Normalization & Whisper Batching */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Zap size={16} style={{ color: 'hsl(140,70%,45%)' }} /> Audio Normalization &amp; Whisper Performance
+                </h3>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
                   <SettingToggle label="Audio Normalization" checked={settings.enable_audio_normalization ?? true} onChange={v => setSettings({ ...settings, enable_audio_normalization: v })} />
-                  <SettingCard title="Target Normalization dBFS" description="Target dBFS signal level for low-volume audio." value={settings.norm_target_dbfs ?? -3.0} min={-30.0} max={0.0} step={0.5} onChange={v => setSettings({ ...settings, norm_target_dbfs: v })} />
-                  <SettingCard title="Adaptive VAD Speech Threshold" description="Probability threshold to classify audio as speech." value={settings.vad_speech_threshold ?? 0.15} min={0.01} max={0.99} step={0.01} onChange={v => setSettings({ ...settings, vad_speech_threshold: v })} />
-                  <SettingCard title="Min Speech Duration (ms)" description="Minimum duration of speech in milliseconds." value={settings.vad_min_speech_ms ?? 250} min={50} max={2000} step={50} onChange={v => setSettings({ ...settings, vad_min_speech_ms: Math.round(v) })} />
-                  <SettingCard title="Speech Padding (ms)" description="Padding added to speech segment boundaries." value={settings.speech_pad_ms ?? 400} min={0} max={2000} step={50} onChange={v => setSettings({ ...settings, speech_pad_ms: Math.round(v) })} />
+                  <SettingCard title="Target Normalization dBFS" description="Target dBFS signal level for low-volume audio (default -3.0 dBFS)." value={settings.norm_target_dbfs ?? -3.0} min={-30.0} max={0.0} step={0.5} onChange={v => setSettings({ ...settings, norm_target_dbfs: v })} />
+                  <SettingCard title="Whisper Batch Size" description="Batch size for Whisper speech recognition (1–32). Higher values increase throughput but use more GPU VRAM." value={settings.whisper_batch_size ?? 8} min={1} max={32} step={1} onChange={v => setSettings({ ...settings, whisper_batch_size: Math.round(v) })} />
                 </div>
               </div>
 

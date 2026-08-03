@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, to_json, from_json
+from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from services.llm import generate_mom
 from config import settings
@@ -109,7 +109,7 @@ def _mom_row_to_dict(mom) -> dict:
 @router.get("/{recording_id}")
 async def get_mom(recording_id: str, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
             {"rid": recording_id, "uid": user_id},
@@ -140,7 +140,7 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
     user_id = current_user["id"]
 
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("""
                     SELECT transcript, raw_text, filename, created_at, duration,
@@ -189,7 +189,7 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
             try:
                 ctx = await _loop.run_in_executor(None, _build_ctx, filtered_transcript)
                 if ctx:
-                    async with get_db() as db:
+                    async with get_db_context() as db:
                         await db.execute(
                             text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
                                  "WHERE id = :id AND user_id = :uid"),
@@ -223,7 +223,7 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
         mom_id = str(uuid.uuid4())
         initial_version = [{"version": 1, "data": mom_data, "saved_at": dt_to_str(now)}]
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             # Check if MoM already exists (upsert pattern)
             r = await db.execute(
                 text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
@@ -324,7 +324,7 @@ async def generate_mom_endpoint(recording_id: str, current_user: dict = Depends(
 async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
             {"rid": recording_id, "uid": user_id},
@@ -403,7 +403,7 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
 @router.get("/{recording_id}/versions")
 async def get_mom_versions(recording_id: str, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT versions FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
             {"rid": recording_id, "uid": user_id},
@@ -435,7 +435,7 @@ async def export_mom_pdf(
 
     if is_empty:
         # Load MoM from database (which also verifies ownership)
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT * FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
                 {"rid": recording_id, "uid": user_id},
@@ -447,7 +447,7 @@ async def export_mom_pdf(
         mom = _mom_row_to_dict(mom_row)
     else:
         # Verify ownership / existence
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT id FROM minutes_of_meeting WHERE recording_id = :rid AND user_id = :uid"),
                 {"rid": recording_id, "uid": user_id},
@@ -610,7 +610,7 @@ async def download_mom_docx(
 ):
     """Download the main MoM as a Word (.docx) document."""
     user_id = current_user["id"]
-    async with get_db() as db_session:
+    async with get_db_context() as db_session:
         r_rec = await db_session.execute(
             text("SELECT filename, speaker_mappings FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},

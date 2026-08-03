@@ -180,18 +180,6 @@ def test_raw_diarization_id_propagation_to_trained_name():
                 ],
                 "participants": ["Speaker 1", "SPEAKER_03"]
             }
-        },
-        "raw_mom": {
-            "meeting": {
-                "agendas": [
-                    {
-                        "agenda_speaker": "SPEAKER_03",
-                        "discussion": [
-                            {"speaker": "SPEAKER_03", "point": "Point by SPEAKER_03", "action": {"owner": "SPEAKER_03"}}
-                        ]
-                    }
-                ]
-            }
         }
     }
 
@@ -232,14 +220,6 @@ def test_raw_diarization_id_propagation_to_trained_name():
     assert final_agenda["discussion_points"][0]["action_owner"] == "Rod Domowski"
     assert final_agenda["action_items"][0]["owner"] == "Rod Domowski"
     assert updated["rom_data"]["final_rom"]["participants"] == ["Rod Domowski"]
-
-    # 8. Raw MoM
-    raw_agenda = updated["raw_mom"]["meeting"]["agendas"][0]
-    assert raw_agenda["agenda_speaker"] == "Rod Domowski"
-    assert raw_agenda["discussion"][0]["speaker"] == "Rod Domowski"
-    assert raw_agenda["discussion"][0]["action"]["owner"] == "Rod Domowski"
-
-
 def test_single_speaker_rename_no_cross_contamination():
     """
     Ensures that mapping 'Speaker 3' -> 'gam' ONLY renames Speaker 3 / SPEAKER_03,

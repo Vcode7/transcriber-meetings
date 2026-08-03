@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bot, Sparkles, FileText, ListChecks, ChevronRight, ChevronLeft,
   Copy, Check, Loader, Users, ClipboardList, Zap, CheckCircle,
-  Trash2, Upload, Brain, ChevronDown, ChevronUp, AlertTriangle, FlaskConical
+  Trash2, Upload, Brain, ChevronDown, ChevronUp, AlertTriangle
 } from 'lucide-react'
 import api from '../api/client'
 import { renderMarkdown } from '../lib/markdown'
@@ -1139,7 +1139,7 @@ export default function AIChatPanel({
                     No MoM Available
                   </p>
                   <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '.78rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, maxWidth: '260px', margin: '0 auto' }}>
-                    Generate Minutes of Meeting now or open the Raw MoM Lab interface.
+                    Generate Minutes of Meeting now.
                   </p>
                 </div>
                 {localMomError && (
@@ -1164,23 +1164,6 @@ export default function AIChatPanel({
                   >
                     {isGeneratingLocalMom ? <Loader size={14} className="spin" /> : <Sparkles size={14} />}
                     {isGeneratingLocalMom ? 'Generating...' : 'Generate MoM'}
-                  </button>
-
-                  <button
-                    id="panel-btn-open-raw-mom-lab"
-                    onClick={() => navigate(`/dashboard/history/${recordingId}/raw-mom`)}
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-                      padding: '.55rem 1rem',
-                      background: 'hsl(var(--paper))',
-                      color: 'hsl(var(--ink))',
-                      border: '1.5px solid hsl(var(--border))', borderRadius: '8px',
-                      fontSize: '.8rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <FlaskConical size={14} style={{ color: 'hsl(280,75%,65%)' }} />
-                    Open Raw MoM Lab
                   </button>
                 </div>
               </div>

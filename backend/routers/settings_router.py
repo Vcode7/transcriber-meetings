@@ -4,12 +4,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
-from database import get_db, dt_to_str
+from database import get_db, get_db_context, dt_to_str
 from routers.auth import get_current_user
 from pydantic import BaseModel
-
-from database import get_db, dt_to_str
-from routers.auth import get_current_user
 from models.settings import UserSettingsUpdate
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -37,7 +34,7 @@ class TestOllamaRequest(BaseModel):
 @router.get("")
 async def get_settings(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM user_settings WHERE user_id = :uid"),
             {"uid": user_id},
@@ -75,9 +72,6 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "ollama_num_gpu": -1,
         "max_tokens_mom": 1500,
         "max_tokens_mom_merge": 3072,
-        "max_tokens_raw_mom_to_mom": 3000,
-        "max_tokens_raw_mom_extraction": 1024,
-        "max_tokens_raw_mom_repair": 1024,
         "max_tokens_agenda_compress": 2000,
         "max_tokens_reference_compress": 2000,
         "max_tokens_agenda_from_summary": 1024,
@@ -116,6 +110,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "enable_audio_validation": True,
         "min_audio_duration_seconds": 2.0,
         "min_audio_rms_threshold": 0.003,
+        "whisper_batch_size": 8,
+        "rom_parallel_window_processing": 2,
     }
 
     if not doc:
@@ -212,7 +208,7 @@ async def update_settings(
 
     params = {**patch, "user_id": user_id, "updated_at": dt_to_str(now)}
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         # Try update first
         r = await db.execute(
             text(f"UPDATE user_settings SET {set_clause} WHERE user_id = :user_id"),
@@ -228,7 +224,7 @@ async def update_settings(
                         rag_retrieval_k_transcript, rag_max_collection_context, rag_relative_score_cutoff, generate_mom_auto, embedding_model,
                         ollama_num_ctx, ollama_dynamic_ctx, ollama_temperature, ollama_top_p, ollama_top_k, ollama_repeat_penalty,
                         ollama_seed, ollama_stop, ollama_keep_alive, ollama_num_thread, ollama_num_gpu,
-                        max_tokens_mom, max_tokens_mom_merge, max_tokens_raw_mom_to_mom, max_tokens_raw_mom_extraction, max_tokens_raw_mom_repair,
+                        max_tokens_mom, max_tokens_mom_merge,
                         max_tokens_agenda_compress, max_tokens_reference_compress, max_tokens_agenda_from_summary,
                         max_tokens_executive_summary, max_tokens_short_summary, max_tokens_detailed_summary, max_tokens_chunk_summary,
                         max_tokens_key_points, max_tokens_action_items, max_tokens_key_decisions,
@@ -240,7 +236,7 @@ async def update_settings(
                         :rag_retrieval_k_transcript, :rag_max_collection_context, :rag_relative_score_cutoff, :generate_mom_auto, :embedding_model,
                         :ollama_num_ctx, :ollama_dynamic_ctx, :ollama_temperature, :ollama_top_p, :ollama_top_k, :ollama_repeat_penalty,
                         :ollama_seed, :ollama_stop, :ollama_keep_alive, :ollama_num_thread, :ollama_num_gpu,
-                        :max_tokens_mom, :max_tokens_mom_merge, :max_tokens_raw_mom_to_mom, :max_tokens_raw_mom_extraction, :max_tokens_raw_mom_repair,
+                        :max_tokens_mom, :max_tokens_mom_merge,
                         :max_tokens_agenda_compress, :max_tokens_reference_compress, :max_tokens_agenda_from_summary,
                         :max_tokens_executive_summary, :max_tokens_short_summary, :max_tokens_detailed_summary, :max_tokens_chunk_summary,
                         :max_tokens_key_points, :max_tokens_action_items, :max_tokens_key_decisions,
@@ -280,9 +276,6 @@ async def update_settings(
                     "ollama_num_gpu": patch.get("ollama_num_gpu", -1),
                     "max_tokens_mom": patch.get("max_tokens_mom", 1500),
                     "max_tokens_mom_merge": patch.get("max_tokens_mom_merge", 3072),
-                    "max_tokens_raw_mom_to_mom": patch.get("max_tokens_raw_mom_to_mom", 3000),
-                    "max_tokens_raw_mom_extraction": patch.get("max_tokens_raw_mom_extraction", 1024),
-                    "max_tokens_raw_mom_repair": patch.get("max_tokens_raw_mom_repair", 1024),
                     "max_tokens_agenda_compress": patch.get("max_tokens_agenda_compress", 2000),
                     "max_tokens_reference_compress": patch.get("max_tokens_reference_compress", 2000),
                     "max_tokens_agenda_from_summary": patch.get("max_tokens_agenda_from_summary", 1024),
@@ -327,7 +320,7 @@ async def test_ollama_connection(
     url_to_test = body.server_url
     if not url_to_test:
         user_id = current_user["id"]
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT ollama_server_url FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},

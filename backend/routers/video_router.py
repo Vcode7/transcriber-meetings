@@ -22,7 +22,7 @@ from typing import Optional, List
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, to_json, from_json
+from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file, get_user_dir
 from utils.audio_utils import validate_audio, convert_to_wav, get_duration
@@ -83,7 +83,7 @@ async def _create_video_recording(
     now = datetime.now(timezone.utc)
     pv_json = to_json(participant_voice_ids or [])
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (
@@ -153,7 +153,7 @@ async def _run_ocr_task(recording_id: str, video_path: str, duration: float):
         )
 
         # Persist to DB
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("UPDATE recordings SET video_transcript = :vt WHERE id = :id"),
                 {"vt": to_json(merged), "id": recording_id},
@@ -262,7 +262,7 @@ async def _run_synchronized_video_pipeline(
                 lambda: merge_ocr_results(raw_ocr, video_duration=duration),
             )
 
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("UPDATE recordings SET video_transcript = :vt WHERE id = :id"),
                     {"vt": to_json(merged), "id": recording_id},
@@ -424,7 +424,7 @@ async def get_video_job_status(
     """
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -473,7 +473,7 @@ async def get_ocr_status(
     """Return the current OCR processing status for a video recording."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, video_transcript FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -502,7 +502,7 @@ async def get_video_transcript(
     """Return the merged video OCR transcript for a recording."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, source_type, video_transcript FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -539,7 +539,7 @@ async def rerun_video_ocr(
     """
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, source_type, file_path, duration FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},

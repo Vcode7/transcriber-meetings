@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import text
 
-from database import get_db, to_json, from_json
+from database import get_db, get_db_context, to_json, from_json
 from routers.auth import get_current_user
 from utils.storage import delete_file
 from services.llm import (
@@ -37,7 +37,7 @@ async def rename_recording(
         raise HTTPException(status_code=422, detail="Name too long (max 200 chars).")
 
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("UPDATE recordings SET filename = :name WHERE id = :id AND user_id = :uid"),
             {"name": name, "id": recording_id, "uid": user_id},
@@ -52,7 +52,7 @@ async def rename_recording(
 @router.get("")
 async def list_history(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("""
                 SELECT id, filename, duration, status, speakers_detected, summary, created_at, processed_at
@@ -83,7 +83,7 @@ async def list_history(current_user: dict = Depends(get_current_user)):
 @router.get("/{recording_id}")
 async def get_recording(recording_id: str, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -126,7 +126,7 @@ async def get_recording(recording_id: str, current_user: dict = Depends(get_curr
 @router.delete("/{recording_id}")
 async def delete_recording(recording_id: str, current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT file_path FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -157,7 +157,7 @@ async def delete_recording(recording_id: str, current_user: dict = Depends(get_c
 async def stream_audio(recording_id: str, current_user: dict = Depends(get_current_user)):
     """Return file path for audio playback (frontend fetches with auth)."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT file_path FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -218,7 +218,7 @@ async def regenerate_insights(
     user_id = current_user["id"]
 
     # Fetch the recording (include context_summary for caching)
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, transcript, raw_text, status, context_summary, context_summary_hash "
                  "FROM recordings WHERE id = :id AND user_id = :uid"),
@@ -263,7 +263,7 @@ async def regenerate_insights(
         try:
             context = await _loop.run_in_executor(None, build_context_summary, transcript)
             if context:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
                              "WHERE id = :id AND user_id = :uid"),
@@ -300,7 +300,7 @@ async def regenerate_insights(
         QwenProvider.unload_model()
 
     # Save back to DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 UPDATE recordings SET
@@ -365,7 +365,7 @@ async def generate_insights_selective(
         raise HTTPException(status_code=400, detail="No valid tasks specified.")
 
     # Fetch recording (include context_summary for caching)
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, transcript, raw_text, status, context_summary, context_summary_hash "
                  "FROM recordings WHERE id = :id AND user_id = :uid"),
@@ -410,7 +410,7 @@ async def generate_insights_selective(
         try:
             context = await _loop_ctx.run_in_executor(None, build_context_summary, transcript)
             if context:
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text("UPDATE recordings SET context_summary = :ctx, context_summary_hash = :h "
                              "WHERE id = :id AND user_id = :uid"),
@@ -471,7 +471,7 @@ async def generate_insights_selective(
         params["action_items"] = to_json(results["action_items"])
 
     if set_clauses:
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(f"UPDATE recordings SET {', '.join(set_clauses)} WHERE id = :id AND user_id = :uid"),
                 params,
@@ -496,7 +496,7 @@ async def update_transcript(
 ):
     """Update a single segment in the transcript and reconstruct the words array with 1.0 probability."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT transcript FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -570,7 +570,7 @@ async def reidentify_speakers(
     user_id = current_user["id"]
 
     # ── Fetch recording ───────────────────────────────────────────────────────
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT id, status, file_path, transcript "
@@ -615,7 +615,7 @@ async def reidentify_speakers(
         )
 
     # ── Mark as processing immediately so the frontend can poll ───────────────
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text(
                 "UPDATE recordings SET status='processing', progress='diarizing' "
@@ -663,7 +663,7 @@ async def rerun_recording_pipeline(
     user_id = current_user["id"]
 
     # 1. Fetch recording details
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("""
                 SELECT id, filename, file_path, duration, meeting_prompt,
@@ -690,7 +690,7 @@ async def rerun_recording_pipeline(
     await cancel_task(recording_id)
 
     # 3. Reset outputs in DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 UPDATE recordings SET

@@ -20,7 +20,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, str_to_dt
+from database import get_db, get_db_context, dt_to_str, str_to_dt
 from models.user import UserCreate, UserLogin
 from config import settings
 
@@ -130,7 +130,7 @@ async def _check_rate_limit(email: str, ip: str) -> None:
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=settings.RATE_LIMIT_LOGIN_WINDOW_SECONDS)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         # Check account lockout on user row
         row = await db.execute(
             text("SELECT locked_until FROM users WHERE email = :email"),
@@ -165,7 +165,7 @@ async def _check_rate_limit(email: str, ip: str) -> None:
 async def _record_attempt(email: str, ip: str, success: bool) -> None:
     """Record a login attempt and apply lockout on max failures."""
     now = datetime.now(timezone.utc)
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO login_attempts (email, ip_address, success, created_at)
@@ -219,7 +219,7 @@ async def _create_session(user_id: str, raw_refresh: str, request: Request) -> d
         "last_used": dt_to_str(now),
         "is_revoked": 0,
     }
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO sessions (id, session_id, user_id, refresh_token_hash, device_name,
@@ -256,7 +256,7 @@ async def get_current_user(
         raise credentials_exception
 
     now = datetime.now(timezone.utc)
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM sessions WHERE session_id = :sid"),
             {"sid": session_id},
@@ -314,7 +314,7 @@ async def _issue_tokens_and_respond(
 # ── Register ─────────────────────────────────────────────────
 @router.post("/register", status_code=201)
 async def register(body: UserCreate, request: Request, response: Response):
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id FROM users WHERE email = :email"),
             {"email": body.email.lower()},
@@ -329,7 +329,7 @@ async def register(body: UserCreate, request: Request, response: Response):
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO users (id, name, email, hashed_password, needs_setup, own_profile_id,
@@ -370,7 +370,7 @@ async def login(body: UserLogin, request: Request, response: Response):
     ip = _get_client_ip(request)
     await _check_rate_limit(body.email, ip)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM users WHERE email = :email"),
             {"email": body.email.lower()},
@@ -404,7 +404,7 @@ async def refresh(request: Request, response: Response):
     token_hash = hash_token(raw_refresh)
     now = datetime.now(timezone.utc)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM sessions WHERE refresh_token_hash = :hash"),
             {"hash": token_hash},
@@ -462,7 +462,7 @@ async def logout(request: Request, response: Response):
     raw_refresh = request.cookies.get(REFRESH_COOKIE)
     if raw_refresh:
         token_hash = hash_token(raw_refresh)
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("UPDATE sessions SET is_revoked = 1 WHERE refresh_token_hash = :hash"),
                 {"hash": token_hash},
@@ -491,7 +491,7 @@ async def list_sessions(
     raw_refresh = request.cookies.get(REFRESH_COOKIE)
     current_hash = hash_token(raw_refresh) if raw_refresh else None
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("""
                 SELECT * FROM sessions
@@ -526,7 +526,7 @@ async def revoke_session(
     current_user: dict = Depends(get_current_user),
 ):
     """Revoke a specific session by session_id (must belong to current user)."""
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM sessions WHERE session_id = :sid AND user_id = :uid"),
             {"sid": session_id, "uid": current_user["id"]},
@@ -552,7 +552,7 @@ async def revoke_session(
 # ── OAuth2 form token (Swagger UI only) ─────────────────────
 @router.post("/token", include_in_schema=False)
 async def token_form(form: OAuth2PasswordRequestForm = Depends(), request: Request = None, response: Response = None):
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM users WHERE email = :email"),
             {"email": form.username.lower()},

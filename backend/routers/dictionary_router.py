@@ -14,7 +14,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
-from database import get_db
+from database import get_db, get_db_context
 from routers.auth import get_current_user
 from models.dictionary import (
     ShortcutCreate, ShortcutUpdate, VocabCreate, VocabBulkCreate
@@ -34,7 +34,7 @@ router = APIRouter(prefix="/dictionary", tags=["dictionary"])
 async def list_shortcuts(current_user: dict = Depends(get_current_user)):
     """List all shortcut dictionary entries for the current user."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         items = await ds.list_shortcuts(db, user_id)
     return items
 
@@ -46,7 +46,7 @@ async def create_shortcut(
 ):
     """Create a new shortcut entry."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         item = await ds.create_shortcut(db, user_id, body.shortcut, body.full_form)
     return item
 
@@ -59,7 +59,7 @@ async def update_shortcut(
 ):
     """Update an existing shortcut entry."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         item = await ds.update_shortcut(
             db, shortcut_id, user_id,
             shortcut=body.shortcut,
@@ -77,7 +77,7 @@ async def delete_shortcut(
 ):
     """Delete a shortcut entry."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         deleted = await ds.delete_shortcut(db, shortcut_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Shortcut not found.")
@@ -87,7 +87,7 @@ async def delete_shortcut(
 async def export_shortcuts(current_user: dict = Depends(get_current_user)):
     """Export all shortcuts as a CSV file."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         items = await ds.list_shortcuts(db, user_id)
 
     output = io.StringIO()
@@ -123,7 +123,7 @@ async def import_shortcuts(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"CSV parse error: {e}")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         count = await ds.bulk_create_shortcuts(db, user_id, entries)
 
     return {"imported": count, "total_in_file": len(entries)}
@@ -137,7 +137,7 @@ async def import_shortcuts(
 async def list_vocabulary(current_user: dict = Depends(get_current_user)):
     """List all technical vocabulary words for the current user."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         items = await ds.list_vocabulary(db, user_id)
     return items
 
@@ -149,7 +149,7 @@ async def create_vocab(
 ):
     """Add a single technical vocabulary word."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         item = await ds.create_vocab_word(db, user_id, body.word)
     if not item:
         raise HTTPException(status_code=409, detail="Word already exists in vocabulary.")
@@ -163,7 +163,7 @@ async def delete_vocab(
 ):
     """Delete a technical vocabulary word."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         deleted = await ds.delete_vocab_word(db, vocab_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Word not found.")
@@ -176,7 +176,7 @@ async def bulk_create_vocab(
 ):
     """Bulk add vocabulary words after user review."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         count = await ds.bulk_create_vocabulary(db, user_id, body.words)
     return {"saved": count, "total": len(body.words)}
 
@@ -241,7 +241,7 @@ async def expand_transcript(
     user_id = current_user["id"]
     segments = body.get("segments", [])
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         shortcuts = await ds.list_shortcuts(db, user_id)
 
     expanded = expand_transcript_segments(segments, shortcuts)

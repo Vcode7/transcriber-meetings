@@ -26,7 +26,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import text
 
-from database import get_db, dt_to_str
+from database import get_db, get_db_context, dt_to_str
 from routers.auth import get_current_user
 from config import settings
 
@@ -122,7 +122,7 @@ async def upload_global_context(
         file_hash = _compute_hash(data)
 
         # Skip exact duplicate (same user, same hash)
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text(
                     "SELECT id FROM global_context_documents "
@@ -153,7 +153,7 @@ async def upload_global_context(
         doc_id = str(uuid.uuid4())
         now = dt_to_str(datetime.now(timezone.utc))
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(
                     "INSERT INTO global_context_documents "
@@ -188,7 +188,7 @@ async def upload_global_context(
             logger.error(f"[GlobalCtx] Embedding failed for '{rel_path}': {e}")
 
         # Update embedded status
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(
                     "UPDATE global_context_documents "
@@ -245,7 +245,7 @@ async def list_global_context(
 ):
     """List all global context documents for the current user."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT * FROM global_context_documents "
@@ -267,7 +267,7 @@ async def delete_global_context_doc(
     """Delete a global context document and remove its vectors from FAISS."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT * FROM global_context_documents "
@@ -326,7 +326,7 @@ async def reindex_global_context(
     """
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT id, filename, relative_path, file_path FROM global_context_documents "
@@ -365,7 +365,7 @@ async def reindex_global_context(
                 lambda d_id=doc_id, f_p=file_path, f_n=filename, r_p=rel_path: _embed_doc(d_id, f_p, f_n, user_id, relative_path=r_p),
             )
             now = dt_to_str(datetime.now(timezone.utc))
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text(
                         "UPDATE global_context_documents "
@@ -412,7 +412,7 @@ async def global_context_status(
     """Return embedding model info and document/chunk stats."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT COUNT(*) as total, "

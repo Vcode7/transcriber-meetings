@@ -8,7 +8,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Form
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, to_json
+from database import get_db, get_db_context, dt_to_str, to_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file
 from utils.audio_utils import validate_audio, convert_to_wav, get_duration
@@ -64,7 +64,7 @@ async def _create_recording_and_run(
 
     logger.info(f"[Audio] Creating recording {recording_id} for user {user_id}, file={file_path}, duration={duration:.1f}s")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (
@@ -130,7 +130,7 @@ async def _create_recording_and_run_chunked(
 
     logger.info(f"[Audio] Creating chunked recording {recording_id} for user {user_id}, duration={duration:.1f}s")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (
@@ -378,14 +378,14 @@ async def submit_chunk(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Chunk conversion failed: {e}")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
         if not valid:
             delete_file(wav_path)
             raise HTTPException(status_code=422, detail=reason)
 
     # Create chunk row in DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recording_chunks (
@@ -467,7 +467,7 @@ async def finalize_recording(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
         if not valid:
             delete_file(wav_path)
@@ -483,7 +483,7 @@ async def finalize_recording(
     recording_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO recordings (
@@ -516,7 +516,7 @@ async def finalize_recording(
 
     # Link chunks to this recording_id
     if parsed_chunk_ids:
-        async with get_db() as db:
+        async with get_db_context() as db:
             for cid in parsed_chunk_ids:
                 await db.execute(
                     text("UPDATE recording_chunks SET recording_id = :rid WHERE id = :cid"),
@@ -561,7 +561,7 @@ async def get_job_status(
     """Poll the status of a recording job. Returns full result when done."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -628,7 +628,7 @@ async def cancel_job(
     user_id = current_user["id"]
     logger.info(f"[Audio] Cancel request received for recording={recording_id} from user={user_id}")
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id, status, file_path FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -646,7 +646,7 @@ async def cancel_job(
     task_cancelled = await cancel_task(recording_id)
 
     # Force update the status in the database to 'cancelled' (in case the task wasn't running or unregistered)
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("UPDATE recordings SET status = 'cancelled', progress = NULL, error_message = 'Cancelled by user' WHERE id = :id"),
             {"id": recording_id}
@@ -676,7 +676,7 @@ async def list_active_jobs(
     """
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("""
                 SELECT id, filename, status, progress, duration, created_at, meeting_prompt

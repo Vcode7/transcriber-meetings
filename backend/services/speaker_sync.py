@@ -284,12 +284,6 @@ def _apply_label_track(
             if isinstance(items, list):
                 updated[field] = replace_deep_speaker_names(items, combined)
 
-    # 7. raw_mom text fields
-    raw_mom_val = updated.get("raw_mom")
-    if raw_mom_val:
-        mom_d = from_json(raw_mom_val) if isinstance(raw_mom_val, str) else dict(raw_mom_val)
-        if isinstance(mom_d, dict):
-            updated["raw_mom"] = replace_deep_speaker_names(mom_d, combined)
 
     # 8. Persist canonical speaker_mappings (label → name only)
     if replace_all:
@@ -417,12 +411,6 @@ def _apply_raw_id_track(rec: Dict[str, Any], raw_id_map: Dict[str, str]) -> Dict
 
             updated["rom_data"] = rom
 
-    # raw_mom: LLM text may contain raw IDs
-    raw_mom_val = updated.get("raw_mom")
-    if raw_mom_val:
-        mom_d = from_json(raw_mom_val) if isinstance(raw_mom_val, str) else dict(raw_mom_val)
-        if isinstance(mom_d, dict):
-            updated["raw_mom"] = replace_deep_speaker_names(mom_d, raw_id_map)
 
     return updated
 
@@ -619,7 +607,6 @@ async def sync_global_speaker_rename(
                 speakers_detected = :speakers_detected,
                 speaker_summary = :speaker_summary,
                 rom_data = :rom_data,
-                raw_mom = :raw_mom,
                 summary = :summary,
                 short_summary = :short_summary,
                 detailed_summary = :detailed_summary,
@@ -633,7 +620,6 @@ async def sync_global_speaker_rename(
             "speakers_detected": to_json(updated_rec.get("speakers_detected", [])),
             "speaker_summary": to_json(updated_rec.get("speaker_summary")),
             "rom_data": to_json(updated_rec.get("rom_data", {})),
-            "raw_mom": to_json(updated_rec.get("raw_mom")),
             "summary": updated_rec.get("summary"),
             "short_summary": updated_rec.get("short_summary"),
             "detailed_summary": updated_rec.get("detailed_summary"),

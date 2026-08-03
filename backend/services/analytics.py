@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from database import get_db, dt_to_str
+from database import get_db, get_db_context, dt_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ async def record_pipeline_analytics(metrics: Dict[str, Any]) -> None:
             val = metrics.get(key, default)
             return str(val) if val is not None else default
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("""
                     INSERT INTO processing_analytics (
@@ -288,7 +288,7 @@ async def fetch_all_analytics() -> List[Dict[str, Any]]:
     Each record is returned as a structured dict with nested groups.
     """
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             result = await db.execute(
                 text("SELECT * FROM processing_analytics ORDER BY completed_at DESC LIMIT 1000")
             )
@@ -393,7 +393,7 @@ async def fetch_analytics_summary() -> Dict[str, Any]:
     Useful for a quick product health dashboard.
     """
     try:
-        async with get_db() as db:
+        async with get_db_context() as db:
             result = await db.execute(text("""
                 SELECT
                     COUNT(*) AS total_jobs,

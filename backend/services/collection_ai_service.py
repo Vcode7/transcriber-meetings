@@ -886,21 +886,23 @@ def ensure_meetings_are_embedded(meeting_ids: List[str], user_id: str) -> None:
             logger.info(f"[CollectionAI] FAISS transcript store not found for meeting {mid}. Auto-embedding transcript...")
             try:
                 conn = sqlite3.connect(db_path, timeout=10.0)
-                cursor = conn.cursor()
-                cursor.execute("SELECT transcript FROM recordings WHERE id = ?", (mid,))
-                row = cursor.fetchone()
-                
-                if row and row[0]:
-                    transcript_data = from_json(row[0], [])
-                    if transcript_data:
-                        # Call embed_transcript (this creates and saves the FAISS index)
-                        added = embed_transcript(mid, transcript_data, user_id)
-                        if added > 0:
-                            # Update transcript_embedded column synchronously
-                            cursor.execute("UPDATE recordings SET transcript_embedded = 1 WHERE id = ?", (mid,))
-                            conn.commit()
-                            logger.info(f"[CollectionAI] Successfully auto-embedded {added} chunks for meeting {mid} and updated DB.")
-                conn.close()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT transcript FROM recordings WHERE id = ?", (mid,))
+                    row = cursor.fetchone()
+                    
+                    if row and row[0]:
+                        transcript_data = from_json(row[0], [])
+                        if transcript_data:
+                            # Call embed_transcript (this creates and saves the FAISS index)
+                            added = embed_transcript(mid, transcript_data, user_id)
+                            if added > 0:
+                                # Update transcript_embedded column synchronously
+                                cursor.execute("UPDATE recordings SET transcript_embedded = 1 WHERE id = ?", (mid,))
+                                conn.commit()
+                                logger.info(f"[CollectionAI] Successfully auto-embedded {added} chunks for meeting {mid} and updated DB.")
+                finally:
+                    conn.close()
             except Exception as e:
                 logger.error(f"[CollectionAI] Failed to auto-embed meeting {mid}: {e}", exc_info=True)
 

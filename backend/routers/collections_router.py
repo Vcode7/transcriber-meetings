@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import text
 
-from database import get_db, from_json, dt_to_str
+from database import get_db, get_db_context, from_json, dt_to_str
 from routers.auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ async def create_collection(
     now = dt_to_str(datetime.now(timezone.utc))
     coll_id = str(uuid.uuid4())
 
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Check uniqueness
         existing = (
             await session.execute(
@@ -82,7 +82,7 @@ async def create_collection(
 @router.get("/")
 async def list_collections(user=Depends(get_current_user)):
     """List all collections for the current user with meeting counts."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         rows = (
             await session.execute(
                 text(
@@ -120,7 +120,7 @@ async def get_collection(
     user=Depends(get_current_user),
 ):
     """Get collection detail with its meetings."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Fetch collection
         coll = (
             await session.execute(
@@ -188,7 +188,7 @@ async def update_collection(
     user=Depends(get_current_user),
 ):
     """Update collection name and/or description."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Verify ownership
         coll = (
             await session.execute(
@@ -269,7 +269,7 @@ async def delete_collection(
     user=Depends(get_current_user),
 ):
     """Delete a collection. Only removes the collection and its links, never the meetings."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         coll = (
             await session.execute(
                 text("SELECT id FROM meeting_collections WHERE id = :cid AND user_id = :uid"),
@@ -303,7 +303,7 @@ async def add_meetings(
     if not body.meeting_ids:
         raise HTTPException(status_code=400, detail="No meeting IDs provided")
 
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Verify collection ownership
         coll = (
             await session.execute(
@@ -388,7 +388,7 @@ async def remove_meetings(
     if not body.meeting_ids:
         raise HTTPException(status_code=400, detail="No meeting IDs provided")
 
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Verify collection ownership
         coll = (
             await session.execute(
@@ -427,7 +427,7 @@ async def reorder_meetings(
     user=Depends(get_current_user),
 ):
     """Set the manual display order for meetings in a collection."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         # Verify collection ownership
         coll = (
             await session.execute(

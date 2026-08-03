@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, to_json, from_json
+from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file
 from utils.audio_utils import validate_audio, convert_to_wav
@@ -99,7 +99,7 @@ async def finalize_setup(
     now = datetime.now(timezone.utc)
     profile_id = str(uuid.uuid4())
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
@@ -138,7 +138,7 @@ async def skip_setup(current_user: dict = Depends(get_current_user)):
     Marks needs_setup = False in the database for the user.
     """
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("UPDATE users SET needs_setup = 0 WHERE id = :id"),
             {"id": user_id},
@@ -176,7 +176,7 @@ async def add_voice_profile(
     now = datetime.now(timezone.utc)
     profile_id = str(uuid.uuid4())
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         await db.execute(
             text("""
                 INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
@@ -302,7 +302,7 @@ async def bulk_folder_import_voices(
                 continue
 
             # Save or update profile in DB
-            async with get_db() as db:
+            async with get_db_context() as db:
                 r = await db.execute(
                     text("SELECT id, embeddings FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
                     {"uid": user_id, "label": speaker_label},
@@ -387,7 +387,7 @@ async def bulk_folder_import_voices(
 @router.get("/profiles")
 async def list_profiles(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT * FROM voice_profiles WHERE user_id = :uid ORDER BY created_at DESC LIMIT 50"),
             {"uid": user_id},
@@ -417,7 +417,7 @@ async def update_profile(
     user_id = current_user["id"]
     now = datetime.now(timezone.utc)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("UPDATE voice_profiles SET label = :label, updated_at = :updated_at WHERE id = :id AND user_id = :uid"),
             {"label": body.get("label", ""), "updated_at": dt_to_str(now), "id": profile_id, "uid": user_id},
@@ -437,7 +437,7 @@ async def delete_profile(
 ):
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         # Fetch profile label before deleting to scrub stale speaker_mappings
         p_res = await db.execute(
             text("SELECT label FROM voice_profiles WHERE id = :id AND user_id = :uid"),
@@ -494,7 +494,7 @@ async def check_label(
     Returns { exists: bool, profile_id?: str }
     """
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
             {"uid": user_id, "label": label.strip()},
@@ -539,7 +539,7 @@ async def extract_voice_samples(
         raise HTTPException(status_code=422, detail="recording_id and speaker_label are required.")
 
     # Load recording
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT file_path, transcript FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -670,7 +670,7 @@ async def train_from_transcript(
         raise HTTPException(status_code=422, detail="At least one sample_path is required.")
 
     # Check uniqueness of new_label (skip if it belongs to the profile being updated)
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
             {"uid": user_id, "label": new_label},
@@ -699,7 +699,7 @@ async def train_from_transcript(
 
     now = datetime.now(timezone.utc)
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         if existing_profile_id:
             # Update existing profile: merge embeddings, update label
             r = await db.execute(

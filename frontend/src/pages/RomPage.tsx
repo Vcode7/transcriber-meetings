@@ -4,7 +4,8 @@ import {
   ArrowLeft, Sparkles, Download, FileText, Clock, User,
   Loader, Pencil, Upload, Save, X, Play, Plus, Brain,
   Target, List, RefreshCw, FileDown, Layers, Video,
-  ChevronUp, ChevronDown, ArrowRightLeft, Tag, Trash2, Sliders
+  ChevronUp, ChevronDown, ArrowRightLeft, Tag, Trash2, Sliders,
+  RotateCcw, WandSparkles, FileUp
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -50,6 +51,32 @@ interface DiscussionPoint {
   video_transcript_context?: string
 }
 
+const formatItemText = (item: any): string => {
+  if (item === null || item === undefined) return ''
+  if (typeof item === 'string') return item.trim()
+  if (typeof item === 'number' || typeof item === 'boolean') return String(item)
+  if (typeof item === 'object') {
+    const task = item.task || item.description || item.item || item.text || item.action || item.decision || item.point
+    const owner = item.assignee || item.owner || item.assigner
+    const deadline = item.deadline || item.due || item.date
+    const cond = item.conditions || item.condition
+
+    const parts: string[] = []
+    if (task) parts.push(String(task).trim())
+    if (owner) parts.push(`(Owner: ${String(owner).trim()})`)
+    if (deadline) parts.push(`[Due: ${String(deadline).trim()}]`)
+    if (cond) parts.push(`(If: ${String(cond).trim()})`)
+
+    if (parts.length > 0) return parts.join(' ')
+    try {
+      return JSON.stringify(item)
+    } catch {
+      return String(item)
+    }
+  }
+  return String(item)
+}
+
 const cleanCalendarDates = (datesList: any): string[] => {
   if (!datesList) return []
   const list = Array.isArray(datesList) ? datesList : [datesList]
@@ -82,12 +109,12 @@ const cleanCalendarDates = (datesList: any): string[] => {
 const formatPrecisePointText = (pt: any): string => {
   const rawDecisions = pt.decisions || []
   const decList = (Array.isArray(rawDecisions) ? rawDecisions : [rawDecisions])
-    .map((d: any) => String(d || '').trim())
+    .map((d: any) => formatItemText(d))
     .filter((d: string) => d && !['none', 'n/a', 'null'].includes(d.toLowerCase()))
 
   const rawActions = pt.action_items || []
   const actList = (Array.isArray(rawActions) ? rawActions : [rawActions])
-    .map((a: any) => String(a || '').trim())
+    .map((a: any) => formatItemText(a))
     .filter((a: string) => a && !['none', 'n/a', 'null'].includes(a.toLowerCase()))
 
   const validDates = cleanCalendarDates(pt.dates)
@@ -97,7 +124,7 @@ const formatPrecisePointText = (pt: any): string => {
   if (actList.length) parts.push(...actList)
 
   if (!parts.length) {
-    const ptText = String(pt.text || pt.polished_text || pt.discussion_point || '').trim()
+    const ptText = formatItemText(pt.text || pt.polished_text || pt.discussion_point || '')
     if (ptText) parts.push(ptText)
   }
 
@@ -366,6 +393,20 @@ export default function RomPage() {
   const [savingRom, setSavingRom] = useState(false)
   const [romViewMode, setRomViewMode] = useState<'standard' | 'precise'>('standard')
 
+  // Rewrite ROM state
+  const DEFAULT_REWRITE_INSTRUCTION = 'Rewrite the ROM in a formal, professional writing style. Improve grammar, sentence structure, readability, and formatting only. Do not change, add, remove, or reinterpret any facts, discussion points, decisions, action items, speakers, or context. Preserve the exact meaning and structure while presenting it in polished formal language.'
+  const [originalFinalRom, setOriginalFinalRom] = useState<any>(null)
+  const [rewriteInstruction, setRewriteInstruction] = useState(DEFAULT_REWRITE_INSTRUCTION)
+  const [rewriteStatus, setRewriteStatus] = useState<'idle' | 'processing' | 'done' | 'error'>('idle')
+  const [isRewritten, setIsRewritten] = useState(false)
+  const [showRewritePanel, setShowRewritePanel] = useState(false)
+  // Rewrite mode controls
+  const [rewriteMode, setRewriteMode] = useState<'window' | 'complete' | 'reference'>('window')
+  const [rewriteWindowSize, setRewriteWindowSize] = useState(3)
+  const [writingRules, setWritingRules] = useState('')
+  const [extractingRules, setExtractingRules] = useState(false)
+  const referenceFileInputRef = useRef<HTMLInputElement>(null)
+
   // Save edited Stage 3 Agendas to backend
   const saveStage3Agendas = async (updatedAgendas: any[]) => {
     if (!id) return
@@ -629,6 +670,12 @@ export default function RomPage() {
         final_rom: res.data.final_rom
       }
       setRomData(fullData)
+      // Snapshot original on fresh generation (resets any prior rewrite)
+      if (fullData.final_rom) {
+        setOriginalFinalRom(JSON.parse(JSON.stringify(fullData.final_rom)))
+        setIsRewritten(false)
+        setRewriteStatus('idle')
+      }
       setStage3FinalStatus('done')
       setStage3Status('done')
       setActiveTab('final')
@@ -640,6 +687,7 @@ export default function RomPage() {
       return false
     }
   }
+
 
   // Delete an agenda item (points move to General Discussion)
   const handleDeleteAgenda = async (agendaId: string, agendaTitle: string) => {
@@ -842,7 +890,11 @@ export default function RomPage() {
           setSpeakerMappings(mappings)
         }
 
-        if (data.final_rom) setActiveTab('final')
+        if (data.final_rom) {
+          setActiveTab('final')
+          // Snapshot the original final_rom so Revert always works
+          setOriginalFinalRom(prev => prev ?? JSON.parse(JSON.stringify(data.final_rom)))
+        }
         else if (data.stage3) setActiveTab('stage3')
         else if (data.stage2) setActiveTab('stage2')
         else if (data.stage1) setActiveTab('stage1')
@@ -1023,6 +1075,75 @@ export default function RomPage() {
     } finally {
       setSavingRom(false)
     }
+  }
+
+  // Rewrite ROM using LLM (style-only, no content changes)
+  const runRewriteRom = async () => {
+    if (!id || !romData?.final_rom) return
+    setRewriteStatus('processing')
+    // Snapshot the original before rewriting (only once)
+    if (!originalFinalRom) {
+      setOriginalFinalRom(JSON.parse(JSON.stringify(romData.final_rom)))
+    }
+    try {
+      const res = await api.post(`/rom/${id}/final/rewrite`, {
+        rewrite_instruction: rewriteInstruction,
+        mode: rewriteMode,
+        window_size: rewriteWindowSize,
+        writing_rules: rewriteMode === 'reference' ? writingRules : '',
+      })
+      const rewrittenFinalRom = res.data.rewritten_final_rom
+      if (rewrittenFinalRom) {
+        setRomData(prev => ({ ...(prev as RomData), final_rom: rewrittenFinalRom }))
+        setIsRewritten(true)
+        setRewriteStatus('done')
+        toast.success('ROM rewritten successfully. Review the changes and Save if satisfied.')
+      } else {
+        throw new Error('No rewritten ROM returned from server')
+      }
+    } catch (e) {
+      setRewriteStatus('error')
+      toast.error(getApiErrorDetail(e) || 'Rewrite ROM failed')
+    }
+  }
+
+  // Upload reference doc and extract writing style rules
+  const handleReferenceDocUpload = async (files: FileList | null) => {
+    if (!files?.length || !id) return
+    const file = files[0]
+    setExtractingRules(true)
+    try {
+      // Step 1: Extract text from uploaded file
+      const formData = new FormData()
+      formData.append('file', file)
+      const extractRes = await api.post(`/raw-mom/${id}/extract-file-text`, formData)
+      const refText = extractRes.data.text || ''
+      if (!refText.trim()) {
+        toast.error('Could not extract text from the uploaded file')
+        return
+      }
+      // Step 2: Analyze writing style and get rules
+      const rulesRes = await api.post(`/rom/${id}/final/extract-writing-rules`, {
+        reference_text: refText,
+      })
+      const rules = rulesRes.data.writing_rules || ''
+      setWritingRules(rules)
+      toast.success(`Writing rules extracted from "${file.name}". Review and adjust before rewriting.`)
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to extract writing rules from reference document')
+    } finally {
+      setExtractingRules(false)
+      if (referenceFileInputRef.current) referenceFileInputRef.current.value = ''
+    }
+  }
+
+  // Revert to the original (pre-rewrite) final ROM
+  const revertToOriginal = () => {
+    if (!originalFinalRom) return
+    setRomData(prev => ({ ...(prev as RomData), final_rom: JSON.parse(JSON.stringify(originalFinalRom)) }))
+    setIsRewritten(false)
+    setRewriteStatus('idle')
+    toast.success('Reverted to original ROM')
   }
 
   if (loadingRec) {
@@ -1637,18 +1758,18 @@ export default function RomPage() {
                                           )}
                                         </div>
                                         <p style={{ fontSize: '.88rem', fontWeight: 500, color: 'hsl(var(--ink))', lineHeight: 1.5, margin: 0 }}>
-                                          {pt.discussion_point}
+                                          {formatItemText(pt.discussion_point)}
                                         </p>
                                         {((pt.decisions?.length || 0) > 0 || (pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0) && (
                                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                                             {pt.decisions?.map((d, idx) => (
-                                              <span key={`dec-${idx}`} style={{ background: 'hsl(140,70%,45%/.12)', color: 'hsl(140,70%,45%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Decision: {d}</span>
+                                              <span key={`dec-${idx}`} style={{ background: 'hsl(140,70%,45%/.12)', color: 'hsl(140,70%,45%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Decision: {formatItemText(d)}</span>
                                             ))}
                                             {pt.action_items?.map((a, idx) => (
-                                              <span key={`act-${idx}`} style={{ background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Action: {a}</span>
+                                              <span key={`act-${idx}`} style={{ background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Action: {formatItemText(a)}</span>
                                             ))}
                                             {pt.technical_terms?.map((t, idx) => (
-                                              <span key={`tech-${idx}`} style={{ background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,65%)', border: '1px solid hsl(280,70%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>{t}</span>
+                                              <span key={`tech-${idx}`} style={{ background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,65%)', border: '1px solid hsl(280,70%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>{formatItemText(t)}</span>
                                             ))}
                                           </div>
                                         )}
@@ -1744,7 +1865,7 @@ export default function RomPage() {
                       <div style={{ padding: '.75rem .9rem', background: 'hsl(var(--muted)/.3)', borderRadius: 8, border: '1px solid hsl(var(--border)/.3)', marginBottom: '.75rem' }}>
                         <div style={{ fontSize: '.67rem', fontWeight: 700, color: 'hsl(var(--pencil))', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.04em' }}>Enhanced Point</div>
                         <p style={{ fontSize: '.92rem', color: 'hsl(var(--ink))', lineHeight: 1.55, margin: 0 }}>
-                          {pt.polished_text}
+                          {formatItemText(pt.polished_text)}
                         </p>
                       </div>
 
@@ -2156,7 +2277,234 @@ export default function RomPage() {
                   </div>
                 </div>
 
+                {/* ── Rewrite ROM Panel ── */}
+                <div style={{ borderRadius: 9, border: `1.5px solid ${isRewritten ? 'hsl(38,90%,52%/.6)' : 'hsl(var(--border)/.4)'}`, background: isRewritten ? 'hsl(38,90%,52%/.04)' : 'hsl(var(--card))', overflow: 'hidden', transition: 'border-color .2s, background .2s' }}>
+
+                  {/* Panel toggle header */}
+                  <button
+                    onClick={() => setShowRewritePanel(prev => !prev)}
+                    style={{ width: '100%', background: isRewritten ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)', border: 'none', cursor: 'pointer', padding: '.6rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                      <WandSparkles size={13} style={{ color: 'hsl(38,90%,52%)' }} />
+                      Rewrite ROM
+                      {isRewritten && (
+                        <span style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 8, background: 'hsl(38,90%,52%/.18)', color: 'hsl(38,90%,40%)', border: '1px solid hsl(38,90%,52%/.4)', fontWeight: 700 }}>
+                          ✦ Rewritten
+                        </span>
+                      )}
+                      <span style={{ fontSize: '.63rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                        {rewriteMode === 'window' ? `Window ×${rewriteWindowSize}` : rewriteMode === 'complete' ? 'Complete' : 'Reference'}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>{showRewritePanel ? '▲' : '▼'}</span>
+                  </button>
+
+                  {showRewritePanel && (
+                    <div style={{ padding: '.9rem 1rem', display: 'flex', flexDirection: 'column', gap: '.9rem' }}>
+
+                      {/* Style-only info banner */}
+                      <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(205,90%,55%/.07)', border: '1px solid hsl(205,90%,55%/.2)' }}>
+                        <strong style={{ color: 'hsl(var(--ink))' }}>Style-only rewrite</strong> — improves grammar, phrasing, and formatting.
+                        Facts, speakers, decisions, dates, and action items are <strong style={{ color: 'hsl(var(--ink))' }}>never changed</strong>.
+                        The original ROM is preserved and can be instantly restored.
+                      </div>
+
+                      {/* Rewritten notice bar */}
+                      {isRewritten && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '.5rem .85rem', borderRadius: 7, background: 'hsl(38,90%,52%/.1)', border: '1px solid hsl(38,90%,52%/.35)' }}>
+                          <WandSparkles size={12} style={{ color: 'hsl(38,90%,42%)', flexShrink: 0 }} />
+                          <span style={{ fontSize: '.74rem', color: 'hsl(38,90%,35%)', fontWeight: 600, flex: 1 }}>
+                            Showing rewritten version. Save to persist, or revert.
+                          </span>
+                          <button
+                            onClick={revertToOriginal}
+                            style={{ padding: '.28rem .7rem', borderRadius: 6, background: 'hsl(var(--destructive)/.08)', color: 'hsl(var(--destructive))', border: '1px solid hsl(var(--destructive)/.3)', fontSize: '.71rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, fontFamily: 'Inter' }}
+                          >
+                            <RotateCcw size={10} /> Revert
+                          </button>
+                        </div>
+                      )}
+
+                      {/* ── Mode Selector ── */}
+                      <div>
+                        <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.45rem', textTransform: 'uppercase', letterSpacing: '.05em' }}>Rewrite Mode</div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          {([
+                            { id: 'window', label: 'Window Rewrite', desc: 'Batch points into windows' },
+                            { id: 'complete', label: 'Complete Rewrite', desc: 'Single call, best consistency' },
+                            { id: 'reference', label: 'Reference-Based', desc: 'Learn style from a sample doc' },
+                          ] as const).map(m => (
+                            <button
+                              key={m.id}
+                              onClick={() => setRewriteMode(m.id)}
+                              style={{
+                                flex: 1, padding: '.45rem .6rem', borderRadius: 7, cursor: 'pointer',
+                                border: rewriteMode === m.id ? '2px solid hsl(38,90%,52%)' : '1.5px solid hsl(var(--border)/.5)',
+                                background: rewriteMode === m.id ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)',
+                                transition: 'all .15s', textAlign: 'left' as const,
+                              }}
+                            >
+                              <div style={{ fontSize: '.73rem', fontWeight: 700, color: rewriteMode === m.id ? 'hsl(38,90%,42%)' : 'hsl(var(--ink))' }}>{m.label}</div>
+                              <div style={{ fontSize: '.63rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>{m.desc}</div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Window Size (window / reference modes) */}
+                      {(rewriteMode === 'window' || rewriteMode === 'reference') && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(var(--muted)/.2)', border: '1px solid hsl(var(--border)/.4)' }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Window Size</div>
+                            <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>Discussion points processed per LLM call (1–10)</div>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <button
+                              onClick={() => setRewriteWindowSize(v => Math.max(1, v - 1))}
+                              style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
+                            >−</button>
+                            <span style={{ fontFamily: 'JetBrains Mono', fontSize: '.9rem', fontWeight: 700, minWidth: 22, textAlign: 'center', color: 'hsl(38,90%,45%)' }}>{rewriteWindowSize}</span>
+                            <button
+                              onClick={() => setRewriteWindowSize(v => Math.min(10, v + 1))}
+                              style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
+                            >+</button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Reference Document Upload (reference mode only) */}
+                      {rewriteMode === 'reference' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '.65rem', padding: '.7rem .85rem', borderRadius: 8, border: '1.5px dashed hsl(280,75%,60%/.4)', background: 'hsl(280,75%,60%/.04)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div>
+                              <div style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <FileUp size={13} style={{ color: 'hsl(280,75%,60%)' }} /> Upload Reference Document
+                              </div>
+                              <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+                                Upload a sample MoM/ROM (.pdf, .docx, .txt) to learn its writing style
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => referenceFileInputRef.current?.click()}
+                              disabled={extractingRules}
+                              style={{ padding: '.32rem .8rem', borderRadius: 6, background: extractingRules ? 'hsl(var(--muted))' : 'hsl(280,75%,60%)', color: 'white', border: 'none', fontSize: '.72rem', fontWeight: 700, cursor: extractingRules ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontFamily: 'Inter' }}
+                            >
+                              {extractingRules ? <Loader size={11} className="spin" /> : <FileUp size={11} />}
+                              {extractingRules ? 'Analyzing...' : 'Upload & Analyze'}
+                            </button>
+                            <input
+                              ref={referenceFileInputRef}
+                              type="file"
+                              accept=".pdf,.docx,.txt,.doc"
+                              style={{ display: 'none' }}
+                              onChange={e => handleReferenceDocUpload(e.target.files)}
+                            />
+                          </div>
+
+                          {/* Writing Rules textarea */}
+                          <div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.3rem' }}>
+                              <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                                Writing Rules {writingRules ? <span style={{ color: 'hsl(280,75%,60%)', fontWeight: 600 }}>— Editable</span> : <span style={{ color: 'hsl(var(--pencil))', fontWeight: 500 }}>— Upload a document to generate</span>}
+                              </div>
+                              {writingRules && (
+                                <button onClick={() => setWritingRules('')} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Clear</button>
+                              )}
+                            </div>
+                            <textarea
+                              value={writingRules}
+                              onChange={e => setWritingRules(e.target.value)}
+                              rows={8}
+                              placeholder="Writing rules will appear here after uploading a reference document. You can also type rules manually."
+                              style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: `1px solid ${writingRules ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border))'}`, background: 'hsl(var(--muted)/.25)', fontSize: '.76rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.55, boxSizing: 'border-box', transition: 'border-color .2s' }}
+                            />
+                            {writingRules && (
+                              <div style={{ fontSize: '.65rem', color: 'hsl(280,75%,55%)', marginTop: 3 }}>
+                                ✓ {writingRules.split('\n').filter(l => l.trim()).length} rule{writingRules.split('\n').filter(l => l.trim()).length !== 1 ? 's' : ''} — will be injected into every rewrite call
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Instruction textarea */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.3rem' }}>
+                          <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Rewrite Instruction</div>
+                          {rewriteInstruction !== DEFAULT_REWRITE_INSTRUCTION && (
+                            <button onClick={() => setRewriteInstruction(DEFAULT_REWRITE_INSTRUCTION)} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Reset to default</button>
+                          )}
+                        </div>
+                        <textarea
+                          value={rewriteInstruction}
+                          onChange={e => setRewriteInstruction(e.target.value)}
+                          rows={4}
+                          style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.3)', fontSize: '.78rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.5, boxSizing: 'border-box' }}
+                        />
+                      </div>
+
+                      {/* Validation warning for reference mode */}
+                      {rewriteMode === 'reference' && !writingRules.trim() && (
+                        <div style={{ fontSize: '.72rem', color: 'hsl(38,90%,42%)', padding: '.4rem .75rem', borderRadius: 6, background: 'hsl(38,90%,52%/.08)', border: '1px solid hsl(38,90%,52%/.3)' }}>
+                          ⚠ Upload a reference document or enter writing rules manually before running reference-based rewrite.
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <button
+                          onClick={runRewriteRom}
+                          disabled={
+                            rewriteStatus === 'processing' ||
+                            !rewriteInstruction.trim() ||
+                            (rewriteMode === 'reference' && !writingRules.trim())
+                          }
+                          style={{
+                            padding: '.42rem 1.1rem', borderRadius: 7,
+                            background: (
+                              rewriteStatus === 'processing' ||
+                              !rewriteInstruction.trim() ||
+                              (rewriteMode === 'reference' && !writingRules.trim())
+                            ) ? 'hsl(var(--muted))' : 'linear-gradient(135deg, hsl(38,90%,52%), hsl(25,90%,55%))',
+                            color: 'white', fontWeight: 700, fontSize: '.78rem',
+                            border: 'none',
+                            cursor: (
+                              rewriteStatus === 'processing' ||
+                              !rewriteInstruction.trim() ||
+                              (rewriteMode === 'reference' && !writingRules.trim())
+                            ) ? 'not-allowed' : 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'Inter',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.12)', transition: 'all .15s'
+                          }}
+                        >
+                          {rewriteStatus === 'processing' ? <Loader size={12} className="spin" /> : <WandSparkles size={12} />}
+                          {rewriteStatus === 'processing' ? 'Rewriting ROM...' : (isRewritten ? 'Re-Rewrite ROM' : 'Rewrite ROM')}
+                        </button>
+
+                        {isRewritten && (
+                          <button
+                            onClick={revertToOriginal}
+                            style={{ padding: '.42rem .95rem', borderRadius: 7, background: 'transparent', color: 'hsl(var(--destructive))', border: '1.5px solid hsl(var(--destructive)/.4)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter' }}
+                          >
+                            <RotateCcw size={12} /> Revert to Original
+                          </button>
+                        )}
+
+                        <div style={{ marginLeft: 'auto', fontSize: '.68rem', color: 'hsl(var(--pencil))', lineHeight: 1.3, textAlign: 'right' as const }}>
+                          {rewriteMode === 'window' && <span>~{Math.ceil((romData?.final_rom?.agendas?.reduce((s: number, a: any) => s + (a.discussion_points?.length || 0), 0) || 0) / rewriteWindowSize)} LLM calls</span>}
+                          {rewriteMode === 'complete' && <span>1 LLM call</span>}
+                          {rewriteMode === 'reference' && <span>~{Math.ceil((romData?.final_rom?.agendas?.reduce((s: number, a: any) => s + (a.discussion_points?.length || 0), 0) || 0) / rewriteWindowSize)} LLM calls + rules</span>}
+                        </div>
+                      </div>
+
+                    </div>
+                  )}
+                </div>
+
+
                 {/* Speaker Name Mapping Panel */}
+
                 <div style={{ borderRadius: 9, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
                   <button
                     onClick={() => setShowSpeakerMapping(prev => !prev)}

@@ -57,22 +57,24 @@ def _get_rag_settings(user_id: Optional[str] = None):
     if db_path:
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
-            cursor = conn.cursor()
-            if user_id:
-                cursor.execute(
-                    "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
-                    "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
-                    "FROM user_settings WHERE user_id = ? LIMIT 1",
-                    (user_id,)
-                )
-            else:
-                cursor.execute(
-                    "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
-                    "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
-                    "FROM user_settings ORDER BY id DESC LIMIT 1"
-                )
-            row = cursor.fetchone()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                if user_id:
+                    cursor.execute(
+                        "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
+                        "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
+                        "FROM user_settings WHERE user_id = ? LIMIT 1",
+                        (user_id,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
+                        "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
+                        "FROM user_settings ORDER BY id DESC LIMIT 1"
+                    )
+                row = cursor.fetchone()
+            finally:
+                conn.close()
             if row:
                 if row[0] is not None: chunk_size = int(row[0])
                 if row[1] is not None: overlap = int(row[1])
@@ -203,8 +205,8 @@ def embed_global_context_doc(
     # Term expansion preprocessing before embedding
     async def _fetch_shortcuts():
         from services.dictionary_service import list_shortcuts
-        from database import get_db
-        async with get_db() as db:
+        from database import get_db_context
+        async with get_db_context() as db:
             return await list_shortcuts(db, user_id)
     import asyncio
     try:
@@ -291,9 +293,9 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
 
     # Sync helper to fetch attachments via async DB
     async def _fetch_attachments():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text(
                     "SELECT filename, file_path, file_hash FROM recording_attachments "
@@ -343,8 +345,8 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         # Term expansion preprocessing before embedding
         async def _fetch_shortcuts():
             from services.dictionary_service import list_shortcuts
-            from database import get_db
-            async with get_db() as db:
+            from database import get_db_context
+            async with get_db_context() as db:
                 return await list_shortcuts(db, user_id)
         import asyncio
         try:
@@ -434,8 +436,8 @@ def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) ->
     # Term expansion preprocessing before embedding
     async def _fetch_shortcuts():
         from services.dictionary_service import list_shortcuts
-        from database import get_db
-        async with get_db() as db:
+        from database import get_db_context
+        async with get_db_context() as db:
             return await list_shortcuts(db, user_id)
     import asyncio
     try:
@@ -1228,166 +1230,6 @@ def retrieve_evidence_chunkwise(
 
 # ── 6. Full Raw MoM Generation ────────────────────────────────────────────────
 
-def generate_raw_mom(
-    recording_id: str,
-    user_id: str,
-    transcript: List[Dict],
-    agenda_text: Optional[str],
-    force_reembed_transcript: bool = False,
-    force_reembed_meeting: bool = False,
-) -> Dict:
-    """
-    Full Raw MoM generation pipeline for one meeting.
-
-    Steps:
-    1. Parse agenda → [{topic, speaker}]
-    2. Embed transcript (if not already done)
-    3. Embed meeting context attachments (if not already done)
-    4. For each agenda item:
-       a. Retrieve evidence from all FAISS stores
-       b. LLM extraction → structured JSON for this agenda
-    5. Assemble final raw_mom JSON
-
-    Parameters
-    ----------
-    recording_id           : The recording to process.
-    user_id                : Owner user ID.
-    transcript             : Transcript segment list.
-    agenda_text            : Raw text of the agenda document (may be None).
-    force_reembed_transcript : Re-embed even if transcript_embedded=1.
-    force_reembed_meeting    : Re-embed even if meeting_context_embedded=1.
-
-    Returns
-    -------
-    {
-        "meeting": {
-            "agendas": [
-                {
-                    "agenda_topic": str,
-                    "agenda_speaker": str|None,
-                    "discussion": [...]
-                },
-                ...
-            ]
-        }
-    }
-    """
-    from services.ai_provider import get_provider
-    import gc, torch
-
-    logger.info(f"[RAG] Starting Raw MoM generation for recording {recording_id}")
-
-    try:
-        # ── Step 1: Get/create agenda items ────────────────────────────────────────
-        agenda_items = get_or_create_agenda_items(
-            recording_id=recording_id,
-            user_id=user_id,
-            transcript=transcript,
-            agenda_text=agenda_text,
-        )
-
-        logger.info(f"[RAG] Processing {len(agenda_items)} agenda items")
-
-        # ── Step 2: Embed transcript (if needed) ───────────────────────────────────
-        if transcript and (force_reembed_transcript or not _transcript_embedded(recording_id)):
-            logger.info(f"[RAG] Embedding transcript for {recording_id}")
-            try:
-                count = embed_transcript(recording_id, transcript, user_id)
-                if count > 0:
-                    _mark_transcript_embedded(recording_id, user_id)
-            except Exception as e:
-                logger.error(f"[RAG] Transcript embedding failed: {e}", exc_info=True)
-
-        # ── Step 3: Embed meeting context (if needed) ─────────────────────────────
-        if force_reembed_meeting or not _meeting_context_embedded(recording_id):
-            logger.info(f"[RAG] Embedding meeting context for {recording_id}")
-            try:
-                count = embed_meeting_context(recording_id, user_id)
-                if count > 0:
-                    _mark_meeting_context_embedded(recording_id, user_id)
-            except Exception as e:
-                logger.error(f"[RAG] Meeting context embedding failed: {e}", exc_info=True)
-
-        # ── Step 4: Per-agenda retrieval + extraction ──────────────────────────────
-        processed_agendas = []
-
-        for idx, agenda_item in enumerate(agenda_items):
-            topic = agenda_item.get("topic", "")
-            speaker = agenda_item.get("speaker")
-
-            if not topic:
-                continue
-
-            logger.info(f"[RAG] Agenda {idx+1}/{len(agenda_items)}: {topic[:60]}")
-
-            # Retrieve evidence
-            try:
-                evidence = retrieve_evidence_for_agenda(
-                    agenda_topic=topic,
-                    recording_id=recording_id,
-                    user_id=user_id,
-                )
-            except Exception as e:
-                logger.error(f"[RAG] Evidence retrieval failed for '{topic}': {e}")
-                evidence = ""
-
-            # LLM extraction for this agenda item
-            provider = get_provider()
-            try:
-                agenda_result = provider.extract_raw_mom_for_agenda(
-                    agenda_topic=topic,
-                    agenda_speaker=speaker,
-                    evidence=evidence,
-                )
-                processed_agendas.append(agenda_result)
-                logger.info(
-                    f"[RAG] Agenda '{topic[:40]}' extracted: "
-                    f"{len(agenda_result.get('discussion', []))} discussion entries"
-                )
-            except Exception as e:
-                logger.error(f"[RAG] Extraction failed for '{topic}': {e}")
-                processed_agendas.append({
-                    "agenda_topic": topic,
-                    "agenda_speaker": speaker,
-                    "discussion": [],
-                })
-            finally:
-                # We no longer unload the LLM after each agenda item to avoid
-                # slow load/unload cycles. The model will be kept in memory
-                # and unloaded exactly once at the end of the pipeline.
-                gc.collect()
-                try:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
-
-        raw_mom = {
-            "meeting": {
-                "agendas": processed_agendas,
-            }
-        }
-        logger.info(
-            f"[RAG] Raw MoM extraction finished for recording={recording_id} "
-            f"({len(processed_agendas)} agendas)"
-        )
-        return raw_mom
-
-    finally:
-        # ── Step 5: Unload all models to release GPU memory ──────────────
-        try:
-            from services.ai_provider import QwenProvider
-            QwenProvider.unload_model()
-        except Exception as e:
-            logger.warning(f"[RAG] Failed to unload LLM: {e}")
-
-        try:
-            from services.text_embedding_service import unload_text_embedder
-            unload_text_embedder()
-        except Exception as e:
-            logger.warning(f"[RAG] Failed to unload text embedder: {e}")
-
-        logger.info(f"[RAG] GPU cleanup finished for recording={recording_id}")
 
 
 # ── DB flag helpers (async-to-sync wrappers) ──────────────────────────────────
@@ -1400,9 +1242,9 @@ def _transcript_embedded(recording_id: str) -> bool:
     """
     import asyncio
     async def _check():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT transcript_embedded FROM recordings WHERE id = :id"),
                 {"id": recording_id},
@@ -1423,9 +1265,9 @@ def _meeting_context_embedded(recording_id: str) -> bool:
     """
     import asyncio
     async def _check():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT meeting_context_embedded FROM recordings WHERE id = :id"),
                 {"id": recording_id},
@@ -1442,9 +1284,9 @@ def _mark_transcript_embedded(recording_id: str, user_id: str) -> None:
     """Mark transcript as embedded in DB (sync wrapper)."""
     import asyncio
     async def _mark():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("UPDATE recordings SET transcript_embedded = 1 WHERE id = :id AND user_id = :uid"),
                 {"id": recording_id, "uid": user_id},
@@ -1460,9 +1302,9 @@ def _mark_meeting_context_embedded(recording_id: str, user_id: str) -> None:
     """Mark meeting context as embedded in DB (sync wrapper)."""
     import asyncio
     async def _mark():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("UPDATE recordings SET meeting_context_embedded = 1 WHERE id = :id AND user_id = :uid"),
                 {"id": recording_id, "uid": user_id},
@@ -1479,9 +1321,9 @@ def _load_parsed_agenda(recording_id: str) -> Optional[List[Dict]]:
     import asyncio
     import json
     async def _load():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT parsed_agenda_json FROM recordings WHERE id = :id"),
                 {"id": recording_id},
@@ -1511,9 +1353,9 @@ def _save_parsed_agenda(recording_id: str, user_id: str, agenda_items: List[Dict
     import asyncio
     import json
     async def _save():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text("UPDATE recordings SET parsed_agenda_json = :json WHERE id = :id AND user_id = :uid"),
                 {"json": json.dumps(agenda_items, ensure_ascii=False), "id": recording_id, "uid": user_id},
@@ -1534,9 +1376,9 @@ def _load_context_summary(recording_id: str) -> Optional[str]:
     """Load cached context_summary from the DB (sync wrapper)."""
     import asyncio
     async def _load():
-        from database import get_db
+        from database import get_db_context
         from sqlalchemy import text
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text("SELECT context_summary FROM recordings WHERE id = :id"),
                 {"id": recording_id},

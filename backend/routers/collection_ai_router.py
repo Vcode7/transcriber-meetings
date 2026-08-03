@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, from_json
+from database import get_db, get_db_context, dt_to_str, from_json
 from routers.auth import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class ExportRequest(BaseModel):
 
 async def _verify_collection_ownership(collection_id: str, user_id: str) -> dict:
     """Verify the collection exists and belongs to the user. Returns collection row."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         coll = (
             await session.execute(
                 text("SELECT id, name FROM meeting_collections WHERE id = :cid AND user_id = :uid"),
@@ -63,7 +63,7 @@ async def _verify_collection_ownership(collection_id: str, user_id: str) -> dict
 
 async def _get_collection_meetings(collection_id: str) -> List[dict]:
     """Fetch all meetings in a collection with their metadata."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         rows = (
             await session.execute(
                 text(
@@ -95,7 +95,7 @@ async def _get_collection_meetings(collection_id: str) -> List[dict]:
 
 async def _get_chat_history(collection_id: str, user_id: str, limit: int = 20) -> List[dict]:
     """Fetch recent chat messages for a collection."""
-    async with get_db() as session:
+    async with get_db_context() as session:
         rows = (
             await session.execute(
                 text(
@@ -134,7 +134,7 @@ async def _save_message(
     msg_id = str(uuid.uuid4())
     now = dt_to_str(datetime.now(timezone.utc))
 
-    async with get_db() as session:
+    async with get_db_context() as session:
         await session.execute(
             text(
                 "INSERT INTO collection_chat_messages "
@@ -155,7 +155,7 @@ async def _save_message(
         await session.commit()
 
     # Prune old messages (keep max 200 per collection per user)
-    async with get_db() as session:
+    async with get_db_context() as session:
         await session.execute(
             text(
                 "DELETE FROM collection_chat_messages WHERE id IN ("
@@ -594,7 +594,7 @@ async def clear_chat_history(
     user_id = user["id"]
     await _verify_collection_ownership(collection_id, user_id)
 
-    async with get_db() as session:
+    async with get_db_context() as session:
         result = await session.execute(
             text(
                 "DELETE FROM collection_chat_messages "

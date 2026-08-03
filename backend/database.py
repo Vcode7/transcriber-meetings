@@ -7,8 +7,9 @@ IDs are UUID strings throughout.
 """
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
@@ -516,6 +517,8 @@ async def connect_db():
             ("rom_meeting_top_k", "INTEGER NOT NULL DEFAULT 5"),
             ("rom_global_top_k", "INTEGER NOT NULL DEFAULT 3"),
             ("rom_windows_per_batch", "INTEGER NOT NULL DEFAULT 5"),
+            ("rom_parallel_window_processing", "INTEGER NOT NULL DEFAULT 2"),
+            ("whisper_batch_size", "INTEGER NOT NULL DEFAULT 8"),
             ("max_tokens_rom_discussion", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_polish", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_enhance_window", "INTEGER NOT NULL DEFAULT 4096"),
@@ -647,9 +650,31 @@ async def close_db():
         logger.info("[DB] SQLite connection closed.")
 
 
-def get_db():
-    """Return a new AsyncSession as an async context manager."""
-    return AsyncSessionLocal()
+@asynccontextmanager
+async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Async context manager yielding an AsyncSession.
+    Guarantees session rollback on error and proper session closure on exit.
+    Usage: `async with get_db_context() as db:`
+    """
+    session = AsyncSessionLocal()
+    try:
+        yield session
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    FastAPI dependency yielding an AsyncSession.
+    FastAPI automatically handles entering and exiting this async generator per request,
+    guaranteeing connection checkin even on error or early return.
+    """
+    async with get_db_context() as session:
+        yield session
 
 
 # ── JSON helpers ──────────────────────────────────────────────────────────────

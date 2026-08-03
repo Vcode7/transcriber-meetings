@@ -39,9 +39,6 @@ class UserSettings(BaseModel):
     # Individual task max token limits
     max_tokens_mom: int = Field(default=1500, ge=1)
     max_tokens_mom_merge: int = Field(default=3072, ge=1)
-    max_tokens_raw_mom_to_mom: int = Field(default=3000, ge=1)
-    max_tokens_raw_mom_extraction: int = Field(default=1024, ge=1)
-    max_tokens_raw_mom_repair: int = Field(default=1024, ge=1)
     max_tokens_agenda_compress: int = Field(default=2000, ge=1)
     max_tokens_reference_compress: int = Field(default=2000, ge=1)
     max_tokens_agenda_from_summary: int = Field(default=1024, ge=1)
@@ -60,11 +57,15 @@ class UserSettings(BaseModel):
     max_tokens_collection_topic_growth: int = Field(default=1500, ge=1)
     max_tokens_vocab_extractor: int = Field(default=512, ge=1)
 
+    # Whisper & Parallel Pipeline Settings
+    whisper_batch_size: int = Field(default=8, ge=1, le=32)
+
     # ROM Pipeline Settings
     rom_transcript_window: float = Field(default=2.0, ge=0.5, le=10.0)
     rom_meeting_top_k: int = Field(default=5, ge=1, le=50)
     rom_global_top_k: int = Field(default=3, ge=1, le=50)
     rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
+    rom_parallel_window_processing: int = Field(default=2, ge=1, le=5)
 
     max_tokens_rom_discussion: int = Field(default=2048, ge=1)
     max_tokens_rom_polish: int = Field(default=4096, ge=1)
@@ -144,9 +145,6 @@ class UserSettingsUpdate(BaseModel):
     # Individual task max token limits
     max_tokens_mom: int | None = Field(default=None, ge=1)
     max_tokens_mom_merge: int | None = Field(default=None, ge=1)
-    max_tokens_raw_mom_to_mom: int | None = Field(default=None, ge=1)
-    max_tokens_raw_mom_extraction: int | None = Field(default=None, ge=1)
-    max_tokens_raw_mom_repair: int | None = Field(default=None, ge=1)
     max_tokens_agenda_compress: int | None = Field(default=None, ge=1)
     max_tokens_reference_compress: int | None = Field(default=None, ge=1)
     max_tokens_agenda_from_summary: int | None = Field(default=None, ge=1)
@@ -165,11 +163,15 @@ class UserSettingsUpdate(BaseModel):
     max_tokens_collection_topic_growth: int | None = Field(default=None, ge=1)
     max_tokens_vocab_extractor: int | None = Field(default=None, ge=1)
 
+    # Whisper & Parallel Pipeline Settings
+    whisper_batch_size: int | None = Field(default=None, ge=1, le=32)
+
     # ROM Pipeline Settings
     rom_transcript_window: float | None = Field(default=None, ge=0.5, le=10.0)
     rom_meeting_top_k: int | None = Field(default=None, ge=1, le=50)
     rom_global_top_k: int | None = Field(default=None, ge=1, le=50)
     rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
+    rom_parallel_window_processing: int | None = Field(default=None, ge=1, le=5)
 
     max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
     max_tokens_rom_polish: int | None = Field(default=None, ge=1)

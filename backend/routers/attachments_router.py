@@ -18,7 +18,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, from_json
+from database import get_db, get_db_context, dt_to_str, from_json
 from routers.auth import get_current_user
 from config import settings
 
@@ -71,7 +71,7 @@ async def upload_attachments(
         raise HTTPException(status_code=400, detail="type must be 'agenda' or 'context'")
 
     # Verify recording belongs to user
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text("SELECT id FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -104,7 +104,7 @@ async def upload_attachments(
         file_hash = _compute_hash(data)
 
         # Skip duplicate (same hash already stored for this recording+type)
-        async with get_db() as db:
+        async with get_db_context() as db:
             r = await db.execute(
                 text(
                     "SELECT id FROM recording_attachments "
@@ -126,7 +126,7 @@ async def upload_attachments(
         attachment_id = str(uuid.uuid4())
         now = dt_to_str(datetime.now(timezone.utc))
 
-        async with get_db() as db:
+        async with get_db_context() as db:
             await db.execute(
                 text(
                     "INSERT INTO recording_attachments "
@@ -161,7 +161,7 @@ async def list_attachments(
 ):
     """List all uploaded agenda/context files for a recording."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT * FROM recording_attachments "
@@ -185,7 +185,7 @@ async def delete_attachment(
     """Delete an uploaded file and clear the related summary if no files remain."""
     user_id = current_user["id"]
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT * FROM recording_attachments "
@@ -218,7 +218,7 @@ async def delete_attachment(
     summary_col = "agenda_summary" if att_type == "agenda" else "reference_summary"
     hash_col = "agenda_summary_hash" if att_type == "agenda" else "reference_summary_hash"
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT COUNT(*) as cnt FROM recording_attachments "
@@ -280,7 +280,7 @@ async def process_attachments(
         raise HTTPException(status_code=400, detail="type must be 'agenda' or 'context'")
 
     # Get all files of this type
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT filename, file_path, file_hash FROM recording_attachments "
@@ -306,7 +306,7 @@ async def process_attachments(
     summary_col = "agenda_summary" if type == "agenda" else "reference_summary"
     hash_col = "agenda_summary_hash" if type == "agenda" else "reference_summary_hash"
 
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(f"SELECT {summary_col}, {hash_col} FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
@@ -384,7 +384,7 @@ async def process_attachments(
             unload_text_embedder()
 
     # Store summary/index confirmation in DB
-    async with get_db() as db:
+    async with get_db_context() as db:
         if type == "agenda":
             await db.execute(
                 text(
@@ -416,7 +416,7 @@ async def get_summaries(
 ):
     """Return the current agenda_summary and reference_summary for a recording."""
     user_id = current_user["id"]
-    async with get_db() as db:
+    async with get_db_context() as db:
         r = await db.execute(
             text(
                 "SELECT agenda_summary, reference_summary FROM recordings "

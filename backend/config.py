@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     WHISPER_MODEL_SIZE: str = "large-v3"
     WHISPER_DEVICE: str = "auto"  # "cuda", "cpu", "auto"
     WHISPER_COMPUTE_TYPE: str = "int8"
+    WHISPER_BATCH_SIZE: int = 8
+
+    # ROM Parallel Window Processing
+    ROM_PARALLEL_WINDOW_PROCESSING: int = 2
 
     # Word confidence thresholds
     WORD_CONF_LOW: float = 0.7

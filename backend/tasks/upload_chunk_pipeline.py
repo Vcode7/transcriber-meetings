@@ -31,7 +31,7 @@ from typing import List, Optional
 
 from sqlalchemy import text
 
-from database import get_db, dt_to_str, to_json
+from database import get_db, get_db_context, dt_to_str, to_json
 from utils.audio_utils import split_wav_to_files
 from tasks.chunk_pipeline import run_chunk_pipeline
 from tasks.pipeline import run_finalize_pipeline
@@ -71,7 +71,7 @@ async def run_upload_chunk_pipeline(
     except asyncio.CancelledError:
         logger.info(f"[UploadChunkPipeline] {recording_id} — Task was CANCELLED.")
         try:
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("UPDATE recordings SET status='cancelled', progress=NULL, error_message='Cancelled by user' WHERE id=:rid"),
                     {"rid": recording_id}
@@ -136,7 +136,7 @@ async def _run_upload_chunk_pipeline_impl(
                 f"[UploadChunkPipeline] {recording_id} — WAV split failed: {e}",
                 exc_info=True,
             )
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text(
                         "UPDATE recordings SET status='error', error_message=:msg "
@@ -160,7 +160,7 @@ async def _run_upload_chunk_pipeline_impl(
             chunk_id = str(uuid.uuid4())
             chunk_ids.append(chunk_id)
 
-            async with get_db() as db:
+            async with get_db_context() as db:
                 await db.execute(
                     text("""
                         INSERT INTO recording_chunks (
@@ -219,7 +219,7 @@ async def _run_upload_chunk_pipeline_impl(
                     exc_info=True,
                 )
                 # Mark chunk as error so finalize pipeline skips it gracefully.
-                async with get_db() as db:
+                async with get_db_context() as db:
                     await db.execute(
                         text(
                             "UPDATE recording_chunks SET status='error' WHERE id=:cid"
