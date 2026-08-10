@@ -196,6 +196,10 @@ class Settings(BaseSettings):
         else:
             self.QWEN_EMBEDDING_MODEL_NAME = self.EMBEDDING_MODEL
 
+    @property
+    def RUNTIME_DIR(self) -> Path:
+        return RUNTIME_DIR
+
     model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
 
 

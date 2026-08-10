@@ -61,6 +61,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "embedding_model": "Qwen3-Embedding-0.6B",
         "ollama_num_ctx": 32768,
         "ollama_dynamic_ctx": True,
+        "ollama_think": False,
         "ollama_temperature": 0.0,
         "ollama_top_p": 0.9,
         "ollama_top_k": 40,
@@ -112,6 +113,19 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "min_audio_rms_threshold": 0.003,
         "whisper_batch_size": 8,
         "rom_parallel_window_processing": 2,
+        "rom_separate_action_extraction": False,
+        "max_tokens_rom_discussion": 4096,
+        "max_tokens_rom_discussion_no_actions": 4096,
+        "max_tokens_rom_action_extraction": 2048,
+        "max_tokens_stage1_json_repair": 4548,
+        "max_tokens_mom_action_regen": 4048,
+        "max_tokens_rom_polish": 4096,
+        "max_tokens_rom_enhance_window": 4096,
+        "max_tokens_rom_deduplicate": 2048,
+        "max_tokens_rom_agenda": 2048,
+        "max_tokens_rom_mom_expansion": 3000,
+        "max_tokens_rom_agenda_assign_batch": 4096,
+        "max_tokens_rom_agenda_doc_points": 1024,
     }
 
     if not doc:
@@ -134,6 +148,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["enable_speech_segment_merging"] = bool(res["enable_speech_segment_merging"])
     res["enable_low_volume_recovery"] = bool(res["enable_low_volume_recovery"])
     res["enable_audio_validation"] = bool(res["enable_audio_validation"])
+    res["rom_separate_action_extraction"] = bool(res.get("rom_separate_action_extraction", 0))
 
     if res.get("embedding_model"):
         from config import settings
@@ -167,6 +182,8 @@ async def update_settings(
         patch["generate_mom_auto"] = 1 if patch["generate_mom_auto"] else 0
     if "ollama_dynamic_ctx" in patch:
         patch["ollama_dynamic_ctx"] = 1 if patch["ollama_dynamic_ctx"] else 0
+    if "ollama_think" in patch:
+        patch["ollama_think"] = 1 if patch["ollama_think"] else 0
     if "enable_vad" in patch:
         patch["enable_vad"] = 1 if patch["enable_vad"] else 0
     if "enable_transcription_vad" in patch:
@@ -185,6 +202,8 @@ async def update_settings(
         patch["enable_low_volume_recovery"] = 1 if patch["enable_low_volume_recovery"] else 0
     if "enable_audio_validation" in patch:
         patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
+    if "rom_separate_action_extraction" in patch:
+        patch["rom_separate_action_extraction"] = 1 if patch["rom_separate_action_extraction"] else 0
 
 
     # Sync embedding model setting with runtime config & unload existing text embedder if changed
@@ -222,7 +241,7 @@ async def update_settings(
                         word_conf_mid, min_segment_duration, use_ollama, ollama_server_url, ollama_port, ollama_model_priority,
                         rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, rag_retrieval_k_meeting,
                         rag_retrieval_k_transcript, rag_max_collection_context, rag_relative_score_cutoff, generate_mom_auto, embedding_model,
-                        ollama_num_ctx, ollama_dynamic_ctx, ollama_temperature, ollama_top_p, ollama_top_k, ollama_repeat_penalty,
+                        ollama_num_ctx, ollama_dynamic_ctx, ollama_think, ollama_temperature, ollama_top_p, ollama_top_k, ollama_repeat_penalty,
                         ollama_seed, ollama_stop, ollama_keep_alive, ollama_num_thread, ollama_num_gpu,
                         max_tokens_mom, max_tokens_mom_merge,
                         max_tokens_agenda_compress, max_tokens_reference_compress, max_tokens_agenda_from_summary,
@@ -234,7 +253,7 @@ async def update_settings(
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
                         :rag_retrieval_k_transcript, :rag_max_collection_context, :rag_relative_score_cutoff, :generate_mom_auto, :embedding_model,
-                        :ollama_num_ctx, :ollama_dynamic_ctx, :ollama_temperature, :ollama_top_p, :ollama_top_k, :ollama_repeat_penalty,
+                        :ollama_num_ctx, :ollama_dynamic_ctx, :ollama_think, :ollama_temperature, :ollama_top_p, :ollama_top_k, :ollama_repeat_penalty,
                         :ollama_seed, :ollama_stop, :ollama_keep_alive, :ollama_num_thread, :ollama_num_gpu,
                         :max_tokens_mom, :max_tokens_mom_merge,
                         :max_tokens_agenda_compress, :max_tokens_reference_compress, :max_tokens_agenda_from_summary,
@@ -265,6 +284,7 @@ async def update_settings(
                     "embedding_model": patch.get("embedding_model", "Qwen3-Embedding-0.6B"),
                     "ollama_num_ctx": patch.get("ollama_num_ctx", 32768),
                     "ollama_dynamic_ctx": patch.get("ollama_dynamic_ctx", 1),
+                    "ollama_think": patch.get("ollama_think", 0),
                     "ollama_temperature": patch.get("ollama_temperature", 0.0),
                     "ollama_top_p": patch.get("ollama_top_p", 0.9),
                     "ollama_top_k": patch.get("ollama_top_k", 40),

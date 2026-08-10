@@ -4,7 +4,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Sparkles, Loader, FileDown, Copy, CheckCircle,
   AlertTriangle, Clock, RotateCcw, Plus, X, History, User, Users,
-  FileText, Upload, ChevronDown, ChevronUp, Trash2, Brain, Zap, ChevronRight
+  FileText, Upload, ChevronDown, ChevronUp, Trash2, Brain, Zap, ChevronRight,
+  Wand2, Settings2, SlidersHorizontal, Save, RefreshCw, AlignLeft
 } from 'lucide-react'
 import api from '../api/client'
 import MomSection from '../components/MomSection'
@@ -48,6 +49,8 @@ interface AttachmentFile {
 type PageState = 'loading' | 'idle' | 'generating' | 'editing'
 type SaveState = 'saved' | 'saving' | 'unsaved'
 type ProcessState = 'idle' | 'processing' | 'done' | 'error'
+type RewriteTarget = 'discussion_points' | 'action_items' | 'introduction' | 'conclusion' | null
+type RewritePhase = 'upload' | 'analyzing' | 'rules' | 'rewriting' | 'done'
 
 // ── Normalize API response to safe MomData ─────────────────────
 // Convert a raw points_discussed entry (string or object) to a clean display string
@@ -58,7 +61,7 @@ function normalizePoint(pt: unknown): string {
     const topic = typeof obj.topic === 'string' ? obj.topic.trim() : ''
     const summary = typeof obj.summary === 'string' ? obj.summary.trim()
       : typeof obj.discussion_point === 'string' ? obj.discussion_point.trim()
-      : typeof obj.text === 'string' ? obj.text.trim() : ''
+        : typeof obj.text === 'string' ? obj.text.trim() : ''
     if (topic && summary && !summary.toLowerCase().startsWith(topic.toLowerCase())) {
       return `${topic}: ${summary}`
     }
@@ -86,16 +89,16 @@ function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null 
         : [],
     action_items: Array.isArray(raw.action_items)
       ? raw.action_items.map((a: unknown) => {
-          if (a && typeof a === 'object' && !Array.isArray(a)) {
-            const obj = a as Record<string, unknown>
-            return {
-              task: String(obj.task ?? obj.item ?? obj.description ?? ''),
-              owner: String(obj.owner ?? 'Unassigned'),
-              deadline: String(obj.deadline ?? 'ASAP'),
-            }
+        if (a && typeof a === 'object' && !Array.isArray(a)) {
+          const obj = a as Record<string, unknown>
+          return {
+            task: String(obj.task ?? obj.item ?? obj.description ?? ''),
+            owner: String(obj.owner ?? 'Unassigned'),
+            deadline: String(obj.deadline ?? 'ASAP'),
           }
-          return { task: String(a ?? ''), owner: 'Unassigned', deadline: 'ASAP' }
-        })
+        }
+        return { task: String(a ?? ''), owner: 'Unassigned', deadline: 'ASAP' }
+      })
       : [],
     conclusion: typeof raw.conclusion === 'string' ? raw.conclusion : '',
   }
@@ -117,14 +120,12 @@ function EditableList({
   placeholder = 'Add item...',
   ordered = false,
   minItems = 0,
-  maxItems,
 }: {
   items: string[]
   onChange: (items: string[]) => void
   placeholder?: string
   ordered?: boolean
   minItems?: number
-  maxItems?: number
 }) {
   const handleChange = (index: number, value: string) => {
     const newItems = [...items]
@@ -132,7 +133,6 @@ function EditableList({
     onChange(newItems)
   }
   const handleAdd = () => {
-    if (maxItems && items.length >= maxItems) return
     onChange([...items, ''])
   }
   const handleRemove = (index: number) => {
@@ -142,8 +142,7 @@ function EditableList({
   const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      if (!maxItems || items.length < maxItems)
-        onChange([...items.slice(0, index + 1), '', ...items.slice(index + 1)])
+      onChange([...items.slice(0, index + 1), '', ...items.slice(index + 1)])
     } else if (e.key === 'Backspace' && !items[index] && items.length > 1) {
       e.preventDefault()
       handleRemove(index)
@@ -179,17 +178,10 @@ function EditableList({
           </button>
         </div>
       ))}
-      {(!maxItems || items.length < maxItems) && (
-        <button onClick={handleAdd} className="btn btn-ghost"
-          style={{ fontSize: '0.8rem', padding: '0.3rem 0.7rem', gap: '5px', alignSelf: 'flex-start', marginTop: '4px' }}>
-          <Plus size={13} /> Add
-        </button>
-      )}
-      {maxItems && (
-        <p style={{ fontSize: '0.74rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginTop: '2px' }}>
-          {items.length}/{maxItems} points
-        </p>
-      )}
+      <button onClick={handleAdd} className="btn btn-ghost"
+        style={{ fontSize: '0.8rem', padding: '0.3rem 0.7rem', gap: '5px', alignSelf: 'flex-start', marginTop: '4px' }}>
+        <Plus size={13} /> Add
+      </button>
     </div>
   )
 }
@@ -266,7 +258,8 @@ export default function MomPage() {
   const [versions, setVersions] = useState<VersionEntry[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle')
-  const [pdfStatus, setPdfStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [docxStatus, setDocxStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [versionSaveStatus, setVersionSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [genStep, setGenStep] = useState(0)
 
@@ -285,6 +278,30 @@ export default function MomPage() {
   const agendaInputRef = useRef<HTMLInputElement>(null)
   const contextInputRef = useRef<HTMLInputElement>(null)
 
+  // ── Rewrite state ─────────────────────────────────────────────
+  const [rewriteTarget, setRewriteTarget] = useState<RewriteTarget>(null)
+  const [rewritePhase, setRewritePhase] = useState<RewritePhase>('upload')
+  const [rewriteRules, setRewriteRules] = useState('')
+  const [rewriteCustomPrompt, setRewriteCustomPrompt] = useState('')
+  const [rewriteWindowSize, setRewriteWindowSize] = useState(20)
+  const [rewriteFiles, setRewriteFiles] = useState<File[]>([])
+  const [rewriteProgress, setRewriteProgress] = useState({ current: 0, total: 0 })
+  const [rewriteError, setRewriteError] = useState<string | null>(null)
+  const rewriteFileInputRef = useRef<HTMLInputElement>(null)
+
+  // ── Regenerate Action Points state ────────────────────────────
+  const [regenActionStatus, setRegenActionStatus] = useState<'idle' | 'processing' | 'done' | 'error'>('idle')
+  const [regenWindowMinutes, setRegenWindowMinutes] = useState(10)
+  const [regenActionOpen, setRegenActionOpen] = useState(false)
+  const [regenActionError, setRegenActionError] = useState<string | null>(null)
+
+  // ── Summarize Long Points state ────────────────────────────
+  const [summarizeLongOpen, setSummarizeLongOpen] = useState(false)
+  const [summarizeThreshold, setSummarizeThreshold] = useState(70)
+  const [summarizeStatus, setSummarizeStatus] = useState<'idle' | 'processing' | 'done' | 'error'>('idle')
+  const [summarizeError, setSummarizeError] = useState<string | null>(null)
+  const [summarizeInfo, setSummarizeInfo] = useState<string | null>(null)
+
   const GENERATING_STEPS = [
     'Reading transcript...',
     'Extracting meeting topics...',
@@ -293,6 +310,70 @@ export default function MomPage() {
     'Writing conclusion...',
     'Finalizing MoM...',
   ]
+
+  // ── Regenerate Action Points handler ──────────────────────────
+  const handleRegenerateActionPoints = useCallback(async () => {
+    if (!id || regenActionStatus === 'processing') return
+    setRegenActionStatus('processing')
+    setRegenActionError(null)
+    try {
+      const res = await api.post(`/mom/${id}/regenerate-action-points`, {
+        window_minutes: regenWindowMinutes,
+      })
+      const newItems: ActionItem[] = (res.data.action_items || []).map((a: Record<string, string>) => ({
+        task: String(a.task ?? ''),
+        owner: String(a.owner ?? 'Unassigned'),
+        deadline: String(a.deadline ?? 'ASAP'),
+      }))
+      setMom(prev => prev ? { ...prev, action_items: newItems } : prev)
+      setSaveState('unsaved')
+      setRegenActionStatus('done')
+      setRegenActionOpen(false)
+    } catch (err) {
+      const detail = isAxiosError(err) ? (err.response?.data?.detail ?? err.message) : String(err)
+      setRegenActionError(detail)
+      setRegenActionStatus('error')
+    }
+  }, [id, regenWindowMinutes, regenActionStatus])
+
+  // ── Summarize Long Points handler ───────────────────────────
+  const handleSummarizeLongPoints = useCallback(async () => {
+    if (!id || summarizeStatus === 'processing') return
+    setSummarizeStatus('processing')
+    setSummarizeError(null)
+    setSummarizeInfo(null)
+
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+
+    try {
+      const res = await api.post(`/mom/${id}/summarize-long-points`, {
+        threshold: summarizeThreshold,
+      })
+      const updated = normalizeMom(res.data.mom)
+      if (updated) {
+        setMom(updated)
+        setSaveState('saved')
+      }
+      try {
+        const vRes = await api.get(`/mom/${id}/versions`)
+        setVersions(vRes.data.versions || [])
+      } catch { /* ignore */ }
+      setSummarizeStatus('done')
+      const condensedCount = res.data.condensed_count || 0
+      if (condensedCount > 0) {
+        setSummarizeInfo(`Condensed ${condensedCount} long point${condensedCount !== 1 ? 's' : ''} (> ${summarizeThreshold} words) as Version #${res.data.version_number}. Revert anytime from History.`)
+      } else {
+        setSummarizeInfo(`No points exceeded the ${summarizeThreshold}-word threshold. All points remain unchanged.`)
+      }
+    } catch (err) {
+      const detail = isAxiosError(err) ? (err.response?.data?.detail ?? err.message) : String(err)
+      setSummarizeError(detail)
+      setSummarizeStatus('error')
+    }
+  }, [id, summarizeThreshold, summarizeStatus])
 
   useEffect(() => {
     if (pageState !== 'generating') return
@@ -474,28 +555,185 @@ export default function MomPage() {
     }
   }
 
-  // ── Export PDF ──
-  const handlePdf = async () => {
+  // ── Rewrite handlers ──────────────────────────────────────────
+  const openRewrite = (target: NonNullable<RewriteTarget>) => {
+    setRewriteTarget(target)
+    setRewritePhase(target === 'introduction' || target === 'conclusion' ? 'rules' : 'upload')
+    setRewriteRules(target === 'discussion_points'
+      ? '1. Merge discussion points covering the same or highly similar topics into a single coherent point without losing any factual information, decisions, questions, or outcomes.'
+      : ''
+    )
+    setRewriteCustomPrompt('')
+    setRewriteWindowSize(20)
+    setRewriteFiles([])
+    setRewriteError(null)
+    setRewriteProgress({ current: 0, total: 0 })
+  }
+
+  const closeRewrite = () => {
+    setRewriteTarget(null)
+    setRewriteFiles([])
+    setRewriteError(null)
+  }
+
+  const handleAnalyzeStyle = async () => {
+    if (!id || rewriteFiles.length === 0 || !rewriteTarget) return
+    setRewritePhase('analyzing')
+    setRewriteError(null)
+    try {
+      const formData = new FormData()
+      formData.append('section', rewriteTarget)
+      rewriteFiles.forEach(f => formData.append('files', f))
+      const res = await api.post(`/mom/${id}/rewrite/analyze-style`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      const generated = res.data.rules || ''
+      // Prepend the default merge rule for discussion points
+      if (rewriteTarget === 'discussion_points') {
+        setRewriteRules(
+          '1. Merge discussion points covering the same or highly similar topics into a single coherent point without losing any factual information, decisions, questions, or outcomes.\n\n' +
+          generated
+        )
+      } else {
+        setRewriteRules(generated)
+      }
+      setRewritePhase('rules')
+    } catch (e) {
+      setRewriteError(getApiErrorDetail(e, 'Style analysis failed. Please try again.'))
+      setRewritePhase('upload')
+    }
+  }
+
+  const handleRewrite = async () => {
+    if (!id || !mom || !rewriteTarget) return
+    setRewritePhase('rewriting')
+    setRewriteError(null)
+
+    // Cancel any pending debounced auto-save timer to prevent it from overwriting the rewritten DB record!
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+      console.log('[MoM Rewrite FE Step 1/6] Cancelled pending auto-save timer prior to rewrite.')
+    }
+
+    let content: string[] | string
+    if (rewriteTarget === 'discussion_points') {
+      content = mom.points_discussed.map(pt => normalizePoint(pt))
+    } else if (rewriteTarget === 'action_items') {
+      content = mom.action_items as any
+    } else if (rewriteTarget === 'introduction') {
+      content = mom.introduction
+    } else {
+      content = mom.conclusion
+    }
+
+    const isList = rewriteTarget === 'discussion_points' || rewriteTarget === 'action_items'
+    const itemCount = Array.isArray(content) ? content.length : 1
+    const totalBatches = isList ? Math.ceil(itemCount / rewriteWindowSize) : 1
+    setRewriteProgress({ current: 0, total: totalBatches })
+
+    console.log('[MoM Rewrite FE Step 2/6] Sending rewrite request to backend:', {
+      recording_id: id,
+      section: rewriteTarget,
+      window_size: rewriteWindowSize,
+      item_count: itemCount,
+      rules_preview: rewriteRules.slice(0, 100),
+    })
+
+    try {
+      const progressInterval = setInterval(() => {
+        setRewriteProgress(prev => ({
+          ...prev,
+          current: Math.min(prev.current + 1, Math.max(1, totalBatches - 1)),
+        }))
+      }, 2000)
+
+      const res = await api.post(`/mom/${id}/rewrite/section`, {
+        section: rewriteTarget,
+        content,
+        rules: rewriteRules,
+        custom_prompt: rewriteCustomPrompt,
+        window_size: rewriteWindowSize,
+      })
+
+      clearInterval(progressInterval)
+      setRewriteProgress({ current: totalBatches, total: totalBatches })
+
+      console.log('[MoM Rewrite FE Step 3/6] API Response received:', res.data)
+
+      const updated = normalizeMom(res.data.mom)
+      if (updated) {
+        // Cancel any auto-save timer again
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current)
+          saveTimer.current = null
+        }
+        momRef.current = updated
+        setMom(updated)
+        setSaveState('saved')
+
+        console.log('[MoM Rewrite FE Step 4/6] React state updated via setMom(). New points_discussed count:', updated.points_discussed.length)
+        console.log('[MoM Rewrite FE Step 4/6] New points_discussed content:', updated.points_discussed)
+      } else {
+        console.error('[MoM Rewrite FE Step 4/6 ERROR] Failed to normalize MoM from server response:', res.data)
+      }
+
+      // Refresh version history so the new rewrite version appears
+      loadVersions()
+      setRewritePhase('done')
+    } catch (e) {
+      console.error('[MoM Rewrite FE Step 4/6 ERROR] Rewrite request failed:', e)
+      setRewriteError(getApiErrorDetail(e, 'Rewrite failed. Please try again.'))
+      setRewritePhase('rules')
+    }
+  }
+
+  // ── Save manual version entry ──
+  const handleSaveVersion = async () => {
+    if (!mom || !id) return
+    setVersionSaveStatus('saving')
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    try {
+      const res = await api.post(`/mom/${id}/version`, mom)
+      setSaveState('saved')
+      setVersionSaveStatus('saved')
+      if (res.data.versions) {
+        setVersions(res.data.versions.slice(0, 10))
+      } else {
+        loadVersions()
+      }
+      setTimeout(() => setVersionSaveStatus('idle'), 2500)
+    } catch {
+      setVersionSaveStatus('error')
+      setTimeout(() => setVersionSaveStatus('idle'), 3000)
+    }
+  }
+
+  // ── Export DOCX ──
+  const handleDocx = async () => {
     if (!mom) return
-    setPdfStatus('loading')
+    setDocxStatus('loading')
     try {
       // Send current editor state directly — bypasses the 3s auto-save debounce
-      // so the exported PDF always reflects the latest unsaved edits.
-      const res = await api.post(`/mom/${id}/pdf`, mom, { responseType: 'blob' })
-      const blob = new Blob([res.data], { type: 'application/pdf' })
+      // so the exported DOCX always reflects the latest unsaved edits.
+      const res = await api.post(`/mom/${id}/docx`, mom, { responseType: 'blob' })
+      const blob = new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `MoM_${mom?.title?.replace(/\s+/g, '_') || 'Meeting'}.pdf`
+      a.download = `MoM_${mom?.title?.replace(/\s+/g, '_') || 'Meeting'}.docx`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      setPdfStatus('success')
-      setTimeout(() => setPdfStatus('idle'), 2500)
+      setDocxStatus('success')
+      setTimeout(() => setDocxStatus('idle'), 2500)
     } catch {
-      setPdfStatus('error')
-      setTimeout(() => setPdfStatus('idle'), 3000)
+      setDocxStatus('error')
+      setTimeout(() => setDocxStatus('idle'), 3000)
     }
   }
 
@@ -529,9 +767,9 @@ export default function MomPage() {
       `Date               : ${mom.date}`,
       `Members            : ${mom.participants.join(', ')}`,
       ...(mom.planned_start_time ? [`Planned Start Time : ${mom.planned_start_time}`] : []),
-      ...(mom.actual_start_time  ? [`Actual Start Time  : ${mom.actual_start_time}`]  : []),
-      ...(mom.planned_end_time   ? [`Planned End Time   : ${mom.planned_end_time}`]   : []),
-      ...(mom.actual_end_time    ? [`Actual End Time    : ${mom.actual_end_time}`]    : []),
+      ...(mom.actual_start_time ? [`Actual Start Time  : ${mom.actual_start_time}`] : []),
+      ...(mom.planned_end_time ? [`Planned End Time   : ${mom.planned_end_time}`] : []),
+      ...(mom.actual_end_time ? [`Actual End Time    : ${mom.actual_end_time}`] : []),
       '',
       'INTRODUCTION',
       '------------',
@@ -600,6 +838,12 @@ export default function MomPage() {
               <History size={14} />
               {historyOpen ? 'Hide History' : 'History'}
             </button>
+            <button className="btn btn-ghost" onClick={handleSaveVersion} disabled={versionSaveStatus === 'saving'} style={{ fontSize: '0.82rem', padding: '0.4rem 0.85rem', height: '36px', gap: '6px' }} title="Save current MoM as a new version entry in History">
+              {versionSaveStatus === 'saving' && <><Loader size={13} className="spin" />Saving...</>}
+              {versionSaveStatus === 'saved' && <><CheckCircle size={13} style={{ color: 'hsl(var(--success))' }} /><span style={{ color: 'hsl(var(--success))' }}>Saved!</span></>}
+              {versionSaveStatus === 'error' && <><AlertTriangle size={13} />Failed</>}
+              {versionSaveStatus === 'idle' && <><Save size={14} style={{ color: 'hsl(var(--accent))' }} />Save Version</>}
+            </button>
             <button className="btn btn-ghost" onClick={handleCopy} style={{ fontSize: '0.82rem', padding: '0.4rem 0.85rem', height: '36px', gap: '6px' }}>
               {copyStatus === 'copied'
                 ? <><CheckCircle size={14} style={{ color: 'hsl(var(--success))' }} /><span style={{ color: 'hsl(var(--success))' }}>Copied!</span></>
@@ -608,11 +852,11 @@ export default function MomPage() {
             <button className="btn btn-ghost" onClick={handleGenerate} style={{ fontSize: '0.82rem', padding: '0.4rem 0.85rem', height: '36px', gap: '6px' }}>
               <RotateCcw size={14} /> Regenerate
             </button>
-            <button className="btn btn-primary" onClick={handlePdf} disabled={pdfStatus === 'loading'} style={{ fontSize: '0.82rem', padding: '0.4rem 0.9rem', height: '36px', gap: '6px' }}>
-              {pdfStatus === 'loading' && <><Loader size={13} className="spin" />Generating...</>}
-              {pdfStatus === 'success' && <><CheckCircle size={13} />Downloaded!</>}
-              {pdfStatus === 'error' && <><AlertTriangle size={13} />Failed</>}
-              {pdfStatus === 'idle' && <><FileDown size={13} />Export PDF</>}
+            <button className="btn btn-primary" onClick={handleDocx} disabled={docxStatus === 'loading'} style={{ fontSize: '0.82rem', padding: '0.4rem 0.9rem', height: '36px', gap: '6px' }}>
+              {docxStatus === 'loading' && <><Loader size={13} className="spin" />Generating...</>}
+              {docxStatus === 'success' && <><CheckCircle size={13} />Downloaded!</>}
+              {docxStatus === 'error' && <><AlertTriangle size={13} />Failed</>}
+              {docxStatus === 'idle' && <><FileDown size={13} />Export DOCX</>}
             </button>
           </div>
         )}
@@ -752,9 +996,19 @@ export default function MomPage() {
 
               {/* ── 6. Introduction ──────────────────────────────── */}
               <MomSection title="6. Introduction">
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '8px', lineHeight: 1.5 }}>
-                  A paragraph that clearly defines the meeting agenda and topics discussed.
-                </p>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                    A paragraph that clearly defines the meeting agenda and topics discussed.
+                  </p>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => openRewrite('introduction')}
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px', flexShrink: 0, marginLeft: '12px' }}
+                    title="Rewrite Introduction with AI"
+                  >
+                    <Wand2 size={13} style={{ color: 'hsl(var(--accent))' }} /> Rewrite
+                  </button>
+                </div>
                 <textarea
                   className="input"
                   value={mom.introduction}
@@ -767,29 +1021,253 @@ export default function MomPage() {
 
               {/* ── 7. Points Discussed ──────────────────────────── */}
               <MomSection title="7. Points Discussed">
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '8px', lineHeight: 1.5 }}>
-                  Each point is displayed as <strong>Topic: Summary</strong>. Minimum 3 points.
-                </p>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: summarizeLongOpen ? '6px' : '8px' }}>
+                  <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                    Each point is displayed as <strong>Topic: Summary</strong>. Minimum 3 points.
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, marginLeft: '12px' }}>
+                    <button
+                      id="btn-summarize-long-points"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setSummarizeLongOpen(v => !v)
+                        setSummarizeError(null)
+                        setSummarizeInfo(null)
+                        if (summarizeStatus === 'done' || summarizeStatus === 'error') setSummarizeStatus('idle')
+                      }}
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px' }}
+                      title="Summarize long discussion points exceeding word threshold"
+                    >
+                      <AlignLeft size={13} style={{ color: 'hsl(var(--accent))' }} /> Summarize Long Points
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => openRewrite('discussion_points')}
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px' }}
+                      title="Rewrite Discussion Points with AI"
+                    >
+                      <Wand2 size={13} style={{ color: 'hsl(var(--accent))' }} /> Rewrite
+                    </button>
+                  </div>
+                </div>
+
+                {/* ── Summarize Long Points panel ─────────────────────────── */}
+                {summarizeLongOpen && (
+                  <div style={{
+                    marginBottom: '12px',
+                    padding: '0.9rem 1rem',
+                    borderRadius: '10px',
+                    border: '1.5px solid hsl(var(--accent) / .3)',
+                    background: 'hsl(var(--accent) / .05)',
+                  }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '8px', fontFamily: 'Inter, sans-serif' }}>
+                      Summarize Long Discussion Points
+                    </div>
+                    <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, marginBottom: '12px', fontFamily: 'Inter, sans-serif' }}>
+                      Sends discussion points exceeding the word threshold to the LLM to be condensed while preserving key factual information. Points below the threshold remain unchanged. Creates a new version in History.
+                    </p>
+
+                    {/* Threshold control */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', whiteSpace: 'nowrap' }}>
+                        Word threshold
+                      </label>
+                      <input
+                        type="range" min={20} max={300} step={5}
+                        value={summarizeThreshold}
+                        onChange={e => setSummarizeThreshold(Number(e.target.value))}
+                        style={{ flex: 1, accentColor: 'hsl(var(--accent))' }}
+                      />
+                      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.88rem', fontWeight: 700, minWidth: 44, color: 'hsl(var(--accent))' }}>
+                        {summarizeThreshold} words
+                      </span>
+                      <input
+                        type="number" min={10} max={1000}
+                        value={summarizeThreshold}
+                        onChange={e => setSummarizeThreshold(Math.max(10, Math.min(1000, Number(e.target.value))))}
+                        style={{ width: 64, padding: '0.3rem 0.5rem', fontSize: '0.82rem', borderRadius: 6, border: '1.5px solid hsl(var(--border)/.6)', background: 'hsl(var(--surface))', color: 'hsl(var(--ink))', fontFamily: 'JetBrains Mono, monospace', textAlign: 'center' }}
+                      />
+                    </div>
+
+                    {/* Live count preview */}
+                    {mom && (
+                      <div style={{ fontSize: '0.73rem', color: 'hsl(var(--pencil))', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>
+                        {(() => {
+                          const longCount = mom.points_discussed.filter(p => normalizePoint(p).split(/\s+/).filter(Boolean).length > summarizeThreshold).length
+                          const totalCount = mom.points_discussed.length
+                          return longCount > 0
+                            ? <><span style={{ fontWeight: 600, color: 'hsl(var(--accent))' }}>{longCount}</span> of {totalCount} point{totalCount !== 1 ? 's' : ''} exceed {summarizeThreshold} words and will be condensed.</>
+                            : <>0 of {totalCount} point{totalCount !== 1 ? 's' : ''} exceed {summarizeThreshold} words (all points are below threshold).</>
+                        })()}
+                      </div>
+                    )}
+
+                    {summarizeError && (
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(0,75%,55%)', background: 'hsl(0,75%,55%/.08)', border: '1px solid hsl(0,75%,55%/.2)', borderRadius: 6, padding: '0.45rem 0.7rem', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>
+                        <AlertTriangle size={12} style={{ display: 'inline', marginRight: '5px' }} />{summarizeError}
+                      </div>
+                    )}
+
+                    {summarizeInfo && (
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(var(--success))', background: 'hsl(var(--success) / .08)', border: '1px solid hsl(var(--success) / .25)', borderRadius: 6, padding: '0.45rem 0.7rem', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>
+                        <CheckCircle size={12} style={{ display: 'inline', marginRight: '5px' }} />{summarizeInfo}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        className="btn btn-ghost"
+                        onClick={() => { setSummarizeLongOpen(false); setSummarizeError(null); setSummarizeInfo(null); setSummarizeStatus('idle') }}
+                        style={{ fontSize: '0.82rem', padding: '0.35rem 0.8rem' }}
+                        disabled={summarizeStatus === 'processing'}
+                      >
+                        Close
+                      </button>
+                      <button
+                        id="mom-summarize-long-points-btn"
+                        className="btn btn-primary"
+                        onClick={handleSummarizeLongPoints}
+                        disabled={summarizeStatus === 'processing'}
+                        style={{ fontSize: '0.82rem', padding: '0.35rem 1rem', gap: '6px' }}
+                      >
+                        {summarizeStatus === 'processing'
+                          ? <><Loader size={13} className="spin" /> Condensing long points...</>
+                          : <><AlignLeft size={13} /> Summarize Long Points</>}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <EditableList
                   items={mom.points_discussed.length > 0 ? mom.points_discussed.map(pt => normalizePoint(pt)) : ['', '', '']}
                   onChange={items => update('points_discussed', items)}
                   placeholder="e.g. Budget Review: The committee reviewed the Q3 budget allocations and approved..."
                   ordered
                   minItems={3}
-                  maxItems={15}
                 />
               </MomSection>
 
               {/* ── 8. Action Points ─────────────────────────────── */}
               <MomSection title="8. Action Points">
-                <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '10px', lineHeight: 1.5 }}>
-                  General and speaker-based action items. Set <strong>Owner</strong> to a speaker name for speaker-based items.
-                </p>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: regenActionOpen ? '6px' : '10px' }}>
+                  <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                    General and speaker-based action items. Set <strong>Owner</strong> to a speaker name for speaker-based items.
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, marginLeft: '12px' }}>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setRegenActionOpen(v => !v)
+                        setRegenActionError(null)
+                        if (regenActionStatus === 'done' || regenActionStatus === 'error') setRegenActionStatus('idle')
+                      }}
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px' }}
+                      title="Regenerate Action Points from transcript"
+                    >
+                      <RefreshCw size={13} style={{ color: 'hsl(160,70%,42%)' }} /> Regenerate
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => openRewrite('action_items')}
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px' }}
+                      title="Rewrite Action Points with AI"
+                    >
+                      <Wand2 size={13} style={{ color: 'hsl(var(--accent))' }} /> Rewrite
+                    </button>
+                  </div>
+                </div>
+
+                {/* ── Regenerate panel ─────────────────────────── */}
+                {regenActionOpen && (
+                  <div style={{
+                    marginBottom: '12px',
+                    padding: '0.9rem 1rem',
+                    borderRadius: '10px',
+                    border: '1.5px solid hsl(160,70%,42%/.3)',
+                    background: 'hsl(160,70%,42%/.06)',
+                  }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'hsl(160,60%,35%)', marginBottom: '8px', fontFamily: 'Inter, sans-serif' }}>
+                      Regenerate Action Points from Transcript
+                    </div>
+                    <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, marginBottom: '12px', fontFamily: 'Inter, sans-serif' }}>
+                      Extracts action items directly from the original meeting transcript using a dedicated LLM call.
+                      Existing action points will be replaced. All other MoM sections remain unchanged.
+                    </p>
+
+                    {/* Window size control */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', whiteSpace: 'nowrap' }}>
+                        Window size
+                      </label>
+                      <input
+                        type="range" min={1} max={60} step={1}
+                        value={regenWindowMinutes}
+                        onChange={e => setRegenWindowMinutes(Number(e.target.value))}
+                        style={{ flex: 1, accentColor: 'hsl(160,70%,42%)' }}
+                      />
+                      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.88rem', fontWeight: 700, minWidth: 44, color: 'hsl(160,60%,35%)' }}>
+                        {regenWindowMinutes} min
+                      </span>
+                      <input
+                        type="number" min={1} max={60}
+                        value={regenWindowMinutes}
+                        onChange={e => setRegenWindowMinutes(Math.max(1, Math.min(60, Number(e.target.value))))}
+                        style={{ width: 56, padding: '0.3rem 0.5rem', fontSize: '0.82rem', borderRadius: 6, border: '1.5px solid hsl(var(--border)/.6)', background: 'hsl(var(--surface))', color: 'hsl(var(--ink))', fontFamily: 'JetBrains Mono, monospace', textAlign: 'center' }}
+                      />
+                    </div>
+
+                    {regenActionError && (
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(0,75%,55%)', background: 'hsl(0,75%,55%/.08)', border: '1px solid hsl(0,75%,55%/.2)', borderRadius: 6, padding: '0.45rem 0.7rem', marginBottom: '10px', fontFamily: 'Inter, sans-serif' }}>
+                        <AlertTriangle size={12} style={{ display: 'inline', marginRight: '5px' }} />{regenActionError}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        className="btn btn-ghost"
+                        onClick={() => { setRegenActionOpen(false); setRegenActionError(null); setRegenActionStatus('idle') }}
+                        style={{ fontSize: '0.82rem', padding: '0.35rem 0.8rem' }}
+                        disabled={regenActionStatus === 'processing'}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        id="mom-regen-action-points-btn"
+                        className="btn btn-primary"
+                        onClick={handleRegenerateActionPoints}
+                        disabled={regenActionStatus === 'processing'}
+                        style={{ fontSize: '0.82rem', padding: '0.35rem 1rem', gap: '6px', background: 'hsl(160,70%,38%)', borderColor: 'hsl(160,70%,38%)' }}
+                      >
+                        {regenActionStatus === 'processing'
+                          ? <><Loader size={13} className="spin" /> Extracting from transcript...</>
+                          : <><RefreshCw size={13} /> Regenerate from Transcript</>}
+                      </button>
+                      {regenActionStatus === 'processing' && (
+                        <span style={{ fontSize: '0.73rem', color: 'hsl(var(--pencil))', alignSelf: 'center', fontFamily: 'Inter, sans-serif' }}>
+                          ~{regenWindowMinutes} min windows · this may take a moment
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <ActionPointsSection items={mom.action_items} onChange={items => update('action_items', items)} />
               </MomSection>
 
               {/* ── 9. Conclusion ────────────────────────────────── */}
               <MomSection title="9. Conclusion">
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <p style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.5 }}>
+                    Meeting outcomes and conclusions.
+                  </p>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => openRewrite('conclusion')}
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px', flexShrink: 0, marginLeft: '12px' }}
+                    title="Rewrite Conclusion with AI"
+                  >
+                    <Wand2 size={13} style={{ color: 'hsl(var(--accent))' }} /> Rewrite
+                  </button>
+                </div>
                 <textarea
                   className="input"
                   value={mom.conclusion}
@@ -811,27 +1289,35 @@ export default function MomPage() {
                 {versions.length === 0 && (
                   <p style={{ fontSize: '0.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>No saved versions yet. Versions are saved automatically.</p>
                 )}
-                {versions.map((v, idx) => (
-                  <div key={idx} style={{ borderRadius: '10px', padding: '0.75rem 1rem', border: idx === 0 ? '1.5px solid hsl(var(--sticky-yellow) / .5)' : '1px solid hsl(var(--border) / .3)', background: idx === 0 ? 'hsl(var(--sticky-yellow) / .08)' : 'hsl(var(--paper) / .5)', marginBottom: '8px' }}>
-                    <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {idx === 0 && <span style={{ fontSize: '.72rem', background: 'hsl(var(--sticky-yellow))', color: 'hsl(var(--ink))', padding: '.08rem .4rem', borderRadius: '4px', fontWeight: 700 }}>* Original</span>}
-                      {idx === 0 ? 'AI Generated' : `Version ${v.version}`}
+                {versions.map((v, idx) => {
+                  const vAny = v as any
+                  const label: string | undefined = vAny.label
+                  const isRewrite = label?.startsWith('Rewrite:')
+                  const isManual = label === 'Manual Save' || label === 'User Saved'
+                  return (
+                    <div key={idx} style={{ borderRadius: '10px', padding: '0.75rem 1rem', border: idx === 0 ? '1.5px solid hsl(var(--sticky-yellow) / .5)' : isRewrite ? '1.5px solid hsl(var(--accent) / .35)' : isManual ? '1.5px solid hsl(var(--success) / .35)' : '1px solid hsl(var(--border) / .3)', background: idx === 0 ? 'hsl(var(--sticky-yellow) / .08)' : isRewrite ? 'hsl(var(--accent) / .05)' : isManual ? 'hsl(var(--success) / .05)' : 'hsl(var(--paper) / .5)', marginBottom: '8px' }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                        {idx === 0 && <span style={{ fontSize: '.72rem', background: 'hsl(var(--sticky-yellow))', color: 'hsl(var(--ink))', padding: '.08rem .4rem', borderRadius: '4px', fontWeight: 700 }}>* Original</span>}
+                        {isRewrite && <span style={{ fontSize: '.72rem', background: 'hsl(var(--accent) / .15)', color: 'hsl(var(--accent))', padding: '.08rem .4rem', borderRadius: '4px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '3px' }}><Wand2 size={9} />{label}</span>}
+                        {isManual && <span style={{ fontSize: '.72rem', background: 'hsl(var(--success) / .15)', color: 'hsl(var(--success))', padding: '.08rem .4rem', borderRadius: '4px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '3px' }}><Save size={9} />{label}</span>}
+                        {idx === 0 ? 'AI Generated' : (isRewrite || isManual) ? '' : `Version ${v.version}`}
+                      </div>
+                      <div style={{ fontSize: '0.74rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace', marginBottom: '10px' }}>
+                        {new Date(v.saved_at).toLocaleString()}
+                      </div>
+                      <button onClick={() => restoreVersion(v)} className="btn btn-ghost" style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px', width: '100%' }}>
+                        <RotateCcw size={12} /> Restore this version
+                      </button>
                     </div>
-                    <div style={{ fontSize: '0.74rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace', marginBottom: '10px' }}>
-                      {new Date(v.saved_at).toLocaleString()}
-                    </div>
-                    <button onClick={() => restoreVersion(v)} className="btn btn-ghost" style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem', gap: '5px', width: '100%' }}>
-                      <RotateCcw size={12} /> Restore this version
-                    </button>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
         )}
 
       </div>
-    
+
       {(pageState === 'editing' || pageState === 'idle') && (
         <div style={{
           flexShrink: 0, borderTop: '1px solid hsl(var(--border) / .3)',
@@ -923,8 +1409,8 @@ export default function MomPage() {
                   {agendaProcessState === 'processing'
                     ? <><Loader size={12} className="spin" /> Processing...</>
                     : agendaProcessState === 'done'
-                    ? <><CheckCircle size={12} style={{ color: 'hsl(var(--success))' }} /> Re-process</>
-                    : <><Brain size={12} /> Extract &amp; Summarize</>}
+                      ? <><CheckCircle size={12} style={{ color: 'hsl(var(--success))' }} /> Re-process</>
+                      : <><Brain size={12} /> Extract &amp; Summarize</>}
                 </button>
 
                 {/* Summary preview */}
@@ -983,8 +1469,8 @@ export default function MomPage() {
                   {contextProcessState === 'processing'
                     ? <><Loader size={12} className="spin" /> Processing...</>
                     : contextProcessState === 'done'
-                    ? <><CheckCircle size={12} style={{ color: 'hsl(var(--success))' }} /> Re-process</>
-                    : <><Brain size={12} /> Extract &amp; Summarize</>}
+                      ? <><CheckCircle size={12} style={{ color: 'hsl(var(--success))' }} /> Re-process</>
+                      : <><Brain size={12} /> Extract &amp; Summarize</>}
                 </button>
 
                 {referenceSummary && (
@@ -997,6 +1483,285 @@ export default function MomPage() {
 
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Rewrite Modal ──────────────────────────────────────────── */}
+      {rewriteTarget && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '1rem',
+        }}>
+          <div style={{
+            width: '100%', maxWidth: '620px', background: 'hsl(var(--card))',
+            borderRadius: '18px', border: '1px solid hsl(var(--border) / .3)',
+            boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
+            overflow: 'hidden', display: 'flex', flexDirection: 'column',
+            maxHeight: '90vh',
+          }}>
+            {/* Modal header */}
+            <div style={{
+              padding: '1.25rem 1.5rem', borderBottom: '1px solid hsl(var(--border) / .2)',
+              display: 'flex', alignItems: 'center', gap: '10px', background: 'hsl(var(--paper) / .5)',
+            }}>
+              <div style={{ width: '34px', height: '34px', borderRadius: '10px', background: 'hsl(var(--accent) / .12)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Wand2 size={17} style={{ color: 'hsl(var(--accent))' }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <h2 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', margin: 0 }}>
+                  Rewrite {
+                    rewriteTarget === 'discussion_points' ? 'Discussion Points'
+                      : rewriteTarget === 'action_items' ? 'Action Points'
+                        : rewriteTarget === 'introduction' ? 'Introduction'
+                          : 'Conclusion'
+                  }
+                </h2>
+                <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', margin: 0, marginTop: '2px' }}>
+                  {rewritePhase === 'upload' && 'Upload reference documents to extract writing style'}
+                  {rewritePhase === 'analyzing' && 'Analyzing writing style from documents...'}
+                  {rewritePhase === 'rules' && 'Review & edit style rules, then rewrite'}
+                  {rewritePhase === 'rewriting' && 'Rewriting content with AI...'}
+                  {rewritePhase === 'done' && 'Rewrite complete! Content updated.'}
+                </p>
+              </div>
+              {rewritePhase !== 'analyzing' && rewritePhase !== 'rewriting' && (
+                <button className="icon-btn" onClick={closeRewrite} style={{ color: 'hsl(var(--pencil))' }}><X size={16} /></button>
+              )}
+            </div>
+
+            {/* Modal body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
+
+              {/* Phase: Upload (for discussion_points / action_items) */}
+              {rewritePhase === 'upload' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <p style={{ fontSize: '0.85rem', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
+                    Upload one or more reference MoM documents. The AI will analyze how {
+                      rewriteTarget === 'discussion_points' ? 'discussion points are written' : 'action items are structured'
+                    } in those documents and generate style rules you can review before rewriting.
+                  </p>
+
+                  {/* Hidden file input */}
+                  <input
+                    ref={rewriteFileInputRef}
+                    type="file"
+                    multiple
+                    accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const files = Array.from(e.target.files || [])
+                      setRewriteFiles(prev => [...prev, ...files])
+                      e.target.value = ''
+                    }}
+                  />
+
+                  {/* Drop zone */}
+                  <div
+                    onClick={() => rewriteFileInputRef.current?.click()}
+                    style={{
+                      border: '2px dashed hsl(var(--accent) / .35)', borderRadius: '12px',
+                      padding: '2rem', textAlign: 'center', cursor: 'pointer',
+                      background: 'hsl(var(--accent) / .03)', transition: 'all 0.2s',
+                    }}
+                    onMouseOver={e => { e.currentTarget.style.borderColor = 'hsl(var(--accent))'; e.currentTarget.style.background = 'hsl(var(--accent) / .06)' }}
+                    onMouseOut={e => { e.currentTarget.style.borderColor = 'hsl(var(--accent) / .35)'; e.currentTarget.style.background = 'hsl(var(--accent) / .03)' }}
+                  >
+                    <Upload size={28} style={{ color: 'hsl(var(--accent))', marginBottom: '8px' }} />
+                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '4px' }}>Click to select reference documents</p>
+                    <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>PDF, DOCX, PPTX, TXT, MD, Images (max 30 MB each)</p>
+                  </div>
+
+                  {/* Selected files */}
+                  {rewriteFiles.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {rewriteFiles.map((f, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', borderRadius: '8px', background: 'hsl(var(--muted) / .4)', fontSize: '0.82rem', fontFamily: 'Inter, sans-serif' }}>
+                          <FileText size={13} style={{ color: 'hsl(var(--accent))' }} />
+                          <span style={{ flex: 1, color: 'hsl(var(--ink))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                          <span style={{ color: 'hsl(var(--pencil))', fontSize: '0.72rem' }}>{(f.size / 1024 / 1024).toFixed(2)} MB</span>
+                          <button
+                            onClick={() => setRewriteFiles(prev => prev.filter((_, j) => j !== i))}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '2px' }}
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {rewriteError && (
+                    <div style={{ padding: '0.65rem 1rem', borderRadius: '8px', background: 'hsl(var(--destructive) / .1)', border: '1px solid hsl(var(--destructive) / .3)', color: 'hsl(var(--destructive))', fontSize: '0.82rem', fontFamily: 'Inter, sans-serif' }}>
+                      <AlertTriangle size={13} style={{ display: 'inline', marginRight: '6px' }} />{rewriteError}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+                    <button className="btn btn-ghost" onClick={closeRewrite} style={{ fontSize: '0.85rem' }}>Cancel</button>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => { setRewriteFiles([]); setRewriteRules(rewriteTarget === 'discussion_points' ? '1. Merge discussion points covering the same or highly similar topics into a single coherent point without losing any factual information, decisions, questions, or outcomes.' : ''); setRewritePhase('rules') }}
+                      style={{ fontSize: '0.85rem' }}
+                    >
+                      Skip — Enter Rules Manually
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      disabled={rewriteFiles.length === 0}
+                      onClick={handleAnalyzeStyle}
+                      style={{ fontSize: '0.85rem', gap: '7px' }}
+                    >
+                      <Sparkles size={14} /> Analyze Style
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Phase: Analyzing */}
+              {rewritePhase === 'analyzing' && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem', padding: '2rem 0' }}>
+                  <div style={{ width: '72px', height: '72px', borderRadius: '50%', background: 'hsl(var(--accent) / .08)', border: '3px solid hsl(var(--accent) / .2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Loader size={30} className="spin" style={{ color: 'hsl(var(--accent))' }} />
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <p style={{ fontSize: '1rem', fontWeight: 600, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '6px' }}>Analyzing Writing Style</p>
+                    <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>Extracting formatting and style rules from your reference documents...</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Phase: Rules */}
+              {rewritePhase === 'rules' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+
+                  {/* Style Rules */}
+                  <div>
+                    <label style={{ fontSize: '0.78rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      <Settings2 size={13} style={{ color: 'hsl(var(--accent))' }} />
+                      Style Rules
+                      <span style={{ fontSize: '0.68rem', fontWeight: 400, color: 'hsl(var(--pencil))', textTransform: 'none', letterSpacing: 0 }}>(editable — the AI will follow these when rewriting)</span>
+                    </label>
+                    <textarea
+                      className="input"
+                      value={rewriteRules}
+                      onChange={e => setRewriteRules(e.target.value)}
+                      placeholder="Enter style rules (one per line or numbered list)..."
+                      rows={8}
+                      style={{ width: '100%', resize: 'vertical', padding: '0.75rem', fontSize: '0.85rem', lineHeight: 1.7, fontFamily: 'Inter, sans-serif' }}
+                    />
+                  </div>
+
+                  {/* Custom prompt */}
+                  <div>
+                    <label style={{ fontSize: '0.78rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      <Sparkles size={13} style={{ color: 'hsl(var(--accent))' }} />
+                      Additional Instructions
+                      <span style={{ fontSize: '0.68rem', fontWeight: 400, color: 'hsl(var(--pencil))', textTransform: 'none', letterSpacing: 0 }}>(optional)</span>
+                    </label>
+                    <textarea
+                      className="input"
+                      value={rewriteCustomPrompt}
+                      onChange={e => setRewriteCustomPrompt(e.target.value)}
+                      placeholder="e.g. Keep it concise. Use formal language. Start each point with an action verb..."
+                      rows={3}
+                      style={{ width: '100%', resize: 'vertical', padding: '0.75rem', fontSize: '0.85rem', lineHeight: 1.7, fontFamily: 'Inter, sans-serif' }}
+                    />
+                  </div>
+
+                  {/* Window size (list types only) */}
+                  {(rewriteTarget === 'discussion_points' || rewriteTarget === 'action_items') && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <label style={{ fontSize: '0.78rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', display: 'flex', alignItems: 'center', gap: '6px', textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0 }}>
+                        <SlidersHorizontal size={13} style={{ color: 'hsl(var(--pencil))' }} />
+                        Batch Size
+                      </label>
+                      <input
+                        type="number"
+                        className="input"
+                        value={rewriteWindowSize}
+                        onChange={e => setRewriteWindowSize(Math.max(1, Math.min(200, parseInt(e.target.value) || 20)))}
+                        min={1} max={200}
+                        style={{ width: '80px', padding: '0.4rem 0.6rem', fontSize: '0.85rem' }}
+                      />
+                      <span style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+                        items per AI request (default 20)
+                      </span>
+                    </div>
+                  )}
+
+                  {rewriteError && (
+                    <div style={{ padding: '0.65rem 1rem', borderRadius: '8px', background: 'hsl(var(--destructive) / .1)', border: '1px solid hsl(var(--destructive) / .3)', color: 'hsl(var(--destructive))', fontSize: '0.82rem', fontFamily: 'Inter, sans-serif' }}>
+                      <AlertTriangle size={13} style={{ display: 'inline', marginRight: '6px' }} />{rewriteError}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                    {(rewriteTarget === 'discussion_points' || rewriteTarget === 'action_items') && (
+                      <button className="btn btn-ghost" onClick={() => setRewritePhase('upload')} style={{ fontSize: '0.85rem' }}>← Back</button>
+                    )}
+                    <button className="btn btn-ghost" onClick={closeRewrite} style={{ fontSize: '0.85rem' }}>Cancel</button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleRewrite}
+                      style={{ fontSize: '0.85rem', gap: '7px' }}
+                    >
+                      <Wand2 size={14} /> Rewrite Now
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Phase: Rewriting */}
+              {rewritePhase === 'rewriting' && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.75rem', padding: '2rem 0' }}>
+                  <div style={{ width: '72px', height: '72px', borderRadius: '50%', background: 'hsl(var(--accent) / .08)', border: '3px solid hsl(var(--accent) / .2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Wand2 size={30} style={{ color: 'hsl(var(--accent))' }} className="spin" />
+                  </div>
+                  <div style={{ textAlign: 'center', width: '100%' }}>
+                    <p style={{ fontSize: '1rem', fontWeight: 600, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '6px' }}>Rewriting with AI...</p>
+                    <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginBottom: '1rem' }}>
+                      {rewriteProgress.total > 1
+                        ? `Processing batch ${rewriteProgress.current} of ${rewriteProgress.total}...`
+                        : 'Processing...'}
+                    </p>
+                    {rewriteProgress.total > 0 && (
+                      <div style={{ width: '100%', background: 'hsl(var(--muted))', borderRadius: '99px', height: '6px', overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${Math.round((rewriteProgress.current / Math.max(rewriteProgress.total, 1)) * 100)}%`,
+                          background: 'hsl(var(--accent))',
+                          borderRadius: '99px',
+                          transition: 'width 0.4s ease',
+                        }} />
+                      </div>
+                    )}
+                  </div>
+                  <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>Please wait — do not close this window</p>
+                </div>
+              )}
+
+              {/* Phase: Done */}
+              {rewritePhase === 'done' && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.25rem', padding: '2rem 0' }}>
+                  <div style={{ width: '72px', height: '72px', borderRadius: '50%', background: 'hsl(var(--success) / .12)', border: '3px solid hsl(var(--success) / .3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <CheckCircle size={30} style={{ color: 'hsl(var(--success))' }} />
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <p style={{ fontSize: '1rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '6px' }}>Rewrite Complete!</p>
+                    <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', lineHeight: 1.6 }}>
+                      The content has been updated. A new version has been saved to History — use the History panel to revert if needed.
+                    </p>
+                  </div>
+                  <button className="btn btn-primary" onClick={closeRewrite} style={{ fontSize: '0.85rem', gap: '7px' }}>
+                    <CheckCircle size={14} /> Done
+                  </button>
+                </div>
+              )}
+
+            </div>
+          </div>
         </div>
       )}
 

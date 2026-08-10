@@ -1,9 +1,11 @@
 """
-Speaker Synchronization Service — Option B: Two-Track Rename.
+Speaker Synchronization Service — Unified Speaker Label Rename.
 
-Two completely separate mapping dictionaries, applied independently.
+All resolved speaker labels (e.g. "Speaker 1", "John") are now written into
+every LLM payload during the pipeline, so the LLM never sees raw Pyannote IDs
+(e.g. SPEAKER_00). This means only a single mapping is needed at rename time:
 
-Track 1 — Label Map  {display_label → new_name}
+    Label Map  {display_label → new_name}
     Applied to fields that store speaker_label values:
       transcript[].speaker_label
       transcript[].words[].speaker_label
@@ -12,21 +14,17 @@ Track 1 — Label Map  {display_label → new_name}
       final_rom.participants[]
       minutes_of_meeting.participants[]
       summary / short_summary / detailed_summary text
+      stage1/stage2/stage3/final_rom speaker fields (now all label-based)
 
-Track 2 — Raw ID Map  {raw_diarization_id → new_name}
-    Applied to fields that store raw pyannote IDs (Stage 1 uses speaker not speaker_label):
-      stage1.discussion_points[].speakers[]
-      stage1.discussion_points[].action_owner
-      stage2.polished_points[].speakers[]
-      stage2.polished_points[].action_owner
-      stage3.agendas[].presenter
-      stage3.agendas[].discussion_points[].speakers[]
-      stage3.agendas[].discussion_points[].action_owner
-      final_rom.agendas[].presenter
-      final_rom.agendas[].discussion_points[].speakers[]
-      final_rom.agendas[].discussion_points[].action_owner
-      final_rom.agendas[].action_items[].owner
-      minutes_of_meeting.action_items[].owner
+Legacy Track 2 — Raw ID Map  {raw_diarization_id → new_name}
+    Kept for backward-compatibility only. Recordings processed before the
+    speaker-label unification fix may still have raw Pyannote IDs (SPEAKER_XX)
+    stored in ROM stage speaker fields. The raw_id_map derived from scanning
+    `transcript[].speaker` covers those cases so old recordings can still be
+    renamed correctly.
+
+New recordings no longer need Track 2 because Stage 1 ROM extraction now
+reads `speaker_label` instead of `speaker` when building window text.
 
 No alias expansion. No regex. No speaker-number extraction.
 Each identifier is matched and replaced exactly as it is stored.
@@ -96,18 +94,24 @@ def build_clean_speaker_mappings(speaker_mappings: Dict[str, Any]) -> Dict[str, 
 def collect_raw_ids_for_label(
     transcript_list: List[Dict],
     display_label: str,
+    target_name: Optional[str] = None,
     min_duration_ratio: float = 0.20,
 ) -> Set[str]:
     """
-    Scan the transcript and collect primary raw diarization IDs for display_label.
+    Scan the transcript and collect primary raw diarization IDs for display_label or target_name.
     """
     if not transcript_list or not display_label:
         return set()
 
+    matching_labels = {display_label}
+    if target_name:
+        matching_labels.add(target_name)
+
     durations: Dict[str, float] = {}
     for seg in transcript_list:
         if isinstance(seg, dict) and not seg.get("is_overlap"):
-            if seg.get("speaker_label") == display_label:
+            lbl = seg.get("speaker_label")
+            if lbl in matching_labels:
                 raw_id = str(seg.get("speaker", "") or "").strip()
                 if raw_id:
                     start = float(seg.get("start", 0.0))
@@ -123,7 +127,8 @@ def collect_raw_ids_for_label(
         counts: Dict[str, int] = {}
         for seg in transcript_list:
             if isinstance(seg, dict) and not seg.get("is_overlap"):
-                if seg.get("speaker_label") == display_label:
+                lbl = seg.get("speaker_label")
+                if lbl in matching_labels:
                     raw_id = str(seg.get("speaker", "") or "").strip()
                     if raw_id:
                         counts[raw_id] = counts.get(raw_id, 0) + 1
@@ -138,8 +143,7 @@ def collect_raw_ids_for_label(
     }
 
     if not valid_raw_ids and durations:
-        max_raw_id = max(durations, key=durations.get)
-        valid_raw_ids.add(max_raw_id)
+        valid_raw_ids = set(durations.keys())
 
     return valid_raw_ids
 
@@ -251,7 +255,17 @@ def _apply_label_track(
                     new_ss[new_key] = v
             updated["speaker_summary"] = new_ss
 
-    # 4. Final ROM participants (speaker_label-based)
+    # 8. Persist canonical speaker_mappings (label → name only)
+    if replace_all:
+        canonical = dict(label_map)
+    else:
+        existing_sm = updated.get("speaker_mappings")
+        sm = from_json(existing_sm) if isinstance(existing_sm, str) else (existing_sm or {})
+        canonical = dict(sm) if isinstance(sm, dict) else {}
+        canonical.update(label_map)
+    updated["speaker_mappings"] = canonical
+
+    # 4. Final ROM participants & speaker_mappings (speaker_label-based)
     raw_rom = updated.get("rom_data")
     if raw_rom:
         rom = from_json(raw_rom) if isinstance(raw_rom, str) else dict(raw_rom)
@@ -268,6 +282,7 @@ def _apply_label_track(
                             new_parts.append(mapped)
                             seen_p.add(mapped)
                     final_rom["participants"] = new_parts
+                final_rom["speaker_mappings"] = dict(canonical)
             updated["rom_data"] = rom
 
     # 5. Text summary fields
@@ -283,17 +298,6 @@ def _apply_label_track(
             items = from_json(val) if isinstance(val, str) else list(val)
             if isinstance(items, list):
                 updated[field] = replace_deep_speaker_names(items, combined)
-
-
-    # 8. Persist canonical speaker_mappings (label → name only)
-    if replace_all:
-        updated["speaker_mappings"] = dict(label_map)
-    else:
-        existing_sm = updated.get("speaker_mappings")
-        sm = from_json(existing_sm) if isinstance(existing_sm, str) else (existing_sm or {})
-        canonical = dict(sm) if isinstance(sm, dict) else {}
-        canonical.update(label_map)
-        updated["speaker_mappings"] = canonical
 
     return updated
 
@@ -435,10 +439,21 @@ def _apply_tracks_to_mom(
     updated = dict(mom_dict)
     combined = {**raw_id_map, **label_map}  # label takes precedence on conflict
 
+    # Safely deserialize list fields if they are JSON strings
+    for list_field in ("participants", "action_items", "points_discussed"):
+        val = updated.get(list_field)
+        if isinstance(val, str):
+            try:
+                parsed = from_json(val, [])
+                if isinstance(parsed, list):
+                    updated[list_field] = parsed
+            except Exception:
+                pass
+
     # participants — speaker_label based
     parts = updated.get("participants")
     if parts:
-        p_list = from_json(parts) if isinstance(parts, str) else list(parts)
+        p_list = from_json(parts) if isinstance(parts, str) else (list(parts) if isinstance(parts, list) else [])
         if isinstance(p_list, list):
             seen: Set[str] = set()
             new_p = []
@@ -452,7 +467,7 @@ def _apply_tracks_to_mom(
     # action_items — owner may be raw ID or display label
     actions = updated.get("action_items")
     if actions:
-        a_list = from_json(actions) if isinstance(actions, str) else list(actions)
+        a_list = from_json(actions) if isinstance(actions, str) else (list(actions) if isinstance(actions, list) else [])
         if isinstance(a_list, list):
             new_a = []
             for item in a_list:
@@ -579,22 +594,34 @@ async def sync_global_speaker_rename(
 
     rec_dict = dict(row)
 
-    # Build Track 2 raw_id_map by scanning transcript
+    # Merge existing DB mappings if not replace_all
+    existing_sm_raw = rec_dict.get("speaker_mappings")
+    existing_sm = from_json(existing_sm_raw, {}) if isinstance(existing_sm_raw, str) else (existing_sm_raw or {})
+    if not isinstance(existing_sm, dict):
+        existing_sm = {}
+
+    if replace_all:
+        combined_label_map = dict(label_map)
+    else:
+        combined_label_map = dict(existing_sm)
+        combined_label_map.update(label_map)
+
+    # Build Track 2 raw_id_map by scanning transcript across all cumulative mappings
     raw_t = rec_dict.get("transcript")
     t_list = from_json(raw_t, []) if isinstance(raw_t, str) else (list(raw_t) if raw_t else [])
 
     raw_id_map: Dict[str, str] = {}
-    for label, name in label_map.items():
-        for raw_id in collect_raw_ids_for_label(t_list, label):
+    for label, name in combined_label_map.items():
+        for raw_id in collect_raw_ids_for_label(t_list, label, target_name=name):
             raw_id_map[raw_id] = name
 
     logger.info(
-        f"[SpeakerSync] [{recording_id}] Track 1 label→name: {label_map}\n"
+        f"[SpeakerSync] [{recording_id}] Track 1 label→name: {combined_label_map}\n"
         f"[SpeakerSync] [{recording_id}] Track 2 raw_id→name: {raw_id_map} (replace_all={replace_all})"
     )
 
     # Apply Track 1: display label fields
-    updated_rec = _apply_label_track(rec_dict, label_map, raw_id_map, replace_all=replace_all)
+    updated_rec = _apply_label_track(rec_dict, combined_label_map, raw_id_map, replace_all=replace_all)
 
     # Apply Track 2: raw ID fields in ROM stages
     updated_rec = _apply_raw_id_track(updated_rec, raw_id_map)

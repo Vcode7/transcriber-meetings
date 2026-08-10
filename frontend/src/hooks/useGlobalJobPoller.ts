@@ -15,6 +15,7 @@ import { toast } from 'sonner'
 import api from '../api/client'
 import { useJobsStore, type ActiveJob } from '../store/jobs'
 import { useAuthStore } from '../store/auth'
+import { useProcessingStore } from '../store/processing'
 
 const POLL_INTERVAL_MS = 3000
 const RECONCILE_INTERVAL_MS = 30_000  // re-reconcile with backend every 30s
@@ -178,6 +179,12 @@ export function useGlobalJobPoller() {
 
       reconcile(backendJobs)
       lastReconcileRef.current = Date.now()
+
+      // If backend reports no active jobs (in pending/processing state), clear processing store
+      const hasActiveBackendJob = backendJobs.some((j: any) => j.status === 'pending' || j.status === 'processing')
+      if (!hasActiveBackendJob) {
+        useProcessingStore.getState().clearProcessing()
+      }
 
       // After reconcile, re-fetch results for any locally-known completed jobs
       // that have no result in the store yet (e.g. after a page navigation/refresh).

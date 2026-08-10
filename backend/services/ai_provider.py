@@ -195,8 +195,9 @@ ACTION ITEMS
   - bug fixes
   - investigations
   - deployments
-- Infer the owner only when clearly supported by the transcript.
-- Otherwise use "Unassigned".
+- Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title.
+- Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees.
+- If the transcript does not clearly identify a valid assignee, return "Unassigned".
 - Preserve deadlines exactly if mentioned.
 - Never invent deadlines.
 
@@ -1347,11 +1348,15 @@ ROM_DISCUSSION_EXTRACTION_PROMPT = """You are an expert meeting analyst. Extract
 
 CRITICAL RULES FOR TRANSCRIPT PRESERVATION & ACTION ITEMS:
 
-1. PRESERVE THE TRANSCRIPT EXACTLY:
-   - Do NOT rewrite, paraphrase, summarize, reinterpret, or change the meaning of any discussion point.
-   - The extracted discussion point MUST faithfully reflect what was actually spoken in the transcript.
-   - It should clearly capture WHO SAID WHAT, TO WHOM, AND THE DISCUSSION EXACTLY AS IT OCCURRED, while only making minor grammatical fixes if absolutely necessary for readability.
-   - NEVER introduce statements, assumptions, interpretations, or wording that was not present in the transcript.
+1. TRANSCRIPT FIDELITY
+   - Preserve the transcript as the single source of truth.
+   - Every discussion point must faithfully represent what was explicitly spoken in the transcript.
+   - Capture the complete discussion naturally, including who spoke, what was said, who was addressed if explicit, and the substance of the discussion, while preserving the original meaning and intent.
+   - Do not summarize, reinterpret, infer, embellish, or alter the discussion.
+   - Only make minimal grammatical or formatting corrections necessary for readability without changing the meaning, emphasis, or level of detail.
+   - Do not omit important information or split a single continuous discussion into multiple discussion points unless the conversation clearly changes to a different topic.
+   - Merge related discussions into a single discussion point if it makes sense to merge them.
+   - Do not introduce information, assumptions, conclusions, context, or terminology that was not explicitly stated in the transcript or if video context if available.
 
 2. IMPROVE ACTION ITEM EXTRACTION:
    - Every action item in "action_items" MUST explicitly identify:
@@ -1359,7 +1364,10 @@ CRITICAL RULES FOR TRANSCRIPT PRESERVATION & ACTION ITEMS:
      * Who is responsible for completing it (assignee / action owner).
      * What needs to be done.
      * Any deadline, timeframe, or conditions mentioned in the discussion.
-   - Always infer the assigner and assignee from the conversation context when they are explicitly mentioned.
+   - Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title  .
+   - Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees.
+   - If the transcript does not clearly identify a valid assignee, return null for the assignee field.
+   - Always infer the assigner and assignee from the conversation context when they are explicitly mentioned or identify them from the transcipt .
    - Preserve the original intent and wording from the transcript, and NEVER invent or alter responsibilities.
 
 3. DATES & TIMELINES:
@@ -1394,13 +1402,14 @@ Extract discussion points as JSON:
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
       "project_names": ["Any project names mentioned"],
-      "action_items": [{{
+      "action_items": [
+        {{
             "assigner": "Person who assigned/requested the task or null",
             "assignee": "Person responsible for the task or null",
             "task": "Task exactly as requested in the transcript",
             "deadline": "Deadline/timeframe mentioned or null"
         }}
-        ],
+      ],
       "action_owner": "Person responsible for completing the task (assignee) or null",
       "references": ["Any documents, standards, or references mentioned"],
       "required_information": ["Additional context needed to fully understand this point"]
@@ -1409,11 +1418,251 @@ Extract discussion points as JSON:
 }}
 ```"""
 
+ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT = """You are an expert meeting analyst. Extract structured Stage 1 discussion points from the following transcript window.
+
+IMPORTANT: This call focuses ONLY on discussion points. Do NOT extract action items — leave the action_items list empty for every point. Action items are being extracted separately.
+
+CRITICAL RULES FOR TRANSCRIPT PRESERVATION:
+
+1. TRANSCRIPT FIDELITY
+   - Preserve the transcript as the single source of truth.
+   - Every discussion point must faithfully represent what was explicitly spoken in the transcript.
+   - Capture the complete discussion naturally, including who spoke, what was said, who was addressed if explicit, and the substance of the discussion, while preserving the original meaning and intent.
+   - Do not summarize, reinterpret, infer, embellish, or alter the discussion.
+   - Only make minimal grammatical or formatting corrections necessary for readability without changing the meaning, emphasis, or level of detail.
+   - Do not omit important information or split a single continuous discussion into multiple discussion points unless the conversation clearly changes to a different topic.
+   - Merge related discussions into a single discussion point if it makes sense to merge them.
+   - Do not introduce information, assumptions, conclusions, context, or terminology that was not explicitly stated in the transcript or if video context if available.
+
+2. DATES & TIMELINES:
+   - DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract ONLY actual calendar dates or explicit calendar references mentioned in the text (e.g., "July 8, 2026", "2026-07-08", "April 8th", "next Monday"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02-05:03 or 3975.18 as dates.
+   - Do NOT generate or decide timeline start/end values. Timelines are computed automatically by the system.
+
+3. TECHNICAL ACCURACY:
+   - Preserve ALL technical terminology, abbreviations, acronyms, project names EXACTLY as spoken (e.g., LCA Mk2, AMCA, DRDO, ADA, HAL).
+   - Never replace abbreviations with generic wording.
+   - If you need additional context to understand a point, add it to required_information instead of guessing.
+
+REFERENCE CONTEXT:
+Use the previous_context and video_context_section strictly as supporting reference only. They may help resolve clarify ambiguous references, or provide additional context. Never allow them to override, rewrite, or alter information extracted from the current transcript window. If there is any conflict, the TRANSCRIPT WINDOW is the single source of truth.
+previous_context : 
+{previous_context}
+video_context :
+{video_context_section}
+
+TRANSCRIPT WINDOW:
+{window_text}
+
+Extract discussion points as JSON. Leave action_items as an empty list for every point:
+```json
+{{
+  "discussion_points": [
+    {{
+      "discussion_point": "Faithful capture of who said what to whom and what was discussed exactly as spoken",
+      "speakers": ["Speaker Name"],
+      "decisions": ["Any decisions made"],
+      "questions": ["Any questions raised"],
+      "technical_terms": ["Exact abbreviations and technical terms used"],
+      "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
+      "numbers": ["Any numbers, measurements, quantities mentioned"],
+      "project_names": ["Any project names mentioned"],
+      "action_items": [],
+      "action_owner": null,
+      "references": ["Any documents, standards, or references mentioned"],
+      "required_information": ["Additional context needed to fully understand this point"]
+    }}
+  ]
+}}
+```"""
+
+ROM_ACTION_EXTRACTION_PROMPT = """You are an expert meeting analyst specialising in action item extraction. Your ONLY task is to identify every task, commitment, assignment, or follow-up action mentioned in the transcript window below.
+
+EXTRACTION RULES:
+
+1. TASK DESCRIPTIONS
+   - Every `task` must be complete, self-contained, and understandable without reading the transcript.
+   - Include all relevant context that was actually spoken, such as what needs to be done, what it relates to, any important details, and any expected outcome if mentioned.
+   - Use only information explicitly present in the transcript.
+   - Do **not** invent, summarize beyond the transcript, or add assumptions.
+   - If important context was spoken, include it in the task. If it was not spoken, do not create it.
+
+2. IDENTIFY EVERY PARTICIPANT:
+   - Always extract who assigned the task (assigner) and who is responsible for completing it (assignee) from the conversation context.
+   - Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title.
+   - Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees.
+   - If the transcript does not clearly identify a valid assignee, return null for the assignee field. Do NOT guess.
+   - Carefully follow the conversation flow and speaker turns.
+   - Determine who requested or assigned the work (`assigner`) and who became responsible for completing it (`assignee`).
+   - Do not assume that the speaker mentioning the task is automatically the assignee.
+
+3. DEADLINES:
+   - For every action item, actively search the entire transcript window for any explicit due date, timeframe, schedule, milestone, or completion condition related to that task.
+   - Deadlines may appear before or after the task assignment.
+   - Associate the correct deadline with the correct task whenever the conversation clearly indicates they belong together.
+   - If multiple deadlines are mentioned, use only the one that clearly applies to the task.
+   - If no deadline is explicitly stated anywhere in the transcript window, return null.
+   - Never invent or infer deadlines.
+   - Do NOT use transcript timestamps or audio offsets as deadlines.
+
+4. SCOPE:
+   - Extract ALL action items, commitments, and follow-up tasks visible in this window — even implicit ones where a participant clearly agrees to do something.
+   - If no action items exist in this window, return an empty action_items array.
+
+REFERENCE CONTEXT:
+Use the context below only as supporting reference to identify speakers and technical terms. Never invent actions not present in the transcript.
+previous_context:
+{previous_context}
+video_context:
+{video_context_section}
+
+TRANSCRIPT WINDOW:
+{window_text}
+
+Return ONLY a JSON object with an action_items array:
+```json
+{{
+  "action_items": [
+    {{
+      "assigner": "Person who assigned/requested the task or null",
+      "assignee": "Person responsible for the task or null",
+      "task": "Complete self-contained task description including full context from the transcript",
+      "deadline": "Deadline/timeframe mentioned or null"
+    }}
+  ]
+}}
+```"""
+
+MOM_REGENERATE_ACTION_POINTS_PROMPT = """You are a specialist in extracting action items from meeting transcripts. Your ONLY task is to identify every task, commitment, assignment, follow-up action, or agreed responsibility mentioned in the transcript window below and return them in the required JSON format.
+EXTRACTION RULES:
+
+1. TASK DESCRIPTIONS
+   - Every `task` must be complete, self-contained, and understandable without reading the transcript.
+   - Include all relevant context that was actually spoken, such as what needs to be done, what it relates to, any important details, and any expected outcome if mentioned.
+   - Use only information explicitly present in the transcript.
+   - Do **not** invent, summarize beyond the transcript, or add assumptions.
+   - If important context was spoken, include it in the task. If it was not spoken, do not create it.
+
+2. IDENTIFY EVERY PARTICIPANT:
+   - Always extract who assigned the task (assigner) and who is responsible for completing it (assignee) from the conversation context.
+   - Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title  .
+   - Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees.
+   - If the transcript does not clearly identify a valid assignee, return null for the assignee field. Do NOT guess.
+   - Carefully follow the conversation flow and speaker turns.
+   - Determine who requested or assigned the work (`assigner`) and who became responsible for completing it (`assignee`).
+   - Do not assume that the speaker mentioning the task is automatically the assignee.
+
+3. DEADLINES:
+   - For every action item, actively search the entire transcript window for any explicit due date, timeframe, schedule, milestone, or completion condition related to that task.
+   - Deadlines may appear before or after the task assignment.
+   - Associate the correct deadline with the correct task whenever the conversation clearly indicates they belong together.
+   - If multiple deadlines are mentioned, use only the one that clearly applies to the task.
+   - If no deadline is explicitly stated anywhere in the transcript window, return null.
+   - Never invent or infer deadlines.
+   - Do NOT use transcript timestamps or audio offsets as deadlines.
+
+4. SCOPE:
+   - Extract ALL action items, commitments, and follow-up tasks visible in this window — even implicit ones where a participant clearly agrees to do something.
+   - If no action items exist in this window, return an empty action_items array.
+
+
+OUTPUT REQUIREMENTS
+* Do not include explanations, reasoning, markdown, or any text outside the JSON object.
+* Ensure the JSON is complete and properly closed.
+
+
+Return ONLY a JSON object with an action_items array exactly this schema:
+```json
+{{
+  "action_items": [
+    {{
+      "assigner": "Person who assigned/requested the task or null",
+      "assignee": "Person responsible for completing the task or null",
+      "task": "Complete self-contained task description using only transcript information",
+      "deadline": "Deadline or timeframe mentioned or null"
+    }}
+  ]
+}}
+```
+
+## TRANSCRIPT WINDOW
+
+{window_text}
+
+```"""
+
+MOM_DEDUPLICATE_ACTION_POINTS_PROMPT = """You are an expert editor specializing in action item deduplication and consolidation. You are provided with a complete list of action points extracted from a meeting.
+
+Your task is to perform a final global deduplication pass over all action points according to these strict rules:
+
+RULES:
+1. IDENTIFY DUPLICATES:
+   - Identify duplicate or highly similar action points across all items.
+   - Remove exact duplicates and redundant variations.
+
+2. MERGE COMPLEMENTARY INFORMATION:
+   - Merge action points that refer to the same underlying task into a single, complete action point while preserving all unique details.
+   - Preserve the correct assigner, assignee, and deadline when merging. If multiple versions contain complementary information, combine them into the most complete version using only information already present in the input items.
+   - Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title  . Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees. If a valid assignee is not clearly identified, return null for the assignee field.
+
+3. DO NOT OVER-MERGE:
+   - Do NOT merge different tasks, even if they are related or belong to the same topic. Keep distinct tasks separate.
+
+4. PRESERVE ORDER AND SCHEMA:
+   - Maintain the original sequence of tasks where possible.
+   - Use only information already present in the input list. Do not invent or add new details.
+
+OUTPUT REQUIREMENTS:
+* Do not include explanations, reasoning, markdown text, or anything outside the JSON object.
+* Ensure the JSON is complete and properly closed.
+
+Return ONLY a JSON object with an action_items array using this exact schema:
+```json
+{{
+  "action_items": [
+    {{
+      "assigner": "Person who assigned/requested the task or null",
+      "assignee": "Person responsible for completing the task or null",
+      "task": "Complete self-contained task description",
+      "deadline": "Deadline or timeframe mentioned or null"
+    }}
+  ]
+}}
+```
+
+INPUT ACTION ITEMS:
+{action_items_json}
+"""
+
+STAGE1_JSON_REPAIR_PROMPT = """You are a JSON repair assistant.
+
+Your ONLY task is to repair the JSON provided below.
+
+Rules:
+
+* Preserve all extracted information exactly as it appears.
+* Do not summarize, rewrite, paraphrase, improve, remove, or invent any content.
+* Do not add missing discussion points or action items.
+* Only fix JSON syntax and structure so that it becomes valid JSON.
+* Close any missing braces, brackets, quotes, or commas if required.
+* Remove markdown fences if present.
+* If the JSON is truncated, complete only the required JSON syntax to make it valid. Do not generate new content that was not already present.
+* Preserve the original schema exactly.
+* Return only the repaired JSON object.
+* Do not include explanations, reasoning, markdown, or any additional text.
+
+Invalid JSON:
+
+```text
+{invalid_json}
+```
+
+Return only the repaired valid JSON."""
+
 ROM_POLISH_PROMPT = """You are an expert meeting analyst. Enhance and merge the following discussion points using the retrieved context.
 
 CRITICAL RULES & MERGING INSTRUCTIONS:
-- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT rewrite, paraphrase, summarize away, or reinterpret the actual spoken meaning, statements, who said what to whom, or original responsibilities.
-- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned (e.g., "John assigned Sarah to prepare the budget report by Friday." or "Speaker 1 requested Speaker 2 to submit the revised proposal before next week's meeting."). Never alter or invent responsibilities.
+- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT summarize or reinterpret the actual spoken meaning, statements, who said what to whom, or original responsibilities.
+- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned (e.g., "John assigned Sarah to prepare the budget report by Friday." or "Speaker 1 requested Speaker 2 to submit the revised proposal before next week's meeting."). Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title  . Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees. If a valid assignee is not clearly identified, return null for the assignee field. Never alter or invent responsibilities.
 - DATES MUST BE ACTUAL CALENDAR DATES ONLY: In the "dates" array, extract/preserve ONLY actual calendar dates or explicit calendar references (e.g., "July 8, 2026", "April 8th"). NEVER output transcript timestamps, window ranges, audio offsets, or values like 00:02-05:03 or 3975.18 as dates.
 - INFORMATION-DENSE SUMMARY: The enhanced point (`polished_text`) must be a clear, informative, and detailed summary of what was discussed, preserving all important facts, who said what to whom, decisions, dates, numbers, and outcomes.
 - MERGE DUPLICATES & SIMILAR POINTS: Identify discussion points in the batch that refer to the same topic, decision, project, or issue. Combine/merge duplicate or highly similar points into a single enriched, comprehensive point. Do NOT output redundant points.
@@ -1440,26 +1689,39 @@ Return merged and enhanced discussion points as JSON:
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Numbers"],
       "references": ["References"],
-      "action_items": ["Action item with assigner, assignee, task, and deadline mentioned in the discussion"],
-      "action_owner": "Person responsible for completing the task (assignee) or null",
-    }}
+      "action_items": [
+        {{
+          "assigner": "Person who assigned/requested the task or null",
+          "assignee": "Person responsible for completing the task or null",
+          "task": "Task description",
+          "deadline": "Deadline/timeframe mentioned or null"
+        }}
+      ],
+      "action_owner": "Person responsible for completing the task (assignee) or null"
+    }
   ]
 }}
 ```"""
 
 ROM_ENHANCE_WINDOW_PROMPT = """You are an expert meeting analyst. Your task is to ENHANCE a window of consecutive discussion points extracted from a meeting transcript using two independently retrieved reference sources: Meeting Context and Global Context.
 
+WRITING STYLE:
+- FORMAL THIRD-PERSON MEETING MINUTES: Rewrite every enhanced point in a formal, objective, third-person meeting minutes style. Use a balanced mix of passive and active voice, with a preference toward passive or objective phrasing where it sounds natural.
+- VARIED REPORTING VERBS: Attribute contributions naturally, selecting the most contextually appropriate reporting verb or sentence structure for each speaker. Vary the phrasing across points to avoid repetition. Choose from expressions such as: introduced, explained, clarified, questioned, emphasised, agreed, disagreed, proposed, confirmed, concluded, requested, observed, highlighted, reported, noted, stated, advised, recommended, raised, outlined, acknowledged, indicated, expressed concern, sought clarification, presented, or any other verb that best reflects the speaker's intent. Do not restrict yourself to a fixed set; use whatever wording most precisely represents how the speaker contributed to the discussion.
+- OBJECTIVE AND PROFESSIONAL TONE: Maintain a neutral, professional tone throughout. Avoid informal language, first or second person, and subjective interpretation.
+
 ENHANCEMENT RULES:
-- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT rewrite, paraphrase, summarize away, or reinterpret the actual spoken statements, who said what to whom, or original responsibilities. Never remove or contradict any information from the original discussion points.
-- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned. Never alter or invent responsibilities.
+- PRESERVE TRANSCRIPT FAITHFULNESS: Do NOT summarize or reinterpret the actual spoken statements, who said what, or original responsibilities. Never remove or contradict any information from the original discussion points.
+- FACTUAL ACCURACY: Preserve all facts as stated. Do NOT add interpretations, assumptions, or inferences beyond what is directly supported by the transcript or retrieved context. Every statement in the enhanced text must be traceable to the original discussion or the retrieved reference context.
+- ACTION ITEM EXTRACTION & FORMAT: Every action item MUST explicitly identify who assigned the task (assigner), who is responsible for completing it (assignee), what needs to be done, and any deadlines/timeframes mentioned. Assign tasks ONLY when the assignee is an explicit person's name, organization name, or a specific role/title  . Do NOT use vague references such as "my team," "our team," "you," "they," "everyone," "we," "someone," or similar pronouns/generic groups as assignees. If a valid assignee is not clearly identified, return null for the assignee field. Never alter or invent responsibilities.
 - VERIFY TECHNICAL TERMINOLOGY: If the retrieved context confirms or clarifies a technical term, incorporate the clarification.
 - EXPAND ABBREVIATIONS: If the context makes an abbreviation's full form clear, expand it the first time it appears in enhanced_text (e.g., "SRS (Software Requirements Specification)").
 - ADD MISSING TECHNICAL DETAILS: Only add details that are DIRECTLY supported by the retrieved context. NEVER invent or hallucinate.
 - IMPROVE CLARITY: Make the enhanced point clearer and more complete while preserving the original meaning.
-- INFORMATION-DENSE: Write clear, professional prose.
+- INFORMATION-DENSE: Write clear, professional prose that captures the full substance of what was discussed.
 - DATES - CALENDAR DATES ONLY: In the "dates" array, output ONLY actual calendar dates (e.g., "July 8, 2026", "Q3 2026"). NEVER include transcript timestamps, audio offsets, or values like "3975.18" or "00:02-05:03".
-- MERGE DUPLICATES: If any two points in the window refer to the same topic, decision, or fact, merge them into a single, comprehensive point. Return `original_point_ids` listing all merged IDs.
-- CONTEXT USAGE REPORT: For EVERY enhanced point, you MUST fill in the `context_usage_report` object honestly. If a field is false, set it to false - do not set everything to true.
+- MERGE WITHOUT LOSS: When multiple discussion points in the window cover the same topic, merge them into a single coherent, well-structured enhanced point. You MUST retain every unique fact, decision, clarification, question, and outcome from all merged points — do not discard any detail during merging. Combine the content into well-structured sentences rather than keeping duplicate or near-duplicate points. Return `original_point_ids` listing all merged IDs.
+- CONTEXT USAGE REPORT: For EVERY enhanced point, you MUST fill in the `context_usage_report` object honestly. If a field is false, set it to false — do not set everything to true.
 
 DISCUSSION WINDOW (points to enhance):
 {window_json}
@@ -1476,7 +1738,7 @@ Return the enhanced points as a JSON object:
   "enhanced_points": [
     {{
       "original_point_ids": ["id-1", "id-2"],
-      "enhanced_text": "Clear, information-dense enhanced discussion point text.",
+      "enhanced_text": "Clear, information-dense enhanced discussion point text written in formal third-person meeting minutes style.",
       "speakers": ["Speaker Name"],
       "decisions": ["Decisions made"],
       "technical_terms": ["Technical terms used"],
@@ -1484,7 +1746,14 @@ Return the enhanced points as a JSON object:
       "numbers": ["Numbers and quantities"],
       "references": ["Document or section references"],
       "action_owner": "Person responsible or null",
-      "action_items": ["Action items"],
+      "action_items": [
+        {{
+          "assigner": "Person who assigned/requested the task or null",
+          "assignee": "Person responsible for completing the task or null",
+          "task": "Task description",
+          "deadline": "Deadline/timeframe mentioned or null"
+        }}
+      ],
       "context_usage_report": {{
         "verified": true,
         "technical_details_added": false,
@@ -1529,8 +1798,15 @@ Return result as JSON:
       "dates": ["Dates"],
       "numbers": ["Numbers"],
       "references": ["References"],
-      "action_items": ["Action items"]
-      "action_owner": "Person responsible or null",
+      "action_items": [
+        {{
+          "assigner": "Person who assigned/requested the task or null",
+          "assignee": "Person responsible for completing the task or null",
+          "task": "Task description",
+          "deadline": "Deadline/timeframe mentioned or null"
+        }}
+      ],
+      "action_owner": "Person responsible or null"
     }}
   ]
 }}
@@ -1690,6 +1966,11 @@ def _get_prompt(key: str) -> str:
         "mom_merge": MOM_MERGE_PROMPT,
         "raw_mom_to_mom": "",
         "rom_discussion": ROM_DISCUSSION_EXTRACTION_PROMPT,
+        "rom_discussion_no_actions": ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT,
+        "rom_action_extraction": ROM_ACTION_EXTRACTION_PROMPT,
+        "stage1_json_repair": STAGE1_JSON_REPAIR_PROMPT,
+        "mom_action_regen": MOM_REGENERATE_ACTION_POINTS_PROMPT,
+        "mom_action_dedup": MOM_DEDUPLICATE_ACTION_POINTS_PROMPT,
         "rom_polish": ROM_POLISH_PROMPT,
         "rom_enhance_window": ROM_ENHANCE_WINDOW_PROMPT,
         "rom_deduplicate": ROM_DEDUPLICATION_PROMPT,
@@ -1864,6 +2145,9 @@ class AIProvider(ABC):
 
     @abstractmethod
     def generate_agenda_from_summary(self, summary: str) -> List[Dict]: ...
+
+    def deduplicate_action_points(self, action_items: List[Dict]) -> List[Dict]:
+        return action_items
 
 
 STANDARD_CTX_SIZES = (2048, 4096, 8192, 16384, 32768, 65536, 131072)
@@ -2135,6 +2419,7 @@ class QwenProvider(AIProvider):
             "ollama_model_priority": getattr(settings, "OLLAMA_MODEL_PRIORITY", "gemma,qwen,llama,deepseek,mistral"),
             "ollama_num_ctx": 32768,
             "ollama_dynamic_ctx": True,
+            "ollama_think": False,
             "ollama_temperature": 0.0,
             "ollama_top_p": 0.9,
             "ollama_top_k": 40,
@@ -2163,6 +2448,28 @@ class QwenProvider(AIProvider):
             "max_tokens_collection_compare": 1500,
             "max_tokens_collection_topic_growth": 1500,
             "max_tokens_vocab_extractor": 512,
+            "rom_transcript_window": 2.0,
+            "rom_meeting_top_k": 5,
+            "rom_global_top_k": 3,
+            "rom_windows_per_batch": 5,
+            "rom_parallel_window_processing": 2,
+            "rom_separate_action_extraction": False,
+            "whisper_batch_size": 8,
+            "max_tokens_rom_discussion": 4096,
+            "max_tokens_rom_discussion_no_actions": 4096,
+            "max_tokens_rom_action_extraction": 2048,
+            "max_tokens_stage1_json_repair": 4548,
+            "max_tokens_mom_action_regen": 4048,
+            "max_tokens_rom_polish": 4096,
+            "max_tokens_rom_enhance_window": 4096,
+            "max_tokens_rom_deduplicate": 2048,
+            "max_tokens_rom_agenda": 2048,
+            "max_tokens_rom_mom_expansion": 3000,
+            "max_tokens_rom_agenda_assign_batch": 4096,
+            "max_tokens_rom_agenda_doc_points": 1024,
+            "max_tokens_raw_mom_to_mom": 3000,
+            "max_tokens_raw_mom_extraction": 1024,
+            "max_tokens_raw_mom_repair": 1024,
         }
 
         import sqlite3
@@ -2295,6 +2602,8 @@ class QwenProvider(AIProvider):
 
         selected_num_ctx = calculated_num_ctx if dynamic_enabled else manual_num_ctx
 
+        think_enabled = bool(cfg.get("ollama_think", False))
+
         # Prepare options payload with validation defaults
         options = {
             "num_predict": max_new_tokens,
@@ -2303,6 +2612,7 @@ class QwenProvider(AIProvider):
             "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
             "top_p": float(cfg["ollama_top_p"]),
             "top_k": int(cfg["ollama_top_k"]),
+            "think": think_enabled,
         }
         if cfg["ollama_seed"] is not None and cfg["ollama_seed"] >= 0:
             options["seed"] = int(cfg["ollama_seed"])
@@ -2325,6 +2635,7 @@ class QwenProvider(AIProvider):
                 {"role": "user", "content": prompt},
             ],
             "options": options,
+            "think": think_enabled,
             "stream": False
         }
         if cfg["ollama_keep_alive"] is not None:
@@ -2341,6 +2652,7 @@ class QwenProvider(AIProvider):
             f"  - Model: {model}\n"
             f"  - Server URL: {server_url}\n"
             f"  - Dynamic Context Window: {'ENABLED (ON)' if dynamic_enabled else 'DISABLED (OFF)'}\n"
+            f"  - Thinking Mode (think): {'ENABLED (ON)' if think_enabled else 'DISABLED (OFF)'}\n"
             f"  - Estimated Input Tokens: {est_input_tokens}\n"
             f"  - Max Output Tokens (num_predict): {max_new_tokens}\n"
             f"  - Selected num_ctx: {selected_num_ctx} (calculated: {calculated_num_ctx}, manual setting: {manual_num_ctx})\n"
@@ -3111,6 +3423,7 @@ class QwenProvider(AIProvider):
         window_text: str,
         previous_points_json: Optional[str] = None,
         video_context: str = "",
+        skip_action_items: bool = False,
     ) -> Dict:
         """Extract structured discussion points from a transcript window for ROM pipeline.
         
@@ -3120,6 +3433,11 @@ class QwenProvider(AIProvider):
             video_context:         Optional OCR text from presentation slides/screen shares
                                    overlapping this window's time range. Empty string for
                                    audio-only recordings.
+            skip_action_items:     When True, uses the no-actions prompt variant
+                                   (ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT) which instructs
+                                   the LLM to leave action_items empty. Used when
+                                   separate_action_extraction is enabled so that action
+                                   items are handled by a dedicated parallel call instead.
         """
         prev_context = ""
         if previous_points_json:
@@ -3155,39 +3473,407 @@ class QwenProvider(AIProvider):
                 "NEVER output OCR timestamps (e.g. 00:15 → 00:45) as dates in the dates array.\n"
                 f"\n{video_context.strip()}"
             )
+    def _parse_json_dict(self, raw: str) -> Optional[Dict]:
+        """Attempt to parse raw LLM response text into a Python dict."""
+        import ast as _ast
+        if not raw or not raw.strip():
+            return None
+
+        raw_clean = raw.strip()
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_clean, re.DOTALL)
+        if json_match:
+            raw_clean = json_match.group(1).strip()
+        else:
+            brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+            if brace_match:
+                raw_clean = brace_match.group().strip()
+
+        if "{{" in raw_clean:
+            raw_clean = raw_clean.replace("{{", "{").replace("}}", "}")
+
+        try:
+            d = json.loads(raw_clean)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+
+        try:
+            d = _ast.literal_eval(raw_clean)
+            if isinstance(d, dict):
+                return json.loads(json.dumps(d))
+        except Exception:
+            pass
+
+        return None
+
+    def repair_stage1_json(self, raw_invalid_json: str, orig_max_tokens: int) -> Optional[Dict]:
+        """Attempt to repair malformed or truncated Stage 1 JSON output using a dedicated LLM call.
+
+        Uses STAGE1_JSON_REPAIR_PROMPT with max_new_tokens set to orig_max_tokens + 500
+        to ensure sufficient budget to close open quotes/braces.
+
+        Args:
+            raw_invalid_json: Raw text response from the previous LLM extraction call.
+            orig_max_tokens:  The max_new_tokens value used in the original call.
+
+        Returns:
+            Parsed dictionary if repair succeeds, or None if repair fails.
+        """
+        cfg = self._get_active_settings()
+        repair_max_tokens = cfg.get("max_tokens_stage1_json_repair") or (orig_max_tokens + 500)
+        logger.info(
+            f"[QwenAI] Invoking Stage 1 LLM JSON Repair step "
+            f"(orig max_tokens={orig_max_tokens} -> repair max_tokens={repair_max_tokens}, input chars={len(raw_invalid_json)})"
+        )
+        logger.warning(
+            f"[QwenAI] Stage 1 invalid LLM response being sent to JSON Repair ({len(raw_invalid_json)} chars):\n"
+            f"--- START RAW INVALID LLM RESPONSE ---\n{raw_invalid_json}\n--- END RAW INVALID LLM RESPONSE ---"
+        )
+
+        prompt = _get_prompt("stage1_json_repair").replace("{invalid_json}", raw_invalid_json)
+        raw = self._infer(prompt, max_new_tokens=repair_max_tokens, task_key="stage1_json_repair")
+
+        if not raw or not raw.strip():
+            logger.warning("[QwenAI] repair_stage1_json received empty response from LLM.")
+            return None
+
+        parsed = self._parse_json_dict(raw)
+        if isinstance(parsed, dict):
+            logger.info("[QwenAI] Stage 1 JSON Repair succeeded! Repaired JSON successfully parsed.")
+            return parsed
+
+        logger.error(
+            f"[QwenAI] Stage 1 JSON Repair failed — repaired output could not be parsed as valid JSON.\n"
+            f"--- START RAW REPAIR LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END RAW REPAIR LLM RESPONSE ---"
+        )
+        return None
+
+    def extract_rom_discussion_points(
+        self,
+        window_text: str,
+        previous_points_json: Optional[str] = None,
+        video_context: str = "",
+        skip_action_items: bool = False,
+    ) -> Dict:
+        """Stage 1: Extract discussion points (and optionally action items) from a transcript window.
+
+        Args:
+            window_text:          Formatted transcript window text (speaker + timestamps).
+            previous_points_json: JSON string of recent discussion points for context.
+            video_context:        Optional OCR text from presentation slides.
+            skip_action_items:    If True, uses ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT.
+
+        Returns:
+            {"discussion_points": [...]} or {"discussion_points": [], "parse_error": True} on failure.
+        """
+        cfg = self._get_active_settings()
+        prompt_key = "rom_discussion_no_actions" if skip_action_items else "rom_discussion"
+        orig_max_tokens = cfg.get(f"max_tokens_{prompt_key}") or cfg.get("max_tokens_rom_discussion") or 4048
+
+        prev_context = ""
+        if previous_points_json:
+            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}"
+
+        if video_context and video_context.strip():
+            video_context_section = (
+                "VIDEO OCR TRANSCRIPT (supplementary — audio transcript is primary):\n"
+                "  - Key text, bullet points, headers, slide titles, diagrams from presentation video\n"
+                "  - Speaker presentation slides\n"
+                "  - Text from shared screens, whiteboards, or documents shown on screen\n"
+                "  - Action items or assignments displayed on screen\n"
+                "  - Important numbers, figures, budgets, or measurements\n"
+                "  - Announcements or key statements shown in presentation slides\n"
+                "  - Critical information displayed on shared screens\n"
+                "\n"
+                "DO NOT create points from: decorative text, repeated slide headers/footers, company logos,\n"
+                "page numbers, navigation menus, or content that is insignificant or redundant with spoken content.\n"
+                "\n"
+                "OCR-ONLY POINTS - SPEAKER LABEL:\n"
+                "If you create a discussion point that originates ONLY from the OCR transcript (not from the audio),\n"
+                "set the speakers field to [\"For Information\"] for that point. Do NOT add any other labels or categories.\n"
+                "\n"
+                "NEVER output OCR timestamps (e.g. 00:15 → 00:45) as dates in the dates array.\n"
+                f"\n{video_context.strip()}"
+            )
         else:
             video_context_section = ""
-        
+
+        # Select prompt: use the no-actions variant when separate action extraction is active
         prompt = (
-            _get_prompt("rom_discussion")
+            _get_prompt(prompt_key)
             .replace("{previous_context}", prev_context)
             .replace("{video_context_section}", video_context_section)
             .replace("{window_text}", window_text)
         )
-        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_discussion")
-        
-        if not raw:
-            return {"discussion_points": []}
-        
-        # Parse JSON (handle markdown fences)
-        raw = raw.strip()
-        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw, re.DOTALL)
+        raw = self._infer(prompt, max_new_tokens=orig_max_tokens, task_key=prompt_key)
+
+        if not raw or not raw.strip():
+            logger.warning("[QwenAI] extract_rom_discussion_points received empty response from LLM.")
+            return {"discussion_points": [], "parse_error": True, "error_reason": "LLM returned empty response"}
+
+        # Attempt normal parsing
+        data = self._parse_json_dict(raw)
+
+        # If parsing fails, invoke JSON Repair
+        if data is None:
+            logger.warning(
+                f"[QwenAI] Stage 1 discussion extraction JSON parse failed on initial call. Prompt key: '{prompt_key}'.\n"
+                f"--- START RAW INITIAL EXTRACTION LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END RAW INITIAL EXTRACTION LLM RESPONSE ---\n"
+                f"Invoking Stage 1 JSON Repair step..."
+            )
+            data = self.repair_stage1_json(raw, orig_max_tokens=orig_max_tokens)
+
+        if isinstance(data, dict):
+            data.setdefault("discussion_points", [])
+            return data
+
+        logger.error(
+            f"[QwenAI] extract_rom_discussion_points output is not a JSON object after repair.\n"
+            f"--- START FINAL RAW LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END FINAL RAW LLM RESPONSE ---"
+        )
+        return {"discussion_points": [], "parse_error": True, "error_reason": "Output was not a JSON object"}
+
+    def extract_rom_action_points(
+        self,
+        window_text: str,
+        previous_points_json: Optional[str] = None,
+        video_context: str = "",
+    ) -> Dict:
+        """Stage 1 (separate action extraction): Extract action items only from a transcript window.
+
+        Used when rom_separate_action_extraction is enabled. Runs in parallel with
+        extract_rom_discussion_points (no-actions variant) and returns only action_items.
+
+        Args:
+            window_text:          Formatted transcript window text (speaker + timestamps).
+            previous_points_json: JSON string of recent discussion points for context.
+            video_context:        Optional OCR text from presentation slides.
+
+        Returns:
+            {"action_items": [...]} or {"action_items": [], "parse_error": True} on failure.
+        """
+        cfg = self._get_active_settings()
+        orig_max_tokens = cfg.get("max_tokens_rom_action_extraction") or 2048
+
+        prev_context = ""
+        if previous_points_json:
+            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}"
+
+        if video_context and video_context.strip():
+            video_context_section = (
+                "VIDEO OCR TRANSCRIPT (supplementary — audio transcript is primary):\n"
+                f"{video_context.strip()}"
+            )
+        else:
+            video_context_section = ""
+
+        prompt = (
+            _get_prompt("rom_action_extraction")
+            .replace("{previous_context}", prev_context)
+            .replace("{video_context_section}", video_context_section)
+            .replace("{window_text}", window_text)
+        )
+        raw = self._infer(prompt, max_new_tokens=orig_max_tokens, task_key="rom_action_extraction")
+
+        if not raw or not raw.strip():
+            logger.warning("[QwenAI] extract_rom_action_points received empty response from LLM.")
+            return {"action_items": [], "parse_error": True, "error_reason": "LLM returned empty response"}
+
+        # Attempt normal parsing
+        data = self._parse_json_dict(raw)
+
+        # If parsing fails, invoke JSON Repair
+        if data is None:
+            logger.warning(
+                f"[QwenAI] Stage 1 action extraction JSON parse failed on initial call.\n"
+                f"--- START RAW INITIAL ACTION EXTRACTION LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END RAW INITIAL ACTION EXTRACTION LLM RESPONSE ---\n"
+                f"Invoking Stage 1 JSON Repair step..."
+            )
+            data = self.repair_stage1_json(raw, orig_max_tokens=orig_max_tokens)
+
+        if isinstance(data, dict):
+            data.setdefault("action_items", [])
+            return data
+
+        logger.error(
+            f"[QwenAI] extract_rom_action_points output is not a JSON object after repair.\n"
+            f"--- START FINAL RAW LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END FINAL RAW LLM RESPONSE ---"
+        )
+        return {"action_items": [], "parse_error": True, "error_reason": "Output was not a JSON object"}
+
+    def regenerate_mom_action_points(self, window_text: str) -> Dict:
+        """Extract action items from a transcript window for MoM Action Point regeneration.
+
+        Uses the dedicated MOM_REGENERATE_ACTION_POINTS_PROMPT.  Returns only the
+        action_items list; no video context or previous-point context is needed since this
+        is a standalone extraction call for MoM regeneration.
+
+        Args:
+            window_text: Formatted transcript window (speaker labels + timestamps).
+
+        Returns:
+            {"action_items": [...]} or {"action_items": [], "parse_error": True} on failure.
+        """
+        import ast as _ast
+
+        prompt = _get_prompt("mom_action_regen").replace("{window_text}", window_text)
+        raw = self._infer(prompt, max_new_tokens=4048, task_key="mom_action_regen")
+
+        if not raw or not raw.strip():
+            logger.warning("[QwenAI] regenerate_mom_action_points received empty response from LLM.")
+            return {"action_items": [], "parse_error": True, "error_reason": "LLM returned empty response"}
+
+        # ── Always log the raw LLM output for debugging ──────────────────────
+        logger.info(
+            f"[QwenAI] regenerate_mom_action_points raw LLM response ({len(raw)} chars):\n{raw}"
+        )
+
+        raw_clean = raw.strip()
+
+        # Stage 1: strip markdown code fence  ```json … ``` or ``` … ```
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_clean, re.DOTALL)
         if json_match:
-            raw = json_match.group(1).strip()
-        
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
+            raw_clean = json_match.group(1).strip()
+            logger.info(f"[QwenAI] regenerate_mom_action_points: stripped markdown fence, candidate ({len(raw_clean)} chars)")
+        else:
+            # Stage 2: extract the first {...} block from the full response
+            brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+            if brace_match:
+                raw_clean = brace_match.group().strip()
+                logger.info(f"[QwenAI] regenerate_mom_action_points: extracted brace block ({len(raw_clean)} chars)")
+
+        # Stage 2b: Sanitize double-braces if LLM echoed {{ ... }}
+        if raw_clean.startswith("{{") or "{{" in raw_clean:
+            raw_clean = raw_clean.replace("{{", "{").replace("}}", "}")
+            logger.info(f"[QwenAI] regenerate_mom_action_points: normalized double braces {{ ... }} to {{ ... }}")
+
+        def _try_parse(text: str):
+            """Attempt JSON parse, then ast.literal_eval as fallback for single-quoted output."""
+            # Attempt 1: standard json.loads
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+            # Attempt 2: ast.literal_eval handles Python-style {'key': 'value'} dicts
+            try:
+                result = _ast.literal_eval(text)
+                if isinstance(result, dict):
+                    # Re-encode to proper JSON and back to normalise types
+                    return json.loads(json.dumps(result))
+            except Exception:
+                pass
+            # Attempt 3: brace-extract then standard parse (catches leading/trailing prose)
+            brace = re.search(r'\{.*\}', text, re.DOTALL)
+            if brace:
                 try:
-                    data = json.loads(match.group())
+                    return json.loads(brace.group())
                 except Exception:
-                    return {"discussion_points": []}
-            else:
-                return {"discussion_points": []}
-        
-        return data if isinstance(data, dict) else {"discussion_points": []}
+                    pass
+                try:
+                    result = _ast.literal_eval(brace.group())
+                    if isinstance(result, dict):
+                        return json.loads(json.dumps(result))
+                except Exception:
+                    pass
+            return None
+
+        data = _try_parse(raw_clean)
+
+        if data is None:
+            logger.warning(
+                f"[QwenAI] regenerate_mom_action_points: all JSON parse attempts failed.\n"
+                f"Candidate text was:\n{raw_clean}"
+            )
+            return {"action_items": [], "parse_error": True, "error_reason": "All JSON parse attempts failed"}
+
+        if isinstance(data, dict):
+            data.setdefault("action_items", [])
+            logger.info(f"[QwenAI] regenerate_mom_action_points: parsed OK, {len(data['action_items'])} action item(s)")
+            return data
+
+        logger.warning(f"[QwenAI] regenerate_mom_action_points output is not a JSON object. Got type: {type(data)}")
+        return {"action_items": [], "parse_error": True, "error_reason": "Output was not a JSON object"}
+
+    def deduplicate_action_points(self, action_items: List[Dict]) -> List[Dict]:
+        """Perform a final global deduplication pass over all extracted action items.
+
+        Uses MOM_DEDUPLICATE_ACTION_POINTS_PROMPT to identify duplicate or highly similar
+        action points across all windows/agendas, merge complementary details, and remove
+        redundant variations while preserving unique details.
+
+        Args:
+            action_items: List of raw action item dicts [{assigner, assignee, task, deadline}, ...]
+
+        Returns:
+            Deduplicated list of action item dicts.
+        """
+        import ast as _ast
+
+        if not action_items or len(action_items) <= 1:
+            return action_items
+
+        items_json = json.dumps(action_items, indent=2)
+        prompt = _get_prompt("mom_action_dedup").replace("{action_items_json}", items_json)
+        raw = self._infer(prompt, max_new_tokens=4048, task_key="mom_action_dedup")
+
+        if not raw or not raw.strip():
+            logger.warning("[QwenAI] deduplicate_action_points received empty response from LLM.")
+            return action_items
+
+        logger.info(
+            f"[QwenAI] deduplicate_action_points raw LLM response ({len(raw)} chars):\n{raw}"
+        )
+
+        raw_clean = raw.strip()
+
+        # Stage 1: strip markdown code fence ```json … ``` or ``` … ```
+        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_clean, re.DOTALL)
+        if json_match:
+            raw_clean = json_match.group(1).strip()
+            logger.info(f"[QwenAI] deduplicate_action_points: stripped markdown fence ({len(raw_clean)} chars)")
+        else:
+            brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+            if brace_match:
+                raw_clean = brace_match.group().strip()
+                logger.info(f"[QwenAI] deduplicate_action_points: extracted brace block ({len(raw_clean)} chars)")
+
+        if raw_clean.startswith("{{") or "{{" in raw_clean:
+            raw_clean = raw_clean.replace("{{", "{").replace("}}", "}")
+
+        def _try_parse(text: str):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+            try:
+                result = _ast.literal_eval(text)
+                if isinstance(result, dict):
+                    return json.loads(json.dumps(result))
+            except Exception:
+                pass
+            brace = re.search(r'\{.*\}', text, re.DOTALL)
+            if brace:
+                try:
+                    return json.loads(brace.group())
+                except Exception:
+                    pass
+                try:
+                    result = _ast.literal_eval(brace.group())
+                    if isinstance(result, dict):
+                        return json.loads(json.dumps(result))
+                except Exception:
+                    pass
+            return None
+
+        data = _try_parse(raw_clean)
+        if isinstance(data, dict) and isinstance(data.get("action_items"), list):
+            deduped = data["action_items"]
+            logger.info(f"[QwenAI] deduplicate_action_points: parsed OK, {len(action_items)} -> {len(deduped)} item(s)")
+            return deduped
+
+        logger.warning("[QwenAI] deduplicate_action_points output invalid or parse failed. Returning original items.")
+        return action_items
 
     def polish_rom_points(
         self,

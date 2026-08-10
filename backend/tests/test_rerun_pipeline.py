@@ -88,3 +88,46 @@ async def test_rerun_endpoint_logic(tmp_path):
     async with get_db_context() as db:
         await db.execute(text("DELETE FROM recordings WHERE id = 'test_rerun_rec_123'"))
         await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_rerun_video_pipeline(tmp_path):
+    from unittest.mock import patch, AsyncMock
+    from routers.history import rerun_recording_pipeline
+
+    await connect_db()
+    dummy_video = tmp_path / "test_video.mp4"
+    dummy_video.write_bytes(b"dummy video content")
+
+    recording_id = "test_rerun_video_456"
+    user = {"id": "test_user_video"}
+
+    async with get_db_context() as db:
+        await db.execute(text("DELETE FROM recordings WHERE id = :id"), {"id": recording_id})
+        await db.execute(
+            text("""
+                INSERT INTO recordings (
+                    id, user_id, filename, file_path, duration, status, source_type, created_at
+                ) VALUES (
+                    :id, :uid, 'test_video.mp4', :path, 60.0, 'done', 'video', '2026-07-28 12:00:00'
+                )
+            """),
+            {
+                "id": recording_id,
+                "uid": user["id"],
+                "path": str(dummy_video),
+            }
+        )
+        await db.commit()
+
+    with patch("services.video_processing_service.extract_audio_from_video", return_value=str(dummy_video)), \
+         patch("routers.video_router._run_synchronized_video_pipeline", new_callable=AsyncMock) as mock_video_pipeline:
+
+        res = await rerun_recording_pipeline(recording_id=recording_id, current_user=user)
+        assert res["status"] == "pending"
+
+    # Clean up test row
+    async with get_db_context() as db:
+        await db.execute(text("DELETE FROM recordings WHERE id = :id"), {"id": recording_id})
+        await db.commit()
+

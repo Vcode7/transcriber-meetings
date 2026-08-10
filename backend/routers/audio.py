@@ -675,6 +675,8 @@ async def list_active_jobs(
     (Done/error recordings are accessible through the History endpoints.)
     """
     user_id = current_user["id"]
+    from tasks.pipeline import active_tasks
+    import datetime
 
     async with get_db_context() as db:
         r = await db.execute(
@@ -690,16 +692,49 @@ async def list_active_jobs(
         )
         rows = r.mappings().fetchall()
 
-    jobs = []
-    for rec in rows:
-        jobs.append({
-            "job_id": rec["id"],
-            "filename": rec.get("filename", ""),
-            "status": rec["status"],
-            "progress": rec.get("progress", ""),
-            "duration": rec.get("duration", 0),
-            "created_at": rec["created_at"],
-        })
+        stale_ids = []
+        jobs = []
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+        for rec in rows:
+            rec_id = rec["id"]
+            rec_status = rec["status"]
+            is_running = rec_id in active_tasks
+
+            # If job is pending or processing but has no active asyncio task running
+            if rec_status in ("pending", "processing") and not is_running:
+                created_at_val = rec.get("created_at")
+                created_at_dt = None
+                if isinstance(created_at_val, datetime.datetime):
+                    created_at_dt = created_at_val
+                elif isinstance(created_at_val, str):
+                    try:
+                        created_at_dt = datetime.datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+                
+                age_seconds = (now_utc - created_at_dt).total_seconds() if created_at_dt else 999
+                if age_seconds > 10:
+                    stale_ids.append(rec_id)
+                    continue
+
+            jobs.append({
+                "job_id": rec_id,
+                "filename": rec.get("filename", ""),
+                "status": rec_status,
+                "progress": rec.get("progress", ""),
+                "duration": rec.get("duration", 0),
+                "created_at": rec["created_at"],
+            })
+
+        if stale_ids:
+            logger.info(f"[Audio] Reconciler cleaning up {len(stale_ids)} stale/unresolved jobs: {stale_ids}")
+            for sid in stale_ids:
+                await db.execute(
+                    text("UPDATE recordings SET status = 'error', error_message = 'Job interrupted due to server restart or shutdown.' WHERE id = :id"),
+                    {"id": sid}
+                )
+            await db.commit()
 
     logger.debug(f"[Audio] Active jobs for user {user_id}: {len(jobs)}")
     return {"jobs": jobs}

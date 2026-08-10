@@ -561,5 +561,61 @@ def test_generate_advanced_mom_selective_regeneration(monkeypatch):
     assert res_regen_all["conclusion"] == "New Refined Conclusion"
 
 
+def test_sequential_multi_speaker_training():
+    """
+    Verify that training multiple voice profiles sequentially (Speaker 1 -> Alice, then Speaker 2 -> Bob)
+    accumulates and preserves all mappings across transcript, speakers_detected, speaker_mappings,
+    and rom_data.final_rom.speaker_mappings.
+    """
+    rec = {
+        "id": "rec-multi-speaker",
+        "transcript": [
+            {"speaker": "SPEAKER_00", "speaker_label": "Speaker 1", "text": "Hello from speaker 1", "start": 0.0, "end": 10.0},
+            {"speaker": "SPEAKER_01", "speaker_label": "Speaker 2", "text": "Hello from speaker 2", "start": 10.0, "end": 20.0},
+        ],
+        "speakers_detected": ["Speaker 1", "Speaker 2"],
+        "speaker_mappings": {},
+        "rom_data": {
+            "final_rom": {
+                "participants": ["Speaker 1", "Speaker 2"],
+                "agendas": [
+                    {
+                        "title": "Agenda 1",
+                        "discussion_points": [
+                            {"speaker": "SPEAKER_00", "action_owner": "SPEAKER_00", "text": "Point 1"},
+                            {"speaker": "SPEAKER_01", "action_owner": "SPEAKER_01", "text": "Point 2"}
+                        ]
+                    }
+                ],
+                "speaker_mappings": {}
+            }
+        }
+    }
+
+    # Step 1: Train Speaker 1 -> Alice
+    from services.speaker_sync import apply_speaker_mappings_to_recording_dict
+    step1 = apply_speaker_mappings_to_recording_dict(rec, {"Speaker 1": "Alice"})
+
+    assert step1["transcript"][0]["speaker_label"] == "Alice"
+    assert step1["transcript"][1]["speaker_label"] == "Speaker 2"
+    assert "Alice" in step1["speakers_detected"]
+    assert step1["speaker_mappings"] == {"Speaker 1": "Alice"}
+    assert step1["rom_data"]["final_rom"]["speaker_mappings"] == {"Speaker 1": "Alice"}
+    assert step1["rom_data"]["final_rom"]["agendas"][0]["discussion_points"][0]["speaker"] == "Alice"
+
+    # Step 2: Train Speaker 2 -> Bob (passing only {"Speaker 2": "Bob"} incrementally)
+    step2 = apply_speaker_mappings_to_recording_dict(step1, {"Speaker 2": "Bob"})
+
+    assert step2["transcript"][0]["speaker_label"] == "Alice"
+    assert step2["transcript"][1]["speaker_label"] == "Bob"
+    assert "Alice" in step2["speakers_detected"]
+    assert "Bob" in step2["speakers_detected"]
+    assert step2["speaker_mappings"] == {"Speaker 1": "Alice", "Speaker 2": "Bob"}
+    assert step2["rom_data"]["final_rom"]["speaker_mappings"] == {"Speaker 1": "Alice", "Speaker 2": "Bob"}
+    assert step2["rom_data"]["final_rom"]["agendas"][0]["discussion_points"][0]["speaker"] == "Alice"
+    assert step2["rom_data"]["final_rom"]["agendas"][0]["discussion_points"][1]["speaker"] == "Bob"
+
+
+
 
 

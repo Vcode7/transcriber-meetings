@@ -37,12 +37,12 @@ class TestOffsetSegmentTimestamps(unittest.TestCase):
 
 
 class TestAlignmentModelCaching(unittest.TestCase):
+    @patch.dict("sys.modules", {"whisperx": MagicMock()})
     @patch("services.audio_preprocessing.detect_speech_regions")
-    @patch("whisperx.load_align_model")
     @patch("services.transcription.get_whisperx_model")
     @patch("services.transcription._resolve_device")
     @patch("services.transcription._align_segments_chunked")
-    def test_alignment_model_caching(self, mock_align_segments, mock_resolve_device, mock_get_model, mock_load_align_model, mock_detect_speech):
+    def test_alignment_model_caching(self, mock_align_segments, mock_resolve_device, mock_get_model, mock_detect_speech):
         mock_resolve_device.return_value = ("cpu", "int8")
         
         # Mock WhisperX transcription model
@@ -54,6 +54,7 @@ class TestAlignmentModelCaching(unittest.TestCase):
         mock_get_model.return_value = mock_model
         
         # Mock load_align_model returning dummy model and metadata
+        mock_load_align_model = sys.modules["whisperx"].load_align_model
         dummy_model = MagicMock()
         dummy_metadata = {"lang": "en"}
         mock_load_align_model.return_value = (dummy_model, dummy_metadata)
@@ -101,7 +102,8 @@ class MappingsMock:
 
 
 class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
-    @patch("tasks.pipeline.get_db")
+    @patch("database.get_db_context")
+    @patch("tasks.pipeline.get_db_context")
     @patch("tasks.pipeline.transcribe")
     @patch("tasks.pipeline.diarize")
     @patch("tasks.pipeline.identify_speakers")
@@ -112,12 +114,13 @@ class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
     @patch("tasks.pipeline.build_context_summary")
     @patch("services.ai_provider.get_provider")
     async def test_run_finalize_pipeline_merges_chunks(
-        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
+        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db_ctx, mock_db_ctx_base
     ):
 
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_get_db.return_value = AsyncContextManagerMock(mock_db)
+        mock_get_db_ctx.return_value = AsyncContextManagerMock(mock_db)
+        mock_db_ctx_base.return_value = AsyncContextManagerMock(mock_db)
 
         
         chunk_rows = [
@@ -199,7 +202,8 @@ class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved_transcript[1]["words"][0]["start"], 10.5)
         self.assertEqual(saved_transcript[1]["words"][1]["start"], 11.5)
 
-    @patch("tasks.pipeline.get_db")
+    @patch("database.get_db_context")
+    @patch("tasks.pipeline.get_db_context")
     @patch("tasks.pipeline.transcribe")
     @patch("tasks.pipeline.diarize")
     @patch("tasks.pipeline.identify_speakers")
@@ -210,14 +214,13 @@ class TestRunFinalizePipeline(unittest.IsolatedAsyncioTestCase):
     @patch("tasks.pipeline.build_context_summary")
     @patch("services.ai_provider.get_provider")
     async def test_run_finalize_pipeline_fallback_to_full_audio(
-        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db
+        self, mock_get_provider, mock_build_ctx, mock_gen_chunks, mock_emit, mock_gen_mom, mock_refine, mock_identify, mock_diarize, mock_transcribe, mock_get_db_ctx, mock_db_ctx_base
     ):
         mock_db = MagicMock()
 
-
-
         mock_db.commit = AsyncMock()
-        mock_get_db.return_value = AsyncContextManagerMock(mock_db)
+        mock_get_db_ctx.return_value = AsyncContextManagerMock(mock_db)
+        mock_db_ctx_base.return_value = AsyncContextManagerMock(mock_db)
 
         
         # SQL-specific database execution mocking

@@ -26,6 +26,7 @@ class UserSettings(BaseModel):
     # New Ollama specific settings
     ollama_num_ctx: int = Field(default=32768, ge=512, le=131072)
     ollama_dynamic_ctx: bool = Field(default=True)
+    ollama_think: bool = Field(default=False)
     ollama_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     ollama_top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     ollama_top_k: int = Field(default=40, ge=0)
@@ -66,8 +67,13 @@ class UserSettings(BaseModel):
     rom_global_top_k: int = Field(default=3, ge=1, le=50)
     rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
     rom_parallel_window_processing: int = Field(default=2, ge=1, le=5)
+    rom_separate_action_extraction: bool = False
 
-    max_tokens_rom_discussion: int = Field(default=2048, ge=1)
+    max_tokens_rom_discussion: int = Field(default=4096, ge=1)
+    max_tokens_rom_discussion_no_actions: int = Field(default=4096, ge=1)
+    max_tokens_rom_action_extraction: int = Field(default=2048, ge=1)
+    max_tokens_stage1_json_repair: int = Field(default=4548, ge=1)
+    max_tokens_mom_action_regen: int = Field(default=4048, ge=1)
     max_tokens_rom_polish: int = Field(default=4096, ge=1)
     max_tokens_rom_enhance_window: int = Field(default=4096, ge=1)
     max_tokens_rom_deduplicate: int = Field(default=2048, ge=1)
@@ -132,6 +138,7 @@ class UserSettingsUpdate(BaseModel):
     # New Ollama settings
     ollama_num_ctx: int | None = Field(default=None, ge=512, le=131072)
     ollama_dynamic_ctx: bool | None = None
+    ollama_think: bool | None = None
     ollama_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     ollama_top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     ollama_top_k: int | None = Field(default=None, ge=0)
@@ -172,8 +179,13 @@ class UserSettingsUpdate(BaseModel):
     rom_global_top_k: int | None = Field(default=None, ge=1, le=50)
     rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
     rom_parallel_window_processing: int | None = Field(default=None, ge=1, le=5)
+    rom_separate_action_extraction: bool | None = None
 
     max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
+    max_tokens_rom_discussion_no_actions: int | None = Field(default=None, ge=1)
+    max_tokens_rom_action_extraction: int | None = Field(default=None, ge=1)
+    max_tokens_stage1_json_repair: int | None = Field(default=None, ge=1)
+    max_tokens_mom_action_regen: int | None = Field(default=None, ge=1)
     max_tokens_rom_polish: int | None = Field(default=None, ge=1)
     max_tokens_rom_enhance_window: int | None = Field(default=None, ge=1)
     max_tokens_rom_deduplicate: int | None = Field(default=None, ge=1)

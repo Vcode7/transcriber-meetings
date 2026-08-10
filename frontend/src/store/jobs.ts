@@ -102,6 +102,9 @@ interface JobsState {
 
   /** Replace jobs list from backend reconciliation on startup */
   reconcile: (backendJobs: PersistedJob[]) => void
+
+  /** Clear all local job statuses without making backend calls */
+  clearAllLocalJobs: () => void
 }
 
 export const useJobsStore = create<JobsState>((set, get) => ({
@@ -150,6 +153,15 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       saveToStorage(next)
       return { jobs: next }
     })
+  },
+
+  clearAllLocalJobs: () => {
+    try {
+      localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      // ignore
+    }
+    set({ jobs: [] })
   },
 
   reconcile: (backendJobs) => {

@@ -2,10 +2,13 @@ import { useEffect, useState, useRef } from 'react'
 import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
   MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database, Volume2, Activity,
-  Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check
+  Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check,
+  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
+import { useJobsStore } from '../store/jobs'
+import { useProcessingStore } from '../store/processing'
 
 interface Profile {
   id: string
@@ -37,6 +40,7 @@ interface UserSettings {
   // Ollama settings
   ollama_num_ctx?: number
   ollama_dynamic_ctx?: boolean
+  ollama_think?: boolean
   ollama_temperature?: number
   ollama_top_p?: number
   ollama_top_k?: number
@@ -53,11 +57,16 @@ interface UserSettings {
   rom_global_top_k?: number
   rom_windows_per_batch?: number
   rom_parallel_window_processing?: number
+  rom_separate_action_extraction?: boolean
 
   // Whisper Settings
   whisper_batch_size?: number
 
   max_tokens_rom_discussion?: number
+  max_tokens_rom_discussion_no_actions?: number
+  max_tokens_rom_action_extraction?: number
+  max_tokens_stage1_json_repair?: number
+  max_tokens_mom_action_regen?: number
   max_tokens_rom_polish?: number
   max_tokens_rom_enhance_window?: number
   max_tokens_rom_deduplicate?: number
@@ -141,7 +150,7 @@ interface EmbeddingModelOption {
   path?: string | null
 }
 
-type SettingsTab = 'rom' | 'prompts' | 'voice' | 'llm' | 'rag' | 'audio' | 'tokens'
+type SettingsTab = 'processing' | 'rom' | 'prompts' | 'voice' | 'llm' | 'rag' | 'audio' | 'tokens'
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>('rom')
@@ -155,6 +164,71 @@ export default function SettingsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
   const [settingsSaved, setSettingsSaved] = useState(false)
+
+  // Jobs & Processing states
+  const jobs = useJobsStore((s) => s.jobs)
+  const clearAllLocalJobs = useJobsStore((s) => s.clearAllLocalJobs)
+  const reconcileJobs = useJobsStore((s) => s.reconcile)
+  const updateJobStore = useJobsStore((s) => s.updateJob)
+  const isProcessing = useProcessingStore((s) => s.isProcessing)
+  const clearProcessing = useProcessingStore((s) => s.clearProcessing)
+
+  const [refreshingJobs, setRefreshingJobs] = useState(false)
+  const [showClearConfirmModal, setShowClearConfirmModal] = useState(false)
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null)
+  const [copiedJobId, setCopiedJobId] = useState<string | null>(null)
+
+  const activeJobsList = jobs.filter((j) => j.status === 'processing' || j.status === 'pending' || j.status === 'transcript_ready')
+
+  const handleRefreshStatus = async () => {
+    setRefreshingJobs(true)
+    try {
+      const res = await api.get('/audio/jobs')
+      const backendJobs = (res.data.jobs || []).map((j: any) => ({
+        jobId: j.job_id,
+        filename: j.filename,
+        status: j.status,
+        stage: j.progress || null,
+        startedAt: j.created_at,
+        source: 'upload' as const,
+      }))
+      reconcileJobs(backendJobs)
+
+      const hasActive = backendJobs.some((j: any) => j.status === 'pending' || j.status === 'processing')
+      if (!hasActive) {
+        clearProcessing()
+      }
+      toast.success('Job statuses refreshed and synchronized with backend.')
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Failed to refresh job statuses')
+    } finally {
+      setRefreshingJobs(false)
+    }
+  }
+
+  const handleConfirmClearAllLocal = () => {
+    clearProcessing()
+    clearAllLocalJobs()
+    setShowClearConfirmModal(false)
+    toast.success('All local job statuses and processing flags cleared.')
+  }
+
+  const handleCancelJob = async (jobId: string, filename?: string) => {
+    if (!window.confirm(`Are you sure you want to cancel processing for "${filename || jobId}"?`)) {
+      return
+    }
+    setCancellingJobId(jobId)
+    try {
+      await api.post(`/audio/jobs/${jobId}/cancel`)
+      updateJobStore(jobId, { status: 'cancelled', stage: 'Cancelled by user' })
+      toast.success(`Job "${filename || jobId}" cancelled successfully.`)
+      await handleRefreshStatus()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Failed to cancel job')
+    } finally {
+      setCancellingJobId(null)
+    }
+  }
 
   // Ollama test state
   const [testingOllama, setTestingOllama] = useState(false)
@@ -490,6 +564,7 @@ export default function SettingsPage() {
           overflowX: 'auto', flexShrink: 0
         }}>
           {[
+            { id: 'processing', label: 'Processing & Active Jobs', count: activeJobsList.length > 0 ? `${activeJobsList.length} Active` : 'Idle', icon: <Activity size={14} className={activeJobsList.length > 0 ? 'spin' : ''} />, color: activeJobsList.length > 0 ? 'hsl(35,90%,50%)' : 'hsl(160,80%,45%)' },
             { id: 'rom', label: 'ROM Pipeline', count: '4 Settings', icon: <Sparkles size={14} />, color: 'hsl(280,75%,60%)' },
             { id: 'prompts', label: 'Prompt Templates', count: `${prompts.length}`, icon: <FileText size={14} />, color: 'hsl(140,70%,45%)' },
             { id: 'voice', label: 'Voice & Diarization', count: `${profiles.length} Profiles`, icon: <Mic size={14} />, color: 'hsl(205,90%,55%)' },
@@ -524,6 +599,229 @@ export default function SettingsPage() {
 
         {/* Scrollable Tab Content View */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem 2rem' }}>
+
+          {/* ⚡ TAB: PROCESSING & ACTIVE JOBS */}
+          {activeTab === 'processing' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 1000, margin: '0 auto' }}>
+
+              {/* Header Card & Control Buttons */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(160,80%,45%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.15rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{
+                      width: 38, height: 38, borderRadius: 10,
+                      background: activeJobsList.length > 0 ? 'hsl(35,90%,50%/.15)' : 'hsl(140,70%,45%/.15)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: activeJobsList.length > 0 ? 'hsl(35,90%,50%)' : 'hsl(140,70%,45%)'
+                    }}>
+                      <Activity size={20} className={activeJobsList.length > 0 ? 'spin' : ''} />
+                    </div>
+                    <div>
+                      <h3 style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        Background Processing & Job Manager
+                        {activeJobsList.length > 0 ? (
+                          <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 12, background: 'hsl(35,90%,50%/.2)', color: 'hsl(35,90%,45%)', fontWeight: 700 }}>
+                            {activeJobsList.length} Job{activeJobsList.length > 1 ? 's' : ''} Active
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: '.72rem', padding: '2px 8px', borderRadius: 12, background: 'hsl(140,70%,45%/.2)', color: 'hsl(140,70%,40%)', fontWeight: 700 }}>
+                            System Idle
+                          </span>
+                        )}
+                      </h3>
+                      <div style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+                        Monitor active background worker jobs, re-sync status with backend, or clear unresolved frontend flags.
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions Buttons */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <button
+                      onClick={handleRefreshStatus}
+                      disabled={refreshingJobs}
+                      className="btn secondary"
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.8rem', padding: '.45rem .9rem', borderRadius: 8 }}
+                      title="Poll backend for active jobs and update local status"
+                    >
+                      <RefreshCw size={14} className={refreshingJobs ? 'spin' : ''} />
+                      <span>{refreshingJobs ? 'Syncing...' : 'Refresh Status'}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowClearConfirmModal(true)}
+                      className="btn danger-outline"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, fontSize: '.8rem', padding: '.45rem .9rem', borderRadius: 8,
+                        color: 'hsl(0,80%,60%)', border: '1.5px solid hsl(0,80%,60%/.3)', background: 'hsl(0,80%,60%/.08)', cursor: 'pointer'
+                      }}
+                      title="Clear local job state and processing overlay without cancelling backend tasks"
+                    >
+                      <Trash2 size={14} />
+                      <span>Clear All Job Statuses</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* System Status Banner */}
+                <div style={{
+                  padding: '.85rem 1rem', borderRadius: 8,
+                  background: activeJobsList.length > 0 ? 'hsl(35,90%,50%/.08)' : 'hsl(140,70%,45%/.08)',
+                  border: `1px solid ${activeJobsList.length > 0 ? 'hsl(35,90%,50%/.25)' : 'hsl(140,70%,45%/.25)'}`,
+                  display: 'flex', alignItems: 'center', gap: 10, fontSize: '.82rem'
+                }}>
+                  {activeJobsList.length > 0 ? (
+                    <>
+                      <Loader2 size={16} className="spin" style={{ color: 'hsl(35,90%,50%)', flexShrink: 0 }} />
+                      <div>
+                        <strong>Active Tasks Running:</strong> {activeJobsList.map(j => `"${j.filename || j.jobId}" (${j.stage || j.status})`).join(', ')}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 size={16} style={{ color: 'hsl(140,70%,45%)', flexShrink: 0 }} />
+                      <div>
+                        <strong>No Backend Jobs Running:</strong> System is idle. If your screen is showing "Processing" anywhere, click <em>Clear All Job Statuses</em> to clear local flags.
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Detailed Active Processes List */}
+              <div style={{ borderRadius: 12, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                  <h4 style={{ fontSize: '.92rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Activity size={16} style={{ color: 'hsl(var(--accent))' }} />
+                    Active & Recent Background Processes ({jobs.length})
+                  </h4>
+                  {jobs.length > 0 && (
+                    <span style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>
+                      Re-synced with backend status APIs
+                    </span>
+                  )}
+                </div>
+
+                {jobs.length === 0 ? (
+                  <div style={{ padding: '2.5rem 1rem', textAlign: 'center', background: 'hsl(var(--muted)/.2)', borderRadius: 10, border: '1px dashed hsl(var(--border))' }}>
+                    <CheckCircle2 size={36} style={{ color: 'hsl(140,70%,45%)', margin: '0 auto .75rem' }} />
+                    <div style={{ fontSize: '.9rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>No Job History or Active Processes</div>
+                    <div style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', marginTop: 4, maxWidth: 460, margin: '4px auto 0' }}>
+                      No active processing jobs are currently registered. Start a new recording or upload media to launch background tasks.
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '.85rem' }}>
+                    {jobs.map((job) => {
+                      const isActive = job.status === 'processing' || job.status === 'pending' || job.status === 'transcript_ready'
+                      const isCancelling = cancellingJobId === job.jobId
+                      const isCopied = copiedJobId === job.jobId
+
+                      return (
+                        <div
+                          key={job.jobId}
+                          style={{
+                            padding: '1rem 1.15rem', borderRadius: 10,
+                            background: isActive ? 'hsl(var(--card))' : 'hsl(var(--muted)/.2)',
+                            border: isActive ? '1.5px solid hsl(var(--accent)/.3)' : '1px solid hsl(var(--border)/.5)',
+                            display: 'flex', flexDirection: 'column', gap: '.65rem',
+                            transition: 'all .15s ease'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '.5rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{
+                                fontSize: '.68rem', fontWeight: 800, padding: '2px 8px', borderRadius: 6,
+                                background: job.source === 'record' ? 'hsl(0,85%,60%/.15)' : job.source === 'tab-audio' ? 'hsl(280,75%,60%/.15)' : 'hsl(205,90%,55%/.15)',
+                                color: job.source === 'record' ? 'hsl(0,85%,55%)' : job.source === 'tab-audio' ? 'hsl(280,75%,60%)' : 'hsl(205,90%,55%)',
+                                textTransform: 'uppercase', letterSpacing: '.5px'
+                              }}>
+                                {job.source}
+                              </span>
+
+                              <span style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                                {job.filename || 'Recording Session'}
+                              </span>
+
+                              {/* Job ID Copy Pill */}
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(job.jobId)
+                                  setCopiedJobId(job.jobId)
+                                  setTimeout(() => setCopiedJobId(null), 1500)
+                                }}
+                                style={{
+                                  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 6px',
+                                  borderRadius: 4, background: 'hsl(var(--muted)/.5)', border: 'none',
+                                  fontSize: '.7rem', fontFamily: 'monospace', color: 'hsl(var(--pencil))', cursor: 'pointer'
+                                }}
+                                title="Click to copy full Job ID"
+                              >
+                                {isCopied ? <Check size={10} color="hsl(140,70%,45%)" /> : <Copy size={10} />}
+                                {job.jobId.slice(0, 8)}...
+                              </button>
+                            </div>
+
+                            {/* Status Pill & Cancel Action */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{
+                                fontSize: '.72rem', fontWeight: 700, padding: '3px 10px', borderRadius: 12,
+                                display: 'inline-flex', alignItems: 'center', gap: 5,
+                                background: job.status === 'processing' ? 'hsl(205,90%,55%/.18)' :
+                                            job.status === 'pending' ? 'hsl(35,90%,50%/.18)' :
+                                            job.status === 'transcript_ready' ? 'hsl(180,80%,40%/.18)' :
+                                            job.status === 'done' ? 'hsl(140,70%,45%/.18)' : 'hsl(0,80%,60%/.18)',
+                                color: job.status === 'processing' ? 'hsl(205,90%,50%)' :
+                                       job.status === 'pending' ? 'hsl(35,90%,45%)' :
+                                       job.status === 'transcript_ready' ? 'hsl(180,80%,35%)' :
+                                       job.status === 'done' ? 'hsl(140,70%,40%)' : 'hsl(0,80%,55%)'
+                              }}>
+                                {job.status === 'processing' && <Loader2 size={12} className="spin" />}
+                                {job.status === 'done' && <CheckCircle2 size={12} />}
+                                {job.status === 'cancelled' && <XCircle size={12} />}
+                                {job.status.toUpperCase()}
+                              </span>
+
+                              {isActive && (
+                                <button
+                                  onClick={() => handleCancelJob(job.jobId, job.filename)}
+                                  disabled={isCancelling}
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                                    padding: '3px 9px', borderRadius: 6, fontSize: '.74rem', fontWeight: 600,
+                                    color: 'hsl(0,80%,60%)', background: 'hsl(0,80%,60%/.1)',
+                                    border: '1px solid hsl(0,80%,60%/.3)', cursor: 'pointer',
+                                    transition: 'all .15s ease'
+                                  }}
+                                  title="Cancel and terminate this backend job"
+                                >
+                                  {isCancelling ? <Loader2 size={11} className="spin" /> : <XCircle size={11} />}
+                                  {isCancelling ? 'Cancelling...' : 'Cancel Job'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Stage / Progress Detail Line */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '.78rem', color: 'hsl(var(--pencil))' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <Activity size={13} style={{ color: 'hsl(var(--accent))' }} />
+                              <span>Current Stage: <strong style={{ color: 'hsl(var(--ink))' }}>{job.stage || job.status}</strong></span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <Clock size={12} />
+                              <span>Started: {job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : 'N/A'}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+            </div>
+          )}
 
           {/* 🚀 TAB: ROM PIPELINE */}
           {activeTab === 'rom' && (
@@ -578,6 +876,38 @@ export default function SettingsPage() {
                     />
                   </div>
                 )}
+
+                {/* Separate Action Extraction Toggle */}
+                {settings && (
+                  <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(280,75%,60%/.2)', background: 'hsl(280,75%,60%/.04)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1.5rem' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 3 }}>Use Separate Action Point Extraction (Stage 1)</div>
+                      <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5 }}>
+                        When enabled, Stage 1 runs two parallel LLM calls per window: one focused exclusively on discussion points and one dedicated to extracting rich, self-contained action items. Action items are attached to the first discussion point in each window. Disable to use the standard single-call extraction (default).
+                      </div>
+                    </div>
+                    <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>{settings.rom_separate_action_extraction ? 'Enabled' : 'Disabled'}</span>
+                      <button
+                        onClick={() => setSettings({ ...settings, rom_separate_action_extraction: !settings.rom_separate_action_extraction })}
+                        style={{
+                          width: 44, height: 24, borderRadius: 12,
+                          background: settings.rom_separate_action_extraction ? 'hsl(280,75%,60%)' : 'hsl(var(--muted))',
+                          border: 'none', cursor: 'pointer', position: 'relative', transition: 'background .2s',
+                          flexShrink: 0
+                        }}
+                        aria-label="Toggle Separate Action Point Extraction"
+                      >
+                        <span style={{
+                          position: 'absolute', top: 3,
+                          left: settings.rom_separate_action_extraction ? 23 : 3,
+                          width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                          transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.25)'
+                        }} />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* ROM Max Tokens */}
@@ -588,6 +918,9 @@ export default function SettingsPage() {
                 {settings && (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '.85rem' }}>
                     <TokenInput label="Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
+                    <TokenInput label="Stage 1 Discussion Only (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
+                    <TokenInput label="Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
+                    <TokenInput label="Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 4548} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
                     <TokenInput label="Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
                     <TokenInput label="Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
                     <TokenInput label="Stage 2 Deduplication" val={settings.max_tokens_rom_deduplicate ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_deduplicate: v })} />
@@ -920,6 +1253,7 @@ export default function SettingsPage() {
                   <h4 style={{ fontSize: '.86rem', fontWeight: 700, marginBottom: '.85rem', color: 'hsl(var(--ink))' }}>Ollama Generation Hyperparameters</h4>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
                     <SettingToggle label="Dynamic Context Allocation" checked={settings.ollama_dynamic_ctx ?? true} onChange={v => setSettings({ ...settings, ollama_dynamic_ctx: v })} />
+                    <SettingToggle label="Model Thinking / Reasoning (think mode)" checked={settings.ollama_think ?? false} onChange={v => setSettings({ ...settings, ollama_think: v })} />
                     <SettingCard title="Context Window (Num Ctx)" description="Maximum context tokens passed to Ollama (default: 32768)." value={settings.ollama_num_ctx ?? 32768} min={512} max={131072} step={1024} onChange={v => setSettings({ ...settings, ollama_num_ctx: Math.round(v) })} />
                     <SettingCard title="Temperature" description="Sampling temperature (0.0 = deterministic)." value={settings.ollama_temperature ?? 0.0} min={0.0} max={2.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_temperature: v })} />
                     <SettingCard title="Top-P" description="Nucleus sampling threshold (0.0–1.0)." value={settings.ollama_top_p ?? 0.9} min={0.0} max={1.0} step={0.05} onChange={v => setSettings({ ...settings, ollama_top_p: v })} />
@@ -1076,6 +1410,7 @@ export default function SettingsPage() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '.85rem' }}>
                   <TokenInput label="MoM Final Generation" val={settings.max_tokens_mom ?? 1500} onChange={v => setSettings({ ...settings, max_tokens_mom: v })} />
+                  <TokenInput label="View MoM Action Point Regeneration" val={settings.max_tokens_mom_action_regen ?? 4048} onChange={v => setSettings({ ...settings, max_tokens_mom_action_regen: v })} />
                   <TokenInput label="MoM Section Merge" val={settings.max_tokens_mom_merge ?? 3072} onChange={v => setSettings({ ...settings, max_tokens_mom_merge: v })} />
                   <TokenInput label="Raw MoM → Final MoM" val={settings.max_tokens_raw_mom_to_mom ?? 3000} onChange={v => setSettings({ ...settings, max_tokens_raw_mom_to_mom: v })} />
                   <TokenInput label="Raw MoM Extraction" val={settings.max_tokens_raw_mom_extraction ?? 1024} onChange={v => setSettings({ ...settings, max_tokens_raw_mom_extraction: v })} />
@@ -1087,6 +1422,13 @@ export default function SettingsPage() {
                   <TokenInput label="Key Decisions" val={settings.max_tokens_key_decisions ?? 1028} onChange={v => setSettings({ ...settings, max_tokens_key_decisions: v })} />
                   <TokenInput label="Collection Chat Response" val={settings.max_tokens_collection_chat ?? 1500} onChange={v => setSettings({ ...settings, max_tokens_collection_chat: v })} />
                   <TokenInput label="Vocab Extractor" val={settings.max_tokens_vocab_extractor ?? 512} onChange={v => setSettings({ ...settings, max_tokens_vocab_extractor: v })} />
+                  <TokenInput label="ROM Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
+                  <TokenInput label="ROM Stage 1 Discussion (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
+                  <TokenInput label="ROM Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
+                  <TokenInput label="ROM Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 4548} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
+                  <TokenInput label="ROM Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
+                  <TokenInput label="ROM Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
+                  <TokenInput label="ROM Stage 2 Deduplication" val={settings.max_tokens_rom_deduplicate ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_deduplicate: v })} />
                 </div>
               </div>
             </div>
@@ -1094,6 +1436,73 @@ export default function SettingsPage() {
 
         </div>
       </div>
+
+      {/* ── Confirmation Modal for Clear All Job Statuses ── */}
+      {showClearConfirmModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0, 0, 0, 0.65)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem'
+        }}>
+          <div style={{
+            background: 'hsl(var(--card))', borderRadius: 14,
+            border: '1.5px solid hsl(var(--border))', maxWidth: 480, width: '100%',
+            padding: '1.5rem', boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+            display: 'flex', flexDirection: 'column', gap: '1.15rem',
+            animation: 'scaleUp 0.15s ease-out'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{
+                width: 40, height: 40, borderRadius: 10,
+                background: 'hsl(35,90%,50%/.15)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'hsl(35,90%,50%)', flexShrink: 0
+              }}>
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: 'hsl(var(--ink))' }}>
+                  Clear All Local Job Statuses?
+                </h3>
+                <div style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))' }}>
+                  Frontend-only recovery action
+                </div>
+              </div>
+            </div>
+
+            <div style={{
+              fontSize: '.82rem', lineHeight: '1.45', color: 'hsl(var(--ink))',
+              background: 'hsl(var(--muted)/.4)', padding: '.9rem 1rem', borderRadius: 8,
+              border: '1px solid hsl(var(--border)/.6)'
+            }}>
+              This action will clear all locally stored job states, progress counters, active processing flags, and cached job data in your browser.
+              <br /><br />
+              <strong style={{ color: 'hsl(var(--accent))' }}>Note:</strong> This will <em>not</em> cancel any actual backend tasks running on the server or modify database records. Use this to recover if your UI is stuck showing "Processing" when no job is actually running.
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => setShowClearConfirmModal(false)}
+                className="btn secondary"
+                style={{ fontSize: '.82rem', padding: '.5rem 1rem', borderRadius: 8 }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmClearAllLocal}
+                className="btn danger"
+                style={{
+                  fontSize: '.82rem', padding: '.5rem 1rem', borderRadius: 8,
+                  background: 'hsl(0,80%,55%)', color: '#fff', border: 'none', cursor: 'pointer',
+                  fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6
+                }}
+              >
+                <Trash2 size={14} />
+                Confirm Clear All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

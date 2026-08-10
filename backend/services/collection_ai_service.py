@@ -707,6 +707,8 @@ def _stream_ollama(
 
     selected_num_ctx = calculated_num_ctx if dynamic_enabled else manual_num_ctx
 
+    think_enabled = bool(cfg.get("ollama_think", False))
+
     # Prepare options payload with validation defaults
     options = {
         "num_predict": max_new_tokens,
@@ -715,6 +717,7 @@ def _stream_ollama(
         "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
         "top_p": float(cfg["ollama_top_p"]),
         "top_k": int(cfg["ollama_top_k"]),
+        "think": think_enabled,
     }
     if cfg["ollama_seed"] is not None and cfg["ollama_seed"] >= 0:
         options["seed"] = int(cfg["ollama_seed"])
@@ -737,6 +740,7 @@ def _stream_ollama(
             {"role": "user", "content": prompt},
         ],
         "options": options,
+        "think": think_enabled,
         "stream": True,
     }
     if cfg["ollama_keep_alive"] is not None:
@@ -753,6 +757,7 @@ def _stream_ollama(
         f"  - Model: {model}\n"
         f"  - Server URL: {server_url}\n"
         f"  - Dynamic Context Window: {'ENABLED (ON)' if dynamic_enabled else 'DISABLED (OFF)'}\n"
+        f"  - Thinking Mode (think): {'ENABLED (ON)' if think_enabled else 'DISABLED (OFF)'}\n"
         f"  - Estimated Input Tokens: {est_input_tokens}\n"
         f"  - Max Output Tokens (num_predict): {max_new_tokens}\n"
         f"  - Selected num_ctx: {selected_num_ctx} (calculated: {calculated_num_ctx}, manual setting: {manual_num_ctx})\n"

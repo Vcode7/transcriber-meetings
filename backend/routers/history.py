@@ -16,7 +16,7 @@ from services.llm import (
     generate_action_items,
     build_context_summary,
 )
-from config import settings
+from config import settings, RUNTIME_DIR
 from tasks.pipeline import _filter_high_confidence_segments, _raw_text_hash
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ async def stream_audio(recording_id: str, current_user: dict = Depends(get_curre
             target_path = candidate
         else:
             # Fallback search in user's upload directory
-            upload_candidate = settings.UPLOAD_DIR / user_id / target_path.name
+            upload_candidate = Path(settings.UPLOAD_DIR) / user_id / target_path.name
             if upload_candidate.exists():
                 target_path = upload_candidate
 
@@ -744,42 +744,38 @@ async def rerun_recording_pipeline(
     logger.info(f"[HistoryRerun] Rerunning pipeline for recording={recording_id} (source_type={source_type}, duration={duration:.1f}s)")
 
     if source_type == "video":
+        import os
+        from routers.video_router import _run_synchronized_video_pipeline
+        from services.video_processing_service import is_supported_video, extract_audio_from_video
+
+        video_path = file_path
         wav_path = file_path
-        from services.video_processing_service import is_supported_video, extract_audio_from_video, extract_video_ocr_timeline
+
         if is_supported_video(file_path):
-            try:
-                wav_path = extract_audio_from_video(file_path)
-            except Exception as ve:
-                logger.warning(f"[HistoryRerun] Audio extraction from video failed: {ve}")
+            base = file_path.rsplit(".", 1)[0]
+            candidate_wav = base + "_audio.wav"
+            if os.path.exists(candidate_wav):
+                wav_path = candidate_wav
+            else:
+                try:
+                    wav_path = extract_audio_from_video(file_path, candidate_wav)
+                except Exception as ve:
+                    logger.warning(f"[HistoryRerun] Audio extraction from video failed: {ve}")
+                    wav_path = file_path
 
-        async def _run_video_pipeline():
-            try:
-                ocr_task = _asyncio.create_task(extract_video_ocr_timeline(recording_id, file_path))
-                if duration > UPLOAD_CHUNK_THRESHOLD_SEC:
-                    await run_upload_chunk_pipeline(
-                        recording_id=recording_id,
-                        file_path=wav_path,
-                        user_id=user_id,
-                        meeting_prompt=meeting_prompt,
-                        participant_voice_ids=participant_voice_ids,
-                        use_vocabulary=use_vocabulary,
-                        speaker_summary=speaker_summary,
-                    )
-                else:
-                    await run_pipeline(
-                        recording_id=recording_id,
-                        file_path=wav_path,
-                        user_id=user_id,
-                        meeting_prompt=meeting_prompt,
-                        participant_voice_ids=participant_voice_ids,
-                        use_vocabulary=use_vocabulary,
-                        speaker_summary=speaker_summary,
-                    )
-                await ocr_task
-            except Exception as e:
-                logger.error(f"[HistoryRerun] Video pipeline failed for {recording_id}: {e}", exc_info=True)
-
-        task = _asyncio.create_task(_run_video_pipeline())
+        task = _asyncio.create_task(
+            _run_synchronized_video_pipeline(
+                recording_id=recording_id,
+                video_path=video_path,
+                wav_path=wav_path,
+                user_id=user_id,
+                duration=duration,
+                meeting_prompt=meeting_prompt,
+                participant_voice_ids=participant_voice_ids,
+                use_vocabulary=use_vocabulary,
+                speaker_summary=speaker_summary,
+            )
+        )
     elif duration > UPLOAD_CHUNK_THRESHOLD_SEC:
         task = _asyncio.create_task(
             run_upload_chunk_pipeline(

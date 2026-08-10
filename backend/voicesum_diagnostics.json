@@ -1,5 +1,5 @@
 {
-  "timestamp": 1785703357.454733,
+  "timestamp": 1786003792.4119906,
   "status": {
     "system": {
       "os": "Windows 11 (10.0.26200)",
@@ -8,22 +8,22 @@
       "cpu_cores_logical": 12,
       "cpu_cores_physical": 8,
       "ram_total": 16788930560,
-      "ram_used": 14790119424,
-      "ram_percent": 88.1,
-      "process_ram": 926990336,
+      "ram_used": 14670950400,
+      "ram_percent": 87.4,
+      "process_ram": 512045056,
       "process_cpu": 0.0,
-      "uptime": 8.878249883651733
+      "uptime": 8.813435077667236
     },
     "gpu": {
-      "cuda_available": true,
-      "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+      "cuda_available": false,
+      "name": "",
       "utilization": 0.0,
-      "memory_used": 79.0,
-      "memory_total": 6141.0,
-      "memory_free": 5843.0,
-      "temperature": 56.0,
-      "power_draw": 10.93,
-      "driver_version": "571.96",
+      "memory_used": 0.0,
+      "memory_total": 0.0,
+      "memory_free": 0.0,
+      "temperature": 0.0,
+      "power_draw": 0.0,
+      "driver_version": "",
       "cuda_version": ""
     },
     "models": [
@@ -84,33 +84,33 @@
         "files": 62
       },
       "uploads": {
-        "size": 3646335995,
-        "files": 172
+        "size": 3658863575,
+        "files": 186
       },
       "vector_store": {
-        "size": 848270,
-        "files": 24
+        "size": 848470,
+        "files": 28
       },
       "database": {
-        "size": 67084288,
+        "size": 67518464,
         "files": 1
       },
       "logs": {
-        "size": 6940267,
+        "size": 7618236,
         "files": 1
       }
     },
     "database": {
       "path": "E:\\projects\\Transcriber-meeting-initial\\backend\\voicesum.db",
-      "size": 67084288,
+      "size": 67518464,
       "tables": {
         "users": 1,
-        "sessions": 108,
-        "login_attempts": 109,
-        "voice_profiles": 6,
-        "recordings": 97,
+        "sessions": 113,
+        "login_attempts": 114,
+        "voice_profiles": 10,
+        "recordings": 98,
         "recording_attachments": 7,
-        "global_context_documents": 31,
+        "global_context_documents": 35,
         "dictionary": 0
       }
     },
@@ -121,16 +121,16 @@
         "size": 100
       },
       "meeting_context": {
-        "count": 6,
-        "vectors": 39,
-        "size": 242080
+        "count": 8,
+        "vectors": 43,
+        "size": 242280
       },
       "transcript": {
         "count": 5,
         "vectors": 59,
         "size": 606090
       },
-      "total_size": 848270
+      "total_size": 848470
     },
     "performance": {
       "avg_total": 0.0,
@@ -142,6 +142,12 @@
       "count": 0
     },
     "activity": [
+      {
+        "id": "d6bcd268-5e96-4d19-a413-b773e4eae5c4",
+        "filename": "5min-demo.wav",
+        "status": "done",
+        "timestamp": "2026-08-04T03:48:59.253112+00:00"
+      },
       {
         "id": "3e9a299d-5bf6-4fc2-b120-5fdfc6e1f1e2",
         "filename": "output.wav",
@@ -195,12 +201,6 @@
         "filename": "IEEE Conference Paper Presentation - Machine Learning Track.mp4",
         "status": "cancelled",
         "timestamp": "2026-07-28T03:26:55.021201+00:00"
-      },
-      {
-        "id": "d59caaf3-e549-4276-a446-2380cc010d9a",
-        "filename": "PowerPoint Trick to make a stunning slide for your next presentation \u2728 #powerpoint #presentation [HT1PkEV_MRQ].mp4",
-        "status": "done",
-        "timestamp": "2026-07-28T03:16:51.233477+00:00"
       }
     ],
     "config": {
@@ -219,74 +219,92 @@
       "audio_preprocess": true,
       "offline_mode": true
     },
-    "asyncio_tasks": 3
+    "asyncio_tasks": 4
   },
   "recent_logs": [
     {
-      "timestamp": "2026-08-03 02:12:29,250",
-      "name": "services.audio_preprocessing",
-      "level": "WARNING",
-      "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
-    },
-    {
-      "timestamp": "2026-08-03 02:12:30,131",
-      "name": "services.audio_preprocessing",
-      "level": "WARNING",
-      "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
-    },
-    {
-      "timestamp": "2026-08-03 02:12:30,590",
-      "name": "asyncio",
-      "level": "WARNING",
-      "message": "Executing <Task pending name='Task-52' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.125 seconds"
-    },
-    {
-      "timestamp": "2026-08-03 02:12:31,415",
+      "timestamp": "2026-08-06 13:39:48,599",
       "name": "tasks.pipeline",
       "level": "WARNING",
-      "message": "[Pipeline] rec_id \u2014 Failed to store context_summary (non-fatal): (sqlite3.ProgrammingError) Error binding parameter 1: type 'MagicMock' is not supported\n[SQL: UPDATE recordings SET context_summary = ?, context_summary_hash = ? WHERE id = ?]\n[parameters: (<MagicMock name='build_context_summary()' id='2798720184304'>, '6cbe402e54659d914edd7f1610e1ee2a', 'rec_id')]\n(Background on this error at: https://sqlalche.me/e/20/f405)"
+      "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
     },
     {
-      "timestamp": "2026-08-03 02:12:31,498",
+      "timestamp": "2026-08-06 13:39:48,744",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[Pipeline] rec_id \u2014 Failed to store context_summary (non-fatal): (sqlite3.ProgrammingError) Error binding parameter 1: type 'MagicMock' is not supported\n[SQL: UPDATE recordings SET context_summary = ?, context_summary_hash = ? WHERE id = ?]\n[parameters: (<MagicMock name='build_context_summary()' id='2014014928944'>, '6cbe402e54659d914edd7f1610e1ee2a', 'rec_id')]\n(Background on this error at: https://sqlalche.me/e/20/f405)"
+    },
+    {
+      "timestamp": "2026-08-06 13:39:48,778",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
     },
     {
-      "timestamp": "2026-08-03 02:12:31,966",
+      "timestamp": "2026-08-06 13:39:48,962",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-52' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.469 seconds"
+      "message": "Executing <Task pending name='Task-14' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.188 seconds"
     },
     {
-      "timestamp": "2026-08-03 02:12:32,335",
+      "timestamp": "2026-08-06 13:39:49,206",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-52' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.297 seconds"
+      "message": "Executing <Task pending name='Task-14' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.187 seconds"
     },
     {
-      "timestamp": "2026-08-03 02:12:33,023",
+      "timestamp": "2026-08-06 13:39:49,633",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-52' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> exception=AssertionError('unexpectedly None') created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.625 seconds"
+      "message": "Executing <Task finished name='Task-14' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> exception=AssertionError('unexpectedly None') created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.375 seconds"
     },
     {
-      "timestamp": "2026-08-03 02:12:35,394",
+      "timestamp": "2026-08-06 13:39:50,269",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
+    },
+    {
+      "timestamp": "2026-08-06 13:39:50,432",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 Initial context summary generation failed: object supporting the buffer API required. Triggering VRAM recovery and retry..."
+    },
+    {
+      "timestamp": "2026-08-06 13:39:50,641",
       "name": "tasks.pipeline",
       "level": "ERROR",
-      "message": "[FinalPipeline] rec_id \u2014 Transcript DB save FAILED: (sqlite3.ProgrammingError) Error binding parameter 2: type 'MagicMock' is not supported\n[SQL: \n                    UPDATE recordings SET\n                        status = 'transcript_ready', progress = 'generating_mom',\n                        transcript = ?, raw_text = ?, language = ?,\n                        speakers_detected = ?\n                    WHERE id = ?\n                ]\n[parameters: ('[]', <MagicMock name='transcribe().get()' id='2798887918368'>, <MagicMock name='transcribe().get()' id='2798887918368'>, '[]', 'rec_id')]\n(Background on this error at: https://sqlalche.me/e/20/f405)\nTraceback (most recent call last):\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1969, in _exec_single_context\n    self.dialect.do_execute(\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\default.py\", line 952, in do_execute\n    cursor.execute(statement, parameters)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 183, in execute\n    self._adapt_connection._handle_exception(error)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 343, in _handle_exception\n    raise error\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 165, in execute\n    self.await_(_cursor.execute(operation, parameters))\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\util\\_concurrency_py3k.py\", line 132, in await_only\n    return current.parent.switch(awaitable)  # type: ignore[no-any-return,attr-defined] # noqa: E501\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\util\\_concurrency_py3k.py\", line 196, in greenlet_spawn\n    value = await result\n            ^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\cursor.py\", line 40, in execute\n    await self._execute(self._cursor.execute, sql, parameters)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\cursor.py\", line 32, in _execute\n    return await self._conn._execute(fn, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\core.py\", line 160, in _execute\n    return await future\n           ^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\core.py\", line 63, in _connection_worker_thread\n    result = function()\n             ^^^^^^^^^^\nsqlite3.ProgrammingError: Error binding parameter 2: type 'MagicMock' is not supported\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\tasks\\pipeline.py\", line 2095, in _run_finalize_pipeline_impl\n    await db.execute(\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\ext\\asyncio\\session.py\", line 448, in execute\n    result = await greenlet_spawn(\n             ^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\util\\_concurrency_py3k.py\", line 201, in greenlet_spawn\n    result = context.throw(*sys.exc_info())\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\orm\\session.py\", line 2373, in execute\n    return self._execute_internal(\n           ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\orm\\session.py\", line 2280, in _execute_internal\n    result = conn.execute(\n             ^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1421, in execute\n    return meth(\n           ^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\sql\\elements.py\", line 526, in _execute_on_connection\n    return connection._execute_clauseelement(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1643, in _execute_clauseelement\n    ret = self._execute_context(\n          ^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1848, in _execute_context\n    return self._exec_single_context(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1988, in _exec_single_context\n    self._handle_dbapi_exception(\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 2365, in _handle_dbapi_exception\n    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\base.py\", line 1969, in _exec_single_context\n    self.dialect.do_execute(\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\engine\\default.py\", line 952, in do_execute\n    cursor.execute(statement, parameters)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 183, in execute\n    self._adapt_connection._handle_exception(error)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 343, in _handle_exception\n    raise error\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\dialects\\sqlite\\aiosqlite.py\", line 165, in execute\n    self.await_(_cursor.execute(operation, parameters))\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\util\\_concurrency_py3k.py\", line 132, in await_only\n    return current.parent.switch(awaitable)  # type: ignore[no-any-return,attr-defined] # noqa: E501\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\sqlalchemy\\util\\_concurrency_py3k.py\", line 196, in greenlet_spawn\n    value = await result\n            ^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\cursor.py\", line 40, in execute\n    await self._execute(self._cursor.execute, sql, parameters)\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\cursor.py\", line 32, in _execute\n    return await self._conn._execute(fn, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\core.py\", line 160, in _execute\n    return await future\n           ^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\venv\\Lib\\site-packages\\aiosqlite\\core.py\", line 63, in _connection_worker_thread\n    result = function()\n             ^^^^^^^^^^\nsqlalchemy.exc.ProgrammingError: (sqlite3.ProgrammingError) Error binding parameter 2: type 'MagicMock' is not supported\n[SQL: \n                    UPDATE recordings SET\n                        status = 'transcript_ready', progress = 'generating_mom',\n                        transcript = ?, raw_text = ?, language = ?,\n                        speakers_detected = ?\n                    WHERE id = ?\n                ]\n[parameters: ('[]', <MagicMock name='transcribe().get()' id='2798887918368'>, <MagicMock name='transcribe().get()' id='2798887918368'>, '[]', 'rec_id')]\n(Background on this error at: https://sqlalche.me/e/20/f405)"
+      "message": "[GPURecovery] rec_id \u2014 Recovery for context_summary FAILED: object supporting the buffer API required\nTraceback (most recent call last):\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\tasks\\pipeline.py\", line 191, in _recover_gpu_and_run_llm\n    result = await fn_to_run()\n             ^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\tasks\\pipeline.py\", line 254, in _build_and_store_context_summary\n    current_hash = _raw_text_hash(raw_text)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\projects\\Transcriber-meeting-initial\\backend\\tasks\\pipeline.py\", line 234, in _raw_text_hash\n    return hashlib.md5((raw_text or \"\").encode(\"utf-8\", errors=\"replace\")).hexdigest()\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: object supporting the buffer API required"
     },
     {
-      "timestamp": "2026-08-03 02:12:35,669",
+      "timestamp": "2026-08-06 13:39:50,647",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-57' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.281 seconds"
+      "message": "Executing <Task pending name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.219 seconds"
     },
     {
-      "timestamp": "2026-08-03 02:12:36,376",
+      "timestamp": "2026-08-06 13:39:50,724",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
+    },
+    {
+      "timestamp": "2026-08-06 13:39:50,949",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-57' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> exception=AssertionError('True is not false') created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.672 seconds"
+      "message": "Executing <Task pending name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.219 seconds"
+    },
+    {
+      "timestamp": "2026-08-06 13:39:51,224",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.203 seconds"
+    },
+    {
+      "timestamp": "2026-08-06 13:39:51,686",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task finished name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> exception=AssertionError('True is not false') created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.390 seconds"
     }
   ]
 }

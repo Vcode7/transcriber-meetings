@@ -1,5 +1,5 @@
 {
-  "timestamp": 1785690323.772007,
+  "timestamp": 1786337515.189225,
   "status": {
     "system": {
       "os": "Windows 11 (10.0.26200)",
@@ -8,11 +8,11 @@
       "cpu_cores_logical": 12,
       "cpu_cores_physical": 8,
       "ram_total": 16788930560,
-      "ram_used": 16531832832,
-      "ram_percent": 98.5,
-      "process_ram": 505528320,
+      "ram_used": 14296674304,
+      "ram_percent": 85.2,
+      "process_ram": 502763520,
       "process_cpu": 0.0,
-      "uptime": 2.8448326587677
+      "uptime": 19.547607421875
     },
     "gpu": {
       "cuda_available": false,
@@ -84,25 +84,25 @@
         "files": 62
       },
       "uploads": {
-        "size": 3646335897,
-        "files": 170
+        "size": 3658863869,
+        "files": 192
       },
       "vector_store": {
-        "size": 848270,
-        "files": 24
+        "size": 848470,
+        "files": 28
       },
       "database": {
-        "size": 315392,
+        "size": 348160,
         "files": 1
       },
       "logs": {
-        "size": 7682,
+        "size": 86340,
         "files": 1
       }
     },
     "database": {
       "path": "E:\\projects\\Transcriber-meeting-initial\\voicesum.db",
-      "size": 315392,
+      "size": 348160,
       "tables": {
         "users": 0,
         "sessions": 0,
@@ -110,7 +110,7 @@
         "voice_profiles": 3,
         "recordings": 0,
         "recording_attachments": 0,
-        "global_context_documents": 12,
+        "global_context_documents": 22,
         "dictionary": 0
       }
     },
@@ -121,16 +121,16 @@
         "size": 100
       },
       "meeting_context": {
-        "count": 6,
-        "vectors": 39,
-        "size": 242080
+        "count": 8,
+        "vectors": 43,
+        "size": 242280
       },
       "transcript": {
         "count": 5,
         "vectors": 59,
         "size": 606090
       },
-      "total_size": 848270
+      "total_size": 848470
     },
     "performance": {
       "avg_total": 0.0,
@@ -162,64 +162,82 @@
   },
   "recent_logs": [
     {
-      "timestamp": "2026-08-02 22:35:21,870",
+      "timestamp": "2026-08-10 10:21:50,360",
+      "name": "services.rom_service",
+      "level": "WARNING",
+      "message": "[RomService] Title/Intro/Conclusion generation fallback: Expecting ':' delimiter: line 1 column 450 (char 449)"
+    },
+    {
+      "timestamp": "2026-08-10 10:21:51,600",
+      "name": "services.audio_preprocessing",
+      "level": "WARNING",
+      "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
+    },
+    {
+      "timestamp": "2026-08-10 10:21:51,611",
+      "name": "services.audio_preprocessing",
+      "level": "WARNING",
+      "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
+    },
+    {
+      "timestamp": "2026-08-10 10:21:51,927",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
     },
     {
-      "timestamp": "2026-08-02 22:35:21,890",
+      "timestamp": "2026-08-10 10:21:51,951",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
     },
     {
-      "timestamp": "2026-08-02 22:35:22,079",
+      "timestamp": "2026-08-10 10:21:52,188",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-21' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.187 seconds"
+      "message": "Executing <Task pending name='Task-14' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.234 seconds"
     },
     {
-      "timestamp": "2026-08-02 22:35:22,612",
+      "timestamp": "2026-08-10 10:21:52,867",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-21' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.531 seconds"
+      "message": "Executing <Task finished name='Task-14' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.672 seconds"
     },
     {
-      "timestamp": "2026-08-02 22:35:22,652",
+      "timestamp": "2026-08-10 10:21:52,952",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 assign_word_speakers failed (No module named 'whisperx'), using manual assignment"
     },
     {
-      "timestamp": "2026-08-02 22:35:22,655",
+      "timestamp": "2026-08-10 10:21:52,962",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 Found 2 chunks missing summaries. Triggering VRAM recovery and retry sequence..."
     },
     {
-      "timestamp": "2026-08-02 22:35:22,844",
+      "timestamp": "2026-08-10 10:21:53,376",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-26' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.188 seconds"
+      "message": "Executing <Task pending name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.422 seconds"
     },
     {
-      "timestamp": "2026-08-02 22:35:22,867",
+      "timestamp": "2026-08-10 10:21:53,409",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
     },
     {
-      "timestamp": "2026-08-02 22:35:23,039",
+      "timestamp": "2026-08-10 10:21:53,641",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-26' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.172 seconds"
+      "message": "Executing <Task pending name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.235 seconds"
     },
     {
-      "timestamp": "2026-08-02 22:35:23,570",
+      "timestamp": "2026-08-10 10:21:54,460",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-26' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.531 seconds"
+      "message": "Executing <Task finished name='Task-19' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.813 seconds"
     }
   ]
 }

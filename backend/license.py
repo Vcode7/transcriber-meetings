@@ -9,11 +9,11 @@ from datetime import date
 # ── CONFIGURATION ──────────────────────────────────────────────
 # The application is licensed until (and including) this date.
 # Beginning the following day the app will refuse to operate.
-LICENSE_EXPIRY_DATE: date = date(2026, 8, 7)
+LICENSE_EXPIRY_DATE: date = date(2026, 8, 12)
 
 # Message shown to users after expiry
 LICENSE_EXPIRED_MESSAGE: str = (
-    "This application license expired on 7 August 2026. "
+    "This application license expired on 12 August 2026. "
     "Please contact the administrator for a renewed version."
 )
 

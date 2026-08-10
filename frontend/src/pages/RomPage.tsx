@@ -57,13 +57,15 @@ const formatItemText = (item: any): string => {
   if (typeof item === 'number' || typeof item === 'boolean') return String(item)
   if (typeof item === 'object') {
     const task = item.task || item.description || item.item || item.text || item.action || item.decision || item.point
-    const owner = item.assignee || item.owner || item.assigner
+    const assignee = item.assignee || item.owner
+    const assigner = item.assigner
     const deadline = item.deadline || item.due || item.date
     const cond = item.conditions || item.condition
 
     const parts: string[] = []
     if (task) parts.push(String(task).trim())
-    if (owner) parts.push(`(Owner: ${String(owner).trim()})`)
+    if (assigner) parts.push(`(By: ${String(assigner).trim()})`)
+    if (assignee) parts.push(`(Owner: ${String(assignee).trim()})`)
     if (deadline) parts.push(`[Due: ${String(deadline).trim()}]`)
     if (cond) parts.push(`(If: ${String(cond).trim()})`)
 

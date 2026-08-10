@@ -249,11 +249,12 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
         )
         
     r = await db.execute(
-        text("SELECT rom_parallel_window_processing FROM user_settings WHERE user_id = :uid"),
+        text("SELECT rom_parallel_window_processing, rom_separate_action_extraction FROM user_settings WHERE user_id = :uid"),
         {"uid": user_id},
     )
     us_row = r.fetchone()
     parallel_concurrency = us_row[0] if us_row and us_row[0] is not None else 2
+    separate_action_extraction = bool(us_row[1]) if us_row and us_row[1] is not None else False
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -265,6 +266,7 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
             video_transcript=video_transcript,
             source_type=source_type,
             parallel_window_processing=parallel_concurrency,
+            separate_action_extraction=separate_action_extraction,
         )
     )
     
@@ -1044,9 +1046,9 @@ async def update_final_rom(recording_id: str, req: UpdateFinalRomRequest, curren
     user_id = _validate_user_id(current_user)
     final_rom = req.final_rom or {}
     spk_mappings = final_rom.get("speaker_mappings", {})
-    if isinstance(spk_mappings, dict):
+    if isinstance(spk_mappings, dict) and spk_mappings:
         from services.speaker_sync import sync_global_speaker_rename
-        await sync_global_speaker_rename(db, recording_id, user_id, spk_mappings, replace_all=True)
+        await sync_global_speaker_rename(db, recording_id, user_id, spk_mappings, replace_all=False)
     data = await _get_rom_data(recording_id, user_id, db)
     from services.rom_service import apply_speaker_mappings_to_final_rom
     data["final_rom"] = apply_speaker_mappings_to_final_rom(final_rom)
@@ -1836,12 +1838,15 @@ async def generate_mom_from_rom(
             owner_str = str(item.get("owner", "Unassigned") or "Unassigned").strip()
             deadline_str = str(item.get("deadline", "ASAP") or "ASAP").strip()
             if task_str:
-                norm_actions.append({
+                act_entry = {
                     "task": task_str,
                     "owner": owner_str,
                     "deadline": deadline_str,
                     "status": item.get("status", "open")
-                })
+                }
+                if "raw_json" in item:
+                    act_entry["raw_json"] = item["raw_json"]
+                norm_actions.append(act_entry)
         elif isinstance(item, str) and item.strip():
             norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP", "status": "open"})
 
@@ -2017,12 +2022,15 @@ async def generate_advanced_mom(
             owner_str = str(item.get("owner", "Unassigned") or "Unassigned").strip()
             deadline_str = str(item.get("deadline", "ASAP") or "ASAP").strip()
             if task_str:
-                norm_actions.append({
+                act_entry = {
                     "task": task_str,
                     "owner": owner_str,
                     "deadline": deadline_str,
                     "status": item.get("status", "open")
-                })
+                }
+                if "raw_json" in item:
+                    act_entry["raw_json"] = item["raw_json"]
+                norm_actions.append(act_entry)
         elif isinstance(item, str) and item.strip():
             norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP", "status": "open"})
 

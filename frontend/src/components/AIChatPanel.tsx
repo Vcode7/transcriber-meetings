@@ -317,15 +317,15 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
     }
   }
 
-  const handlePdf = async () => {
+  const handleDocx = async () => {
     setPdfStatus('loading')
     try {
-      const res = await api.post(`/mom/${recordingId}/pdf`, {} , { responseType: 'blob' })
-      const blob = new Blob([res.data], { type: 'application/pdf' })
+      const res = await api.post(`/mom/${recordingId}/docx`, {}, { responseType: 'blob' })
+      const blob = new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `MoM_${mom?.title?.replace(/\s+/g, '_') || 'Meeting'}.pdf`
+      a.download = `MoM_${mom?.title?.replace(/\s+/g, '_') || 'Meeting'}.docx`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
@@ -386,7 +386,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
         </button>
 
         <button
-          onClick={handlePdf}
+          onClick={handleDocx}
           disabled={pdfStatus === 'loading'}
           style={{
             display: 'inline-flex',
@@ -431,7 +431,7 @@ function MomDisplay({ mom, recordingId }: { mom: MomData; recordingId: string })
               ? 'Downloaded!'
               : pdfStatus === 'error'
               ? 'Failed'
-              : 'Download PDF'}
+              : 'Download DOCX'}
           </span>
         </button>
       </div>

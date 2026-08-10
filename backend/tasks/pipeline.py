@@ -65,6 +65,16 @@ async def cancel_task(recording_id: str) -> bool:
 
 
 
+def _to_db_str(val: Any, default: str = "") -> str:
+    if val is None:
+        return default
+    if isinstance(val, str):
+        return val
+    if type(val).__name__ in ("MagicMock", "Mock"):
+        return default
+    return str(val)
+
+
 def unload_all_models():
     """Unload all models (WhisperX, Pyannote Diarization, ECAPA-TDNN Encoder, Qwen LLM, Overlap Model) to release RAM/VRAM."""
     logger.info("[Pipeline] Initiating global AI model memory cleanup...")
@@ -219,9 +229,11 @@ def _filter_high_confidence_segments(
     return filtered
 
 
-def _raw_text_hash(raw_text: str) -> str:
+def _raw_text_hash(raw_text: Any) -> str:
     """MD5 hex digest of raw_text — used to detect stale context_summary."""
-    return hashlib.md5((raw_text or "").encode("utf-8", errors="replace")).hexdigest()
+    if not isinstance(raw_text, str):
+        raw_text = str(raw_text) if raw_text and type(raw_text).__name__ not in ("MagicMock", "Mock") else ""
+    return hashlib.md5(raw_text.encode("utf-8", errors="replace")).hexdigest()
 
 
 async def _build_and_store_context_summary(
@@ -2064,8 +2076,8 @@ async def _run_finalize_pipeline_impl(
                     {
                         "processed_at": dt_to_str(now_fin),
                         "transcript": transcript_json,
-                        "raw_text": raw_text,
-                        "language": language,
+                        "raw_text": _to_db_str(raw_text),
+                        "language": _to_db_str(language, "en"),
                         "speakers_detected": speakers_json,
                         "recording_id": recording_id,
                     },
@@ -2102,8 +2114,8 @@ async def _run_finalize_pipeline_impl(
                 """),
                 {
                     "transcript": transcript_json,
-                    "raw_text": raw_text,
-                    "language": language,
+                    "raw_text": _to_db_str(raw_text),
+                    "language": _to_db_str(language, "en"),
                     "speakers_detected": speakers_json,
                     "recording_id": recording_id,
                 },

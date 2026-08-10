@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 from unittest.mock import patch, MagicMock
 from models.settings import UserSettings, UserSettingsUpdate
 
@@ -31,7 +31,7 @@ def test_stage1_parallel_window_processing_concurrency_and_order():
     ]
 
     mock_provider = MagicMock()
-    def fake_extract(window_text, prev, video_context=None):
+    def fake_extract(window_text, prev, video_context=None, skip_action_items=False, **kwargs):
         if "Window 1" in window_text:
             return {"discussion_points": [{"discussion_point": "Point 1"}]}
         elif "Window 2" in window_text:
@@ -40,6 +40,7 @@ def test_stage1_parallel_window_processing_concurrency_and_order():
             return {"discussion_points": [{"discussion_point": "Point 3"}]}
 
     mock_provider.extract_rom_discussion_points.side_effect = fake_extract
+    mock_provider.extract_rom_action_points.return_value = {"action_items": []}
     mock_provider.extract_rom_action_items_window.return_value = {"action_extractions": []}
 
     with patch("services.ai_provider.get_provider", return_value=mock_provider):
@@ -64,7 +65,7 @@ def test_stage1_parallel_window_processing_task_failure_resilience():
     ]
 
     mock_provider = MagicMock()
-    def fake_extract(window_text, prev, video_context=None):
+    def fake_extract(window_text, prev, video_context=None, skip_action_items=False, **kwargs):
         if "causing error" in window_text:
             raise RuntimeError("LLM API Timeout Error")
         elif "Window 1" in window_text:
@@ -73,6 +74,7 @@ def test_stage1_parallel_window_processing_task_failure_resilience():
             return {"discussion_points": [{"discussion_point": "Point 3"}]}
 
     mock_provider.extract_rom_discussion_points.side_effect = fake_extract
+    mock_provider.extract_rom_action_points.return_value = {"action_items": []}
     mock_provider.extract_rom_action_items_window.return_value = {"action_extractions": []}
 
     with patch("services.ai_provider.get_provider", return_value=mock_provider):

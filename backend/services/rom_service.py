@@ -1,4 +1,5 @@
-﻿import logging
+from transformers.utils import dummy_essentia_and_librosa_and_pretty_midi_and_scipy_and_torch_objects
+import logging
 import json
 import uuid
 import re
@@ -74,6 +75,98 @@ def _format_time_hhmm(seconds: float) -> str:
         return f"{hrs:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
 
+def normalize_action_item(item: Any) -> Dict[str, Any]:
+    """
+    Normalizes an action item to a structured JSON dictionary:
+    {"assigner": str|None, "assignee": str|None, "task": str, "deadline": str|None}
+    """
+    if isinstance(item, dict):
+        raw_task = str(item.get("task") or item.get("action_point") or item.get("description") or item.get("item") or "").strip()
+        assigner = item.get("assigner")
+        assignee = item.get("assignee") or item.get("owner") or item.get("action_owner")
+        deadline = item.get("deadline") or item.get("date") or item.get("due")
+
+        VAGUE_ASSIGNEES = {
+            "my team", "our team", "you", "they", "everyone", "we", "someone", "somebody", "anybody", "team", "us"
+        }
+
+        def _clean(val):
+            if val is None:
+                return None
+            s = str(val).strip()
+            if s.lower() in ("null", "none", "n/a", "unknown", "undefined", "unassigned", ""):
+                return None
+            if s.lower() in VAGUE_ASSIGNEES:
+                return None
+            return s
+
+        return {
+            "assigner": _clean(assigner),
+            "assignee": _clean(assignee),
+            "task": raw_task,
+            "deadline": _clean(deadline),
+        }
+    elif isinstance(item, str) and item.strip():
+        return {
+            "assigner": None,
+            "assignee": None,
+            "task": item.strip(),
+            "deadline": None,
+        }
+    return {
+        "assigner": None,
+        "assignee": None,
+        "task": "",
+        "deadline": None,
+    }
+
+def format_action_point_display_text(item: Dict[str, Any]) -> str:
+    """
+    Generates displayed Action Point text from a structured JSON dict:
+    e.g. "{assigner} assigned {assignee} to complete {task} before {deadline}"
+    """
+    if not isinstance(item, dict):
+        return str(item).strip()
+
+    task = str(item.get("task") or "").strip()
+    if not task:
+        return ""
+
+    assigner = item.get("assigner")
+    assignee = item.get("assignee")
+    deadline = item.get("deadline")
+
+    if assigner and str(assigner).lower() in ("null", "none", "n/a", "unknown", "unassigned"):
+        assigner = None
+    if assignee and str(assignee).lower() in ("null", "none", "n/a", "unknown", "unassigned"):
+        assignee = None
+    if deadline and str(deadline).lower() in ("null", "none", "n/a", "unknown", "asap"):
+        deadline = None
+
+    text = task
+
+    if deadline:
+        text_lower = text.lower()
+        d_lower = str(deadline).lower()
+        if not (text_lower.endswith(f"before {d_lower}") or text_lower.endswith(f"by {d_lower}")):
+            text = f"{text} before {deadline}"
+
+    if assigner and assignee:
+        prefix = f"{assigner} assigned {assignee} to complete "
+        if not text.startswith(prefix):
+            text = f"{prefix}{text}"
+    elif assigner:
+        prefix = f"{assigner} assigned to complete "
+        if not text.startswith(prefix):
+            text = f"{prefix}{text}"
+    elif assignee:
+        prefix = f"{assignee} to complete "
+        if not text.startswith(prefix):
+            text = f"{prefix}{text}"
+
+    return text
+
+
 def _validate_user_id(user_obj: Any) -> str:
     """
     Validates and extracts a primitive string user_id from any incoming value
@@ -99,6 +192,40 @@ def _validate_user_id(user_obj: Any) -> str:
     return uid
 
 
+def _merge_action_items_into_points(discussion_points: List[Dict], action_extractions: List[Dict]) -> List[Dict]:
+    """Helper for merging action extractions into discussion points."""
+    if not discussion_points:
+        return []
+    pts = [dict(p) for p in discussion_points]
+    for p in pts:
+        p.setdefault("action_items", [])
+        p.setdefault("action_owner", None)
+    if not action_extractions:
+        return pts
+    for ext in action_extractions:
+        ref = ext.get("source_point_ref")
+        owner = ext.get("action_owner") or ext.get("assignee")
+        items = ext.get("action_items") or [ext]
+        matched_point = None
+        if ref:
+            for p in pts:
+                pt_text = str(p.get("discussion_point") or p.get("text") or "")
+                if str(p.get("id")) == str(ref) or str(p.get("window_index")) == str(ref) or (ref and str(ref).lower() in pt_text.lower()):
+                    matched_point = p
+                    break
+        if not matched_point and pts:
+            matched_point = pts[-1]
+
+        if matched_point:
+            for item in items:
+                norm = normalize_action_item(item)
+                if norm["task"]:
+                    matched_point["action_items"].append(norm)
+            if owner:
+                matched_point["action_owner"] = owner
+    return pts
+
+
 class RomService:
     def extract_discussion_points(
         self,
@@ -108,18 +235,16 @@ class RomService:
         video_transcript: Optional[List[Dict]] = None,
         source_type: str = "audio",
         parallel_window_processing: Optional[int] = None,
+        separate_action_extraction: bool = False,
     ) -> Dict:
         """Stage 1: Process transcript in sliding windows to extract discussion points.
-        
+
         Args:
-            transcript:                 List of diarized transcript segments.
-            window_minutes:             Transcript window size in minutes.
-            user_id:                    Authenticated user ID (for logging/validation).
-            video_transcript:           Optional merged OCR timeline [{start, end, text}].
-                                        When provided (source_type='video'), each window is
-                                        augmented with overlapping OCR blocks before the LLM call.
-            source_type:                'audio' or 'video'. Controls whether OCR context is injected.
-            parallel_window_processing: Max concurrent LLM window extraction calls (1..5, default 2).
+            separate_action_extraction: When True, each window runs two parallel LLM calls —
+                one for discussion points (action_items omitted) and one for action items
+                only.  The action items are then attached to the first discussion point and
+                action_owner is derived programmatically.  When False (default), the existing
+                single-call pipeline is used unchanged.
         """
         from services.ai_provider import get_provider
         from services.video_processing_service import get_overlapping_ocr_blocks
@@ -134,8 +259,6 @@ class RomService:
             
         provider = get_provider()
         
-        # 1. Parse transcript segments with start/end times
-        # 2. Create windows - group segments by time, never splitting a segment
         windows = []
         current_window = []
         current_start_time = transcript[0].get('start', 0.0)
@@ -150,13 +273,12 @@ class RomService:
             else:
                 current_window.append(segment)
                 
-        if current_window:
+        if current_window: 
             windows.append(current_window)
             
         total_windows = len(windows)
         has_video_ocr = bool(video_transcript)
 
-        # Determine parallel processing limit (default: 2, min: 1, max: 5)
         concurrency = parallel_window_processing
         if concurrency is None:
             concurrency = getattr(settings, "ROM_PARALLEL_WINDOW_PROCESSING", 2)
@@ -181,31 +303,111 @@ class RomService:
 
             window_text = ""
             for seg in window:
-                speaker = seg.get('speaker', 'Unknown')
+                # Always prefer the resolved speaker label (e.g. "Speaker 1", "John")
+                # so the LLM never receives raw Pyannote IDs like SPEAKER_00.
+                speaker = seg.get('speaker_label') or seg.get('speaker') or 'Unknown'
                 start = seg.get('start', 0.0)
                 end = seg.get('end', 0.0)
                 text = seg.get('text', '').strip()
                 window_text += f"[{start:.1f}-{end:.1f}] {speaker}: {text}\n"
 
-            # â”€â”€ Video OCR context for this window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             video_context = ""
             if has_video_ocr:
                 relevant_blocks = get_overlapping_ocr_blocks(video_transcript, w_start, w_end)
                 if relevant_blocks:
                     lines = []
                     for b in relevant_blocks:
-                        ts = f"{_format_time_hhmm(b['start'])} \u2192 {_format_time_hhmm(b['end'])}"
+                        ts = f"{_format_time_hhmm(b['start'])} -> {_format_time_hhmm(b['end'])}"
                         lines.append(f"[{ts}]\n{b['text']}")
                     video_context = "\n\n".join(lines)
-            
-            result = provider.extract_rom_discussion_points(
-                window_text,
-                None,
-                video_context=video_context,
-            )
-            points = result.get("discussion_points", [])
-            
-            # Assign UUIDs, window indices, fixed window timelines, and raw transcript text
+
+            # Format previous window transcript text as context when no previous points exist
+            prev_window_text = ""
+            if i > 0 and i - 1 < len(windows):
+                prev_win = windows[i - 1]
+                p_lines = []
+                for p_seg in prev_win:
+                    # Always prefer the resolved speaker label so the LLM never receives raw Pyannote IDs.
+                    p_spk = p_seg.get('speaker_label') or p_seg.get('speaker') or 'Unknown'
+                    p_start = p_seg.get('start', 0.0)
+                    p_end = p_seg.get('end', 0.0)
+                    p_txt = p_seg.get('text', '').strip()
+                    p_lines.append(f"[{p_start:.1f}-{p_end:.1f}] {p_spk}: {p_txt}")
+                prev_window_text = "PREVIOUS TRANSCRIPT WINDOW:\n" + "\n".join(p_lines)
+
+            if separate_action_extraction:
+                # ── Split-call path: run both LLM calls in parallel ──────────────────────
+                # Call 1: Discussion points (no action_items) via no-actions prompt variant.
+                # Call 2: Action items only via dedicated action extraction prompt.
+                # Both calls operate on the same transcript window text and video context.
+                from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+                def _call_discussion():
+                    return provider.extract_rom_discussion_points(
+                        window_text, prev_window_text or None, video_context=video_context, skip_action_items=True
+                    )
+
+                def _call_actions():
+                    return provider.extract_rom_action_points(
+                        window_text, prev_window_text or None, video_context=video_context
+                    )
+
+                with _TPE(max_workers=2) as _inner_exec:
+                    fut_disc = _inner_exec.submit(_call_discussion)
+                    fut_acts = _inner_exec.submit(_call_actions)
+
+                    # Retrieve discussion result (errors propagate to outer try/except)
+                    disc_result = fut_disc.result()
+                    points = disc_result.get("discussion_points", [])
+                    parse_error = bool(disc_result.get("parse_error"))
+                    error_reason = disc_result.get("error_reason", "")
+
+                    # Retrieve action result — failures are soft (continue with empty list)
+                    try:
+                        action_result = fut_acts.result()
+                        raw_acts = action_result.get("action_items") or []
+                        if not isinstance(raw_acts, list):
+                            raw_acts = [raw_acts]
+                        normalized_actions = [
+                            normalize_action_item(a) for a in raw_acts if normalize_action_item(a)["task"]
+                        ]
+                    except Exception as act_err:
+                        logger.warning(
+                            f"[ROM Service] Separate action extraction Call 2 failed for window {i+1}: {act_err}. "
+                            "Continuing with empty action_items."
+                        )
+                        normalized_actions = []
+
+                # Attach action items to first discussion point; clear from all others
+                for p in points:
+                    p["action_items"] = []
+                    p["action_owner"] = None
+
+                if points and normalized_actions:
+                    points[0]["action_items"] = normalized_actions
+                    points[0]["action_owner"] = normalized_actions[0].get("assignee") or None
+
+                logger.info(
+                    f"[ROM Service] Window {i+1} separate action extraction: "
+                    f"{len(normalized_actions)} action item(s) attached to first of {len(points)} discussion point(s)."
+                )
+
+            else:
+                # ── Standard single-call path — no changes ───────────────────────────────
+                result = provider.extract_rom_discussion_points(
+                    window_text, prev_window_text or None, video_context=video_context
+                )
+                points = result.get("discussion_points", [])
+                parse_error = bool(result.get("parse_error"))
+                error_reason = result.get("error_reason", "")
+
+                for p in points:
+                    raw_acts = p.get("action_items") or []
+                    if not isinstance(raw_acts, list):
+                        raw_acts = [raw_acts]
+                    p["action_items"] = [normalize_action_item(a) for a in raw_acts if normalize_action_item(a)["task"]]
+
+            # Stamp every point with window metadata (both paths)
             for p in points:
                 p["id"] = str(uuid.uuid4())
                 p["window_index"] = i
@@ -214,17 +416,34 @@ class RomService:
                 p["raw_transcript_text"] = window_text.strip()
                 p["video_transcript_context"] = video_context
 
-            return i, points
+            meta = {
+                "t_range": t_range,
+                "seg_cnt": len(window),
+                "char_cnt": len(window_text.strip()),
+                "parse_error": parse_error,
+                "error_reason": error_reason,
+            }
+            return i, points, meta
 
         window_results: Dict[int, List[Dict]] = {}
+        window_errors: Dict[int, str] = {}
+        window_meta: Dict[int, Dict] = {}
+
         try:
             if concurrency == 1 or total_windows <= 1:
                 for i, window in enumerate(windows):
                     try:
-                        idx, pts = _process_single_window((i, window))
+                        idx, pts, meta = _process_single_window((i, window))
                         window_results[idx] = pts
+                        window_meta[idx] = meta
                     except Exception as w_err:
                         logger.error(f"[ROM Service] Stage 1 Window {i+1} failed ({w_err}). Continuing with remaining tasks...", exc_info=True)
+                        window_errors[i] = str(w_err)
+                        window_meta[i] = {
+                            "t_range": f"Window {i+1}",
+                            "seg_cnt": len(window),
+                            "char_cnt": sum(len(s.get('text', '')) for s in window),
+                        }
             else:
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
                     future_to_idx = {
@@ -234,21 +453,61 @@ class RomService:
                     for future in as_completed(future_to_idx):
                         win_idx = future_to_idx[future]
                         try:
-                            idx, pts = future.result()
+                            idx, pts, meta = future.result()
                             window_results[idx] = pts
+                            window_meta[idx] = meta
                         except Exception as w_err:
                             logger.error(f"[ROM Service] Stage 1 Window {win_idx+1} failed ({w_err}). Continuing with remaining tasks...", exc_info=True)
+                            window_errors[win_idx] = str(w_err)
+                            window_meta[win_idx] = {
+                                "t_range": f"Window {win_idx+1}",
+                                "seg_cnt": len(windows[win_idx]),
+                                "char_cnt": sum(len(s.get('text', '')) for s in windows[win_idx]),
+                            }
         finally:
             provider.unload_model()
             gc.collect()
 
-        # Re-assemble points preserving original chronological window order
         all_points = []
         for i in range(total_windows):
             pts = window_results.get(i, [])
             all_points.extend(pts)
 
-        logger.info(f"[ROM Service] Stage 1 complete: {len(all_points)} discussion points extracted across {total_windows} window(s)")
+        # ── Comprehensive Stage 1 Window Log Summary ───────────────────────────
+        summary_lines = [
+            "================================================================================",
+            f"[ROM Service Stage 1 Completion Summary] Total Discussion Points Extracted: {len(all_points)} across {total_windows} window(s)",
+            "--------------------------------------------------------------------------------"
+        ]
+
+        for i in range(total_windows):
+            pts = window_results.get(i, [])
+            w_meta = window_meta.get(i, {})
+            w_err = window_errors.get(i)
+            t_range = w_meta.get("t_range", f"Window {i+1}")
+            seg_cnt = w_meta.get("seg_cnt", 0)
+            char_cnt = w_meta.get("char_cnt", 0)
+            parse_err = w_meta.get("parse_error")
+            err_reason = w_meta.get("error_reason", "")
+
+            pt_cnt = len(pts)
+            if pt_cnt > 0:
+                summary_lines.append(f"  • Window {i+1}/{total_windows} ({t_range}): {pt_cnt} discussion point(s) extracted")
+            else:
+                if w_err:
+                    cause_desc = f"[CAUSE: EXCEPTION ERROR] Processing error: {w_err}"
+                elif char_cnt == 0:
+                    cause_desc = f"[CAUSE: EMPTY CONTENT] Transcript window had no spoken text (silence / unvoiced segment)"
+                elif parse_err:
+                    cause_desc = f"[CAUSE: JSON PARSE ERROR] LLM output could not be parsed into valid JSON ({err_reason})"
+                else:
+                    cause_desc = f"[CAUSE: NO POINTS IN CONTENT] Spoken content was present ({seg_cnt} segment(s), {char_cnt} char(s)), but LLM extracted 0 points"
+
+                summary_lines.append(f"  • Window {i+1}/{total_windows} ({t_range}): 0 points -> {cause_desc}")
+
+        summary_lines.append("================================================================================")
+        logger.info("\n".join(summary_lines))
+
         return {
             "discussion_points": all_points,
             "windows_processed": len(windows)
@@ -289,7 +548,7 @@ class RomService:
         meeting_store = get_meeting_context_store(recording_id, dim)
         global_store = get_global_context_store(user_id, dim)
 
-        # â”€â”€ Build BM25 indexes lazily from the metadata sidecars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Build BM25 indexes lazily from the metadata sidecars
         def _build_bm25(store) -> Optional[BM25Index]:
             """Build a BM25 index over the FAISS store's metadata sidecar."""
             try:
@@ -306,7 +565,7 @@ class RomService:
         meeting_bm25 = _build_bm25(meeting_store)
         global_bm25 = _build_bm25(global_store)
 
-        # â”€â”€ RRF merge helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # RRF merge helper
         def _rrf_merge(
             result_lists: List[List[Dict]],
             k: int = 60,
@@ -491,7 +750,11 @@ class RomService:
                         "speakers": p.get("speakers", []),
                         "technical_terms": p.get("technical_terms", []),
                         "decisions": p.get("decisions", []),
-                        "action_items": p.get("action_items", []),
+                        "action_items": [
+                            normalize_action_item(a)
+                            for a in p.get("action_items", [])
+                            if normalize_action_item(a)["task"]
+                        ],
                     }
                     for p in window
                 ],
@@ -549,7 +812,12 @@ class RomService:
                 ep["dates"] = clean_calendar_dates(ep.get("dates", []))
                 ep.setdefault("numbers", [])
                 ep.setdefault("references", [])
-                ep.setdefault("action_items", [])
+                raw_acts = ep.get("action_items", [])
+                if not isinstance(raw_acts, list):
+                    raw_acts = [raw_acts] if raw_acts else []
+                ep["action_items"] = [
+                    normalize_action_item(a) for a in raw_acts if normalize_action_item(a)["task"]
+                ]
 
                 cur = ep.get("context_usage_report")
                 if not isinstance(cur, dict):
@@ -665,10 +933,10 @@ class RomService:
                 pts = window_results_map.get(win_idx, [])
                 polished_points.extend(pts)
 
-            # â”€â”€ Stage 2 Final Semantic Deduplication Step (â‰¥ 0.90 + LLM) â”€â”€â”€â”€
+            # ── Stage 2 Final Semantic Deduplication Step (≥ 0.95 + LLM) ────
             if len(polished_points) > 1:
                 try:
-                    logger.info("[ROM Service] Stage 2 starting final semantic deduplication check")
+                    logger.info("[ROM Service] Stage 2 starting final semantic deduplication check (similarity threshold >= 0.95)")
                     texts = [p.get("polished_text", "") for p in polished_points]
                     embeddings = embedder.encode(texts)
                     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -686,10 +954,16 @@ class RomService:
                         cluster = [i]
                         visited[i] = True
                         for j in range(i + 1, num_points):
-                            if not visited[j] and sim_matrix[i, j] >= 0.90:
+                            if not visited[j] and sim_matrix[i, j] >= 0.95:
                                 cluster.append(j)
                                 visited[j] = True
                         clusters.append(cluster)
+
+                    duplicate_clusters = [c for c in clusters if len(c) > 1]
+                    logger.info(
+                        f"[ROM Service] Stage 2 deduplication: Found {len(duplicate_clusters)} total group(s) of duplicate points "
+                        f"(similarity >= 0.95, out of {len(polished_points)} points)"
+                    )
 
                     deduped_points: List[Dict] = []
 
@@ -700,7 +974,7 @@ class RomService:
                             cluster_points = [polished_points[idx] for idx in cluster]
                             logger.info(
                                 f"[ROM Service] Deduplicating candidate cluster of {len(cluster_points)} "
-                                f"point(s) with similarity >= 0.90 via LLM"
+                                f"point(s) with similarity >= 0.95 via LLM"
                             )
 
                             cand_json = json.dumps(
@@ -1889,22 +2163,7 @@ class RomService:
             if not pt_text:
                 continue
 
-            # Derive topic title from technical_terms, project_names, or first sentence
-            topic = ""
-            if p.get("technical_terms"):
-                tt = p["technical_terms"]
-                topic = ", ".join(tt) if isinstance(tt, list) else str(tt)
-            if not topic and p.get("project_names"):
-                pn = p["project_names"]
-                topic = ", ".join(pn) if isinstance(pn, list) else str(pn)
-            if not topic:
-                first_sent = pt_text.split(".")[0].strip()
-                topic = first_sent[:70] if len(first_sent) > 5 else pt_text[:70]
-
-            # Store as a clean "Topic: Summary" string â€” no objects, no JSON
-            topic_clean = topic.strip(": ")
-            point_str = f"{topic_clean}: {pt_text}" if topic_clean and not pt_text.lower().startswith(topic_clean.lower()) else pt_text
-            points_discussed.append(point_str)
+            points_discussed.append(pt_text)
             points_text_lines.append(f"Point {idx}: {pt_text}")
 
         # 2. Directly extract action_items from each enhanced point
@@ -1914,40 +2173,41 @@ class RomService:
             if not raw_acts:
                 continue
 
-            if isinstance(raw_acts, list):
-                act_list = [str(a).strip() for a in raw_acts if str(a).strip()]
-            else:
-                act_list = [str(raw_acts).strip()]
-
-            owner = p.get("action_owner")
-            if not owner:
-                spk_list = p.get("speakers")
-                if isinstance(spk_list, list) and spk_list:
-                    owner = ", ".join(spk_list)
-                elif p.get("speaker"):
-                    owner = str(p.get("speaker"))
-                else:
-                    owner = "Unassigned"
-            elif isinstance(owner, list):
-                owner = ", ".join(str(o) for o in owner)
+            if not isinstance(raw_acts, list):
+                raw_acts = [raw_acts]
 
             dates = p.get("dates")
-            deadline = "ASAP"
+            d_fallback = None
             if dates:
                 d_str = ", ".join(dates) if isinstance(dates, list) else str(dates)
                 if d_str.strip() and d_str.strip().lower() not in ("none", "n/a", "null"):
-                    deadline = d_str.strip()
+                    d_fallback = d_str.strip()
 
-            for act_text in act_list:
-                if act_text and act_text.lower() not in ("none", "n/a", "null"):
-                    action_items.append({
-                        "task": act_text,
-                        "item": act_text,
-                        "description": act_text,
-                        "owner": str(owner).strip(),
-                        "deadline": deadline,
-                        "status": "open",
-                    })
+            for act in raw_acts:
+                act_dict = normalize_action_item(act)
+                if not act_dict["task"]:
+                    continue
+
+                displayed_task = format_action_point_display_text(act_dict)
+                assignee = act_dict.get("assignee")
+                if assignee:
+                    owner = assignee
+                elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
+                    owner = p.get("action_owner")
+                else:
+                    owner = "Unassigned"
+
+                deadline = act_dict.get("deadline") or d_fallback or "ASAP"
+
+                action_items.append({
+                    "task": displayed_task or act_dict["task"],
+                    "item": displayed_task or act_dict["task"],
+                    "description": displayed_task or act_dict["task"],
+                    "owner": str(owner).strip(),
+                    "deadline": deadline,
+                    "status": "open",
+                    "raw_json": act_dict,
+                })
 
         # 3. Generate Title, Introduction, and Conclusion using standard app generator
         overview = self.generate_mom_overview(points_text_lines, recording_meta)
@@ -2167,22 +2427,37 @@ class RomService:
         action_items = []
         if isinstance(raw_action_items, list):
             for item in raw_action_items:
-                if isinstance(item, dict):
-                    task_str = str(item.get("task") or item.get("item") or item.get("description") or "").strip()
-                    owner_str = str(item.get("owner", "Unassigned") or "Unassigned").strip()
-                    deadline_str = str(item.get("deadline", "ASAP") or "ASAP").strip()
-                    if task_str:
-                        action_items.append({
-                            "task": task_str,
-                            "owner": owner_str,
-                            "deadline": deadline_str,
-                            "status": item.get("status", "open")
-                        })
-                elif isinstance(item, str) and item.strip():
-                    action_items.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP", "status": "open"})
+                act_dict = normalize_action_item(item)
+                if act_dict["task"]:
+                    displayed_task = format_action_point_display_text(act_dict)
+                    assignee = act_dict.get("assignee")
+                    owner = assignee if assignee else "Unassigned"
+                    deadline = act_dict.get("deadline") or "ASAP"
+                    action_items.append({
+                        "task": displayed_task or act_dict["task"],
+                        "owner": str(owner).strip(),
+                        "deadline": deadline,
+                        "status": item.get("status", "open") if isinstance(item, dict) else "open",
+                        "raw_json": act_dict,
+                    })
         
         if not action_items and isinstance(existing_mom, dict):
-            action_items = existing_mom.get("action_items", [])
+            existing_actions = existing_mom.get("action_items", [])
+            if isinstance(existing_actions, list):
+                for item in existing_actions:
+                    act_dict = normalize_action_item(item)
+                    if act_dict["task"]:
+                        displayed_task = format_action_point_display_text(act_dict)
+                        assignee = act_dict.get("assignee")
+                        owner = assignee if assignee else (item.get("owner") if isinstance(item, dict) and item.get("owner") else "Unassigned")
+                        deadline = act_dict.get("deadline") or (item.get("deadline") if isinstance(item, dict) and item.get("deadline") else "ASAP")
+                        action_items.append({
+                            "task": displayed_task or act_dict["task"],
+                            "owner": str(owner).strip(),
+                            "deadline": deadline,
+                            "status": item.get("status", "open") if isinstance(item, dict) else "open",
+                            "raw_json": act_dict if "raw_json" not in item else item["raw_json"],
+                        })
 
         # Trigger existing overview generator ONLY if any checkbox was selected
         title = existing_mom.get("title") if isinstance(existing_mom, dict) else filename
