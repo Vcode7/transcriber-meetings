@@ -9,6 +9,7 @@ import api from '../api/client'
 import { renderMarkdown } from '../lib/markdown'
 import { getApiErrorDetail } from '../lib/errors'
 import { isAxiosError } from 'axios'
+import SpeakerTab from './SpeakerTab'
 
 // ── Types ─────────────────────────────────────────────────────
 interface MomData {
@@ -41,6 +42,10 @@ interface Props {
   onGenerateInsights?: (tasks: string[]) => void
   /** True while the on-demand AI insight generation is running */
   isGeneratingInsights?: boolean
+  /** Called when a segment jump is requested from the Speaker tab */
+  onScrollToSegment?: (segId: string, startTime: number) => void
+  /** Called after any Speaker-tab mutation so the parent can reload the transcript */
+  onTranscriptChanged?: () => void
 }
 
 // ── Proper Markdown renderer using the lib ───────────────────
@@ -922,10 +927,12 @@ export default function AIChatPanel({
   isGeneratingMom = false,
   onGenerateInsights,
   isGeneratingInsights = false,
+  onScrollToSegment,
+  onTranscriptChanged,
 }: Props) {
   const navigate = useNavigate()
   const [summaryTab, setSummaryTab] = useState<'short' | 'detailed' | 'speaker'>('short')
-  const [activeView, setActiveView] = useState<'mom' | 'insights'>('mom')
+  const [activeView, setActiveView] = useState<'mom' | 'insights' | 'speakers'>('mom')
   const [localMomData, setLocalMomData] = useState<MomData | null>(null)
   const [isGeneratingLocalMom, setIsGeneratingLocalMom] = useState(false)
   const [localMomError, setLocalMomError] = useState<string | null>(null)
@@ -1080,6 +1087,22 @@ export default function AIChatPanel({
               width: '6px', height: '6px', borderRadius: '50%',
               background: 'hsl(var(--success))', flexShrink: 0,
             }} />}
+          </button>
+          <button
+            onClick={() => setActiveView('speakers')}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              padding: '.55rem .75rem',
+              fontSize: '.72rem', fontWeight: 700,
+              fontFamily: 'Inter, sans-serif',
+              textTransform: 'uppercase', letterSpacing: '.07em',
+              color: activeView === 'speakers' ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+              borderBottom: activeView === 'speakers' ? '2px solid hsl(var(--accent))' : '2px solid transparent',
+              marginBottom: '-1px', transition: 'color .18s',
+              display: 'flex', alignItems: 'center', gap: '5px',
+            }}
+          >
+            <Users size={10} /> Speakers
           </button>
         </div>
       )}
@@ -1483,6 +1506,15 @@ export default function AIChatPanel({
               </>
             )}
           </>
+        )}
+
+        {/* ── Speakers Tab ── */}
+        {recordingId && activeView === 'speakers' && (
+          <SpeakerTab
+            recordingId={recordingId}
+            onScrollToSegment={onScrollToSegment ?? (() => {})}
+            onTranscriptChanged={onTranscriptChanged ?? (() => {})}
+          />
         )}
 
       </div>{/* end scroll container */}

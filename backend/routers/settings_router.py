@@ -112,8 +112,14 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "min_audio_duration_seconds": 2.0,
         "min_audio_rms_threshold": 0.003,
         "whisper_batch_size": 8,
+        "whisper_parallel_processing": 1,
+        "whisper_parallel_chunk_minutes": 10,
         "rom_parallel_window_processing": 2,
+
         "rom_separate_action_extraction": False,
+        "rom_stage2_process_all_together": False,
+        "rom_pipeline_mode": "base",
+        "missing_transcript_recovery_enabled": False,
         "max_tokens_rom_discussion": 4096,
         "max_tokens_rom_discussion_no_actions": 4096,
         "max_tokens_rom_action_extraction": 2048,
@@ -149,6 +155,9 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["enable_low_volume_recovery"] = bool(res["enable_low_volume_recovery"])
     res["enable_audio_validation"] = bool(res["enable_audio_validation"])
     res["rom_separate_action_extraction"] = bool(res.get("rom_separate_action_extraction", 0))
+    res["rom_stage2_process_all_together"] = bool(res.get("rom_stage2_process_all_together", 0))
+    res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
+    res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
 
     if res.get("embedding_model"):
         from config import settings
@@ -204,7 +213,10 @@ async def update_settings(
         patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
     if "rom_separate_action_extraction" in patch:
         patch["rom_separate_action_extraction"] = 1 if patch["rom_separate_action_extraction"] else 0
-
+    if "rom_stage2_process_all_together" in patch:
+        patch["rom_stage2_process_all_together"] = 1 if patch["rom_stage2_process_all_together"] else 0
+    if "missing_transcript_recovery_enabled" in patch:
+        patch["missing_transcript_recovery_enabled"] = 1 if patch["missing_transcript_recovery_enabled"] else 0
 
     # Sync embedding model setting with runtime config & unload existing text embedder if changed
     if "embedding_model" in patch and patch["embedding_model"]:

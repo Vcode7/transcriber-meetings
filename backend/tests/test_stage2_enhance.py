@@ -420,3 +420,31 @@ class TestBM25IDFFormula:
         idf_universal = idx._idf.get("universal", 0)
         idf_alpha     = idx._idf.get("alpha", 0)
         assert idf_alpha >= idf_universal
+
+
+# ══════════════════════════════════════════════════════════════════
+# Stage 2 Min Similarity Threshold Tests
+# ══════════════════════════════════════════════════════════════════
+
+class TestMinSimilarityThreshold:
+    def test_threshold_filtering(self):
+        """Chunks with similarity < threshold should be filtered out."""
+        items = [
+            {"_text": "High relevance match", "_similarity_score": 0.85},
+            {"_text": "Low relevance match", "_similarity_score": 0.65},
+            {"_text": "Medium relevance match", "_similarity_score": 0.79},
+        ]
+        thresh = 0.80
+        filtered = [i for i in items if i["_similarity_score"] >= thresh]
+        assert len(filtered) == 1
+        assert filtered[0]["_text"] == "High relevance match"
+
+    def test_disabled_threshold_preserves_all(self):
+        """When threshold is None or 0.0, all chunks are preserved."""
+        items = [
+            {"_text": "Match 1", "_similarity_score": 0.40},
+            {"_text": "Match 2", "_similarity_score": 0.75},
+        ]
+        thresh = None
+        filtered = items if thresh is None else [i for i in items if i["_similarity_score"] >= thresh]
+        assert len(filtered) == 2

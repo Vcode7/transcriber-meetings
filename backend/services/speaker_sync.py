@@ -346,6 +346,10 @@ def _apply_raw_id_track(rec: Dict[str, Any], raw_id_map: Dict[str, str]) -> Dict
                             pt["speakers"] = _map_list(pt.get("speakers", []), raw_id_map)
                             if "action_owner" in pt:
                                 pt["action_owner"] = _map_val(pt["action_owner"], raw_id_map)
+                            if isinstance(pt.get("action_items"), list):
+                                for act in pt["action_items"]:
+                                    if isinstance(act, dict) and act.get("assignee"):
+                                        act["assignee"] = _map_val(act["assignee"], raw_id_map)
                             for tf in ("polished_text", "text"):
                                 if isinstance(pt.get(tf), str):
                                     pt[tf] = replace_speaker_in_text(pt[tf], raw_id_map)

@@ -87,6 +87,13 @@ class TextEmbeddingService:
                 f"Please populate it with the {settings.EMBEDDING_MODEL} model files."
             )
 
+        # Ensure OCR engine is unloaded first so both models never co-exist in memory
+        try:
+            from services.ocr_engine import unload_ocr_engine
+            unload_ocr_engine()
+        except Exception:
+            pass
+
         logger.info(f"[TextEmbedding] Loading {settings.EMBEDDING_MODEL} from {model_dir}...")
 
         import os

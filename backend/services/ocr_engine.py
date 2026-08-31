@@ -64,6 +64,7 @@ def get_ocr_engine():
     Return the singleton RapidOCR engine, initialising it on first call.
 
     Thread-safe.  Returns None if RapidOCR is not available.
+    Enforces mutual exclusivity by unloading any active text embedder first.
     """
     global _OCR_ENGINE, _OCR_AVAILABLE
 
@@ -73,6 +74,13 @@ def get_ocr_engine():
     with _OCR_ENGINE_LOCK:
         if _OCR_ENGINE is not None:
             return _OCR_ENGINE
+
+        # Ensure embedding model is unloaded first so both models never co-exist in memory
+        try:
+            from services.text_embedding_service import unload_text_embedder
+            unload_text_embedder()
+        except Exception:
+            pass
 
         try:
             from rapidocr_onnxruntime import RapidOCR
@@ -109,6 +117,30 @@ def get_ocr_engine():
             )
 
     return _OCR_ENGINE
+
+
+def unload_ocr_engine() -> None:
+    """
+    Unload RapidOCR engine from memory and run garbage collection.
+    Releases ONNX Runtime sessions, PyTorch/CUDA memory, and Python references.
+    """
+    global _OCR_ENGINE, _OCR_AVAILABLE
+    with _OCR_ENGINE_LOCK:
+        if _OCR_ENGINE is not None:
+            logger.info("[OCREngine] Unloading RapidOCR engine from memory...")
+            _OCR_ENGINE = None
+            _OCR_AVAILABLE = None
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if hasattr(torch, "cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            logger.info("[OCREngine] RapidOCR engine successfully unloaded.")
+        else:
+            _OCR_AVAILABLE = None
 
 
 def is_ocr_available() -> bool:
@@ -280,14 +312,13 @@ def _ocr_np(
     img_np: np.ndarray,
     preprocess: bool = True,
     label: str = "",
+    dual_pass: bool = False,
 ) -> Tuple[str, float, int, int]:
     """
     Run OCR on a numpy array, optionally preprocessing first.
 
-    When preprocessing is enabled, tries both the preprocessed and original
-    images and returns whichever achieves higher confidence.
-
-    Returns: (clean_text, avg_confidence, word_count, char_count)
+    By default (dual_pass=False), performs a single preprocessed pass per image
+    for fast, efficient document extraction.
     """
     engine = get_ocr_engine()
     if engine is None:
@@ -304,6 +335,10 @@ def _ocr_np(
 
     if preprocess:
         prep_np = preprocess_for_ocr(img_np)
+        if not dual_pass:
+            # Single pass: preprocessed image (fast & accurate)
+            return _infer(prep_np)
+
         text_prep, conf_prep, wc_prep, cc_prep = _infer(prep_np)
         text_orig, conf_orig, wc_orig, cc_orig = _infer(img_np)
 
@@ -331,8 +366,8 @@ def ocr_image_bytes(image_bytes: bytes, *, label: str = "<bytes>") -> str:
     """
     Run OCR on in-memory image bytes. Returns cleaned text or "" on failure.
 
-    Retries once on transient failure.
-    Used by doc_extractor.py for embedded images in PDF/DOCX/PPTX.
+    Filters out small images (<60px width/height or <3600 total pixels) before OCR.
+    Runs a single RapidOCR inference pass per image for maximum performance.
     """
     if not image_bytes:
         return ""
@@ -340,14 +375,29 @@ def ocr_image_bytes(image_bytes: bytes, *, label: str = "<bytes>") -> str:
         logger.warning(f"[OCREngine] OCR engine not available — skipping {label}")
         return ""
 
+    MIN_DIM = 100
+    MIN_AREA = 10000
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img_pil:
+            w, h = img_pil.size
+            if w < MIN_DIM or h < MIN_DIM or (w * h) < MIN_AREA:
+                logger.info(f"[OCREngine] Skipping small image {label} ({w}x{h}px < {MIN_DIM}px threshold)")
+                return ""
+            img_np = np.array(img_pil.convert("RGB"))
+    except Exception as img_err:
+        logger.warning(f"[OCREngine] Could not open image bytes for {label}: {img_err}")
+        return ""
+
     for attempt in range(1, 3):
         try:
-            img_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            img_np = np.array(img_pil)
-            text, conf, wc, cc = _ocr_np(img_np, preprocess=True, label=label)
-            logger.debug(
-                f"[OCREngine] {label}: conf={conf:.2f}, words={wc}, chars={cc}"
-            )
+            text, conf, wc, cc = _ocr_np(img_np, preprocess=True, label=label, dual_pass=False)
+            if text:
+                logger.info(
+                    f"[OCREngine] {label} ({w}x{h}px): OCR complete -> conf={conf:.2f}, words={wc}, chars={cc}"
+                )
+            else:
+                logger.info(f"[OCREngine] {label} ({w}x{h}px): OCR finished -> no text detected")
             return text
         except Exception as exc:
             if attempt < 2:

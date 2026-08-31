@@ -177,6 +177,14 @@ def embed_global_context_doc(
     logger.info(f"[RAG] Embedding global context doc: {filename} (doc_id={doc_id}, rel_path={relative_path})")
 
     text = extract_text_from_file(file_path, filename)
+
+    # Immediately unload RapidOCR from memory before loading embedding model
+    try:
+        from services.ocr_engine import unload_ocr_engine
+        unload_ocr_engine()
+    except Exception:
+        pass
+
     if not text or not text.strip():
         logger.warning(f"[RAG] No text extracted from {filename} — skipping embed")
         return 0
@@ -216,12 +224,14 @@ def embed_global_context_doc(
     except Exception:
         shortcuts = []
 
+    # Preprocess text for contextual embedding while maintaining clean original text
+    contextual_texts = [c.get("embedding_context", c["text"]) for c in chunks]
     from services.dictionary_service import expand_terms_in_chunks
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
+    import numpy as np
+    embeddings = embedder.encode_batch([f"{ctx}\n{exp}" for ctx, exp in zip(contextual_texts, expanded_texts)])
 
     texts = [c["text"] for c in chunks]
-    import numpy as np
-    embeddings = embedder.encode_batch(expanded_texts)
 
     metadatas = [
         {
@@ -230,6 +240,7 @@ def embed_global_context_doc(
             "filename":      filename,
             "relative_path": relative_path or filename,
             "chunk_index":   c["chunk_index"],
+            "total_chunks":  c.get("total_chunks", len(chunks)),
             "source":        "global_context",
             "user_id":       user_id,
             # Structure metadata (from chunk_document)
@@ -242,23 +253,46 @@ def embed_global_context_doc(
             "page_number":   c.get("page_number"),
             # Semantic metadata
             "keywords":           c.get("keywords", []),
+            "technical_terms":    c.get("technical_terms", []),
             "technical_entities": c.get("technical_entities", []),
             "acronyms":           c.get("acronyms", []),
+            "dates":              c.get("dates", []),
+            "project_names":      c.get("project_names", []),
+            "entities":           c.get("entities", []),
+            "numbers":            c.get("numbers", []),
+            "important_terms":    c.get("important_terms", []),
+            "search_terms":       c.get("search_terms", []),
+            "identifiers":        c.get("identifiers", []),
+            "acronym_mappings":   str(c.get("acronym_mappings", {})),
+            "embedding_context":  c.get("embedding_context", ""),
+            "previous_chunk_index": c.get("previous_chunk_index"),
+            "next_chunk_index":     c.get("next_chunk_index"),
+            "previous_chunk_id":    c.get("previous_chunk_id"),
+            "next_chunk_id":        c.get("next_chunk_id"),
             # Document metadata
             "document_name": c.get("document_name", filename),
             "document_type": c.get("document_type"),
             "scope":         "global_context",
+            "context_type":  c.get("context_type", "global"),
         }
         for c in chunks
     ]
 
     added = store.add(texts, metadatas, embeddings=embeddings)
     logger.info(f"[RAG] Added {added} structure-aware chunks for global context doc {doc_id}")
+
+    # Immediately unload embedding model after task completes
+    try:
+        from services.text_embedding_service import unload_text_embedder
+        unload_text_embedder()
+    except Exception:
+        pass
+
     return added
 
 
 def remove_global_context_doc(doc_id: str, user_id: str) -> int:
-    """Remove all chunks for a global context document from the FAISS index."""
+    """Remove all chunks for a global context document from the ChromaDB store."""
     from services.vector_store import get_global_context_store
     dim = _get_dim()
     store = get_global_context_store(user_id, dim)
@@ -276,8 +310,8 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
 
     Reads attachments from the DB, extracts text, chunks using chunk_document()
     (which preserves logical document structure and enriches chunks with rich
-    metadata), embeds, and stores in a per-recording FAISS index.  Clears any
-    previous meeting context index first to ensure freshness.
+    metadata), embeds, and stores in a per-recording ChromaDB collection.  Clears
+    any previous meeting context data first to ensure freshness.
 
     Returns
     -------
@@ -355,11 +389,12 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         except Exception:
             shortcuts = []
 
+        contextual_texts = [c.get("embedding_context", c["text"]) for c in chunks]
         from services.dictionary_service import expand_terms_in_chunks
         expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
 
         texts = [c["text"] for c in chunks]
-        embeddings = embedder.encode_batch(expanded_texts)
+        embeddings = embedder.encode_batch([f"{ctx}\n{exp}" for ctx, exp in zip(contextual_texts, expanded_texts)])
 
         metadatas = [
             {
@@ -368,6 +403,7 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
                 "filename":     att["filename"],
                 "file_hash":    att["file_hash"],
                 "chunk_index":  c["chunk_index"],
+                "total_chunks": c.get("total_chunks", len(chunks)),
                 "source":       "meeting_context",
                 # Structure metadata (from chunk_document)
                 "block_type":   c.get("block_type", "paragraph"),
@@ -379,12 +415,27 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
                 "page_number":  c.get("page_number"),
                 # Semantic metadata
                 "keywords":           c.get("keywords", []),
+                "technical_terms":    c.get("technical_terms", []),
                 "technical_entities": c.get("technical_entities", []),
                 "acronyms":           c.get("acronyms", []),
+                "dates":              c.get("dates", []),
+                "project_names":      c.get("project_names", []),
+                "entities":           c.get("entities", []),
+                "numbers":            c.get("numbers", []),
+                "important_terms":    c.get("important_terms", []),
+                "search_terms":       c.get("search_terms", []),
+                "identifiers":        c.get("identifiers", []),
+                "acronym_mappings":   str(c.get("acronym_mappings", {})),
+                "embedding_context":  c.get("embedding_context", ""),
+                "previous_chunk_index": c.get("previous_chunk_index"),
+                "next_chunk_index":     c.get("next_chunk_index"),
+                "previous_chunk_id":    c.get("previous_chunk_id"),
+                "next_chunk_id":        c.get("next_chunk_id"),
                 # Document metadata
                 "document_name": c.get("document_name", att["filename"]),
                 "document_type": c.get("document_type"),
                 "scope":         "meeting_context",
+                "context_type":  c.get("context_type", "meeting"),
                 "meeting_id":    recording_id,
             }
             for c in chunks
@@ -394,6 +445,19 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         total_added += added
         logger.info(f"[RAG] Meeting context: added {added} structure-aware chunks from {att['filename']}")
 
+    # Immediately unload RapidOCR and Text Embedder from memory after task completes
+    try:
+        from services.ocr_engine import unload_ocr_engine
+        unload_ocr_engine()
+    except Exception:
+        pass
+
+    try:
+        from services.text_embedding_service import unload_text_embedder
+        unload_text_embedder()
+    except Exception:
+        pass
+
     logger.info(f"[RAG] Total meeting context chunks: {total_added}")
     return total_added
 
@@ -402,7 +466,7 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
 
 def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) -> int:
     """
-    Chunk and embed a meeting transcript into the per-recording transcript FAISS index.
+    Chunk and embed a meeting transcript into the per-recording transcript ChromaDB collection.
 
     If embeddings already exist (transcript_embedded=1), this is a no-op unless
     called with force=True. The caller (raw_mom_router) should check the DB flag
@@ -528,7 +592,7 @@ def retrieve_evidence_for_agenda(
     k_transcript: Optional[int] = None,
 ) -> str:
     """
-    Retrieve relevant evidence for one agenda topic from all three FAISS stores.
+    Retrieve relevant evidence for one agenda topic from all three ChromaDB stores.
 
     Priority order (reflected in output structure):
       1. Transcript — actual discussion (highest priority)

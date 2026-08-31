@@ -241,6 +241,13 @@ PROMPT_META: list[dict] = [
         "variables": ["{window_json}", "{meeting_context}", "{global_context}"],
     },
     {
+        "key": "rom_enhance_all_together",
+        "name": "Stage 2: Enhance All Points Together",
+        "category": "ROM",
+        "description": "Enhances all discussion points from a meeting together in a single call using retrieved Meeting and Global Context.",
+        "variables": ["{points_json}", "{meeting_context}", "{global_context}"],
+    },
+    {
         "key": "rom_deduplicate",
         "name": "Stage 2: Deduplicate High Similarity Points",
         "category": "ROM",
@@ -265,7 +272,7 @@ PROMPT_META: list[dict] = [
         "key": "rom_agenda_assign_batch",
         "name": "Stage 3: Batch Agenda Assignment",
         "category": "ROM",
-        "description": "Assigns each discussion point in a batch to the most appropriate candidate agenda.",
+        "description": "Assigns each discussion point in a batch directly to the most appropriate agenda from the complete agenda list.",
         "variables": ["{agenda_reference}", "{batch_json}"],
     },
     {
@@ -314,6 +321,7 @@ def _defaults() -> dict[str, str]:
         MOM_REGENERATE_ACTION_POINTS_PROMPT,
         ROM_POLISH_PROMPT,
         ROM_ENHANCE_WINDOW_PROMPT,
+        ROM_ENHANCE_ALL_TOGETHER_PROMPT,
         ROM_DEDUPLICATION_PROMPT,
         ROM_AGENDA_GENERATION_PROMPT,
         ROM_MOM_EXPANSION_PROMPT,
@@ -350,6 +358,7 @@ def _defaults() -> dict[str, str]:
         "stage1_json_repair":             STAGE1_JSON_REPAIR_PROMPT,
         "rom_polish":                     ROM_POLISH_PROMPT,
         "rom_enhance_window":             ROM_ENHANCE_WINDOW_PROMPT,
+        "rom_enhance_all_together":       ROM_ENHANCE_ALL_TOGETHER_PROMPT,
         "rom_deduplicate":                ROM_DEDUPLICATION_PROMPT,
         "rom_agenda":                     ROM_AGENDA_GENERATION_PROMPT,
         "rom_mom_expansion":              ROM_MOM_EXPANSION_PROMPT,

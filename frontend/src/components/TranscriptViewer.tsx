@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { BookOpen, Pencil, Check, X as XIcon, Play, Pause, Mic2 } from "lucide-react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { BookOpen, Pencil, Check, X as XIcon, Play, Pause, Mic2, Search, ChevronLeft, ChevronRight } from "lucide-react";
 import api from "../api/client";
 import VoiceTrainingModal from "./VoiceTrainingModal";
 
@@ -42,6 +42,8 @@ interface Props {
   audioUrl?: string;       // blob URL or HTTP URL for the audio player
   recordingId?: string;    // needed for transcript editing + voice training
   onSegmentsChange?: (segs: Segment[]) => void;
+  /** When set, the segment with this seg_id is scrolled into view and briefly highlighted */
+  highlightSegId?: string;
 }
 
 const SPEAKER_COLORS = [
@@ -249,6 +251,7 @@ export default function TranscriptViewer({
   audioUrl,
   recordingId,
   onSegmentsChange,
+  highlightSegId,
 }: Props) {
   const [segments, setSegments] = useState<Segment[]>(initialSegments);
   const [useDictExp, setUseDictExp] = useState(false);
@@ -258,8 +261,28 @@ export default function TranscriptViewer({
   const [editText, setEditText] = useState("");
   const [savingIdx, setSavingIdx] = useState<number>(-1);
   const [showTrainModal, setShowTrainModal] = useState(false);
+  // ── Find / Search ──────────────────────────────────────────────────────────
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCurrentIdx, setFindCurrentIdx] = useState(0);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const segmentRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const fetchedRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // ── Highlight flash state for Speaker Tab jump ──────────────────────────────
+  const [highlightFlashId, setHighlightFlashId] = useState<string | null>(null);
+
+  // Scroll to and briefly flash the highlighted segment
+  useEffect(() => {
+    if (!highlightSegId) return;
+    const el = document.querySelector<HTMLElement>(`[data-segid="${highlightSegId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightFlashId(highlightSegId);
+      const t = setTimeout(() => setHighlightFlashId(null), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [highlightSegId]);
 
   // Keep local segments in sync when prop changes
   useEffect(() => {
@@ -353,6 +376,103 @@ export default function TranscriptViewer({
     onSegmentsChange?.(updatedSegs);
   };
 
+  // ── Find: compute matches whenever query or segments change ───────────────
+  interface FindMatch { segIdx: number; charStart: number; charEnd: number }
+
+  const findMatches = useMemo<FindMatch[]>(() => {
+    const q = findQuery.trim();
+    if (!q) return [];
+    const qLower = q.toLowerCase();
+    const results: FindMatch[] = [];
+
+    segments.forEach((seg, segIdx) => {
+      // Build the full visible text for this segment
+      const segText = (seg.words && seg.words.length > 0)
+        ? seg.words.map(w => w.word).join(" ")
+        : seg.text;
+
+      const lower = segText.toLowerCase();
+      let cursor = 0;
+      while (cursor < lower.length) {
+        const pos = lower.indexOf(qLower, cursor);
+        if (pos === -1) break;
+        results.push({ segIdx, charStart: pos, charEnd: pos + q.length });
+        cursor = pos + q.length;
+      }
+    });
+
+    return results;
+  }, [findQuery, segments]);
+
+  // Reset current match index when query/matches change
+  useEffect(() => {
+    setFindCurrentIdx(0);
+  }, [findQuery]);
+
+  // Auto-scroll to the segment that contains the current match
+  useEffect(() => {
+    if (findMatches.length === 0) return;
+    const match = findMatches[findCurrentIdx] ?? findMatches[0];
+    const el = segmentRefs.current[match.segIdx];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [findCurrentIdx, findMatches]);
+
+  const findNext = useCallback(() => {
+    if (findMatches.length === 0) return;
+    setFindCurrentIdx(i => (i + 1) % findMatches.length);
+  }, [findMatches.length]);
+
+  const findPrev = useCallback(() => {
+    if (findMatches.length === 0) return;
+    setFindCurrentIdx(i => (i - 1 + findMatches.length) % findMatches.length);
+  }, [findMatches.length]);
+
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+    setTimeout(() => findInputRef.current?.focus(), 50);
+  }, []);
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setFindQuery("");
+    setFindCurrentIdx(0);
+  }, []);
+
+  // ── Helper: render a segment's text with find-highlights ──────────────────
+  function renderTextWithHighlights(
+    text: string,
+    segIdx: number,
+    matchesInSeg: { charStart: number; charEnd: number; globalIdx: number }[]
+  ) {
+    if (!matchesInSeg.length) return <>{text}</>;
+
+    const parts: React.ReactNode[] = [];
+    let cursor = 0;
+    matchesInSeg.forEach(({ charStart, charEnd, globalIdx }, mIdx) => {
+      if (cursor < charStart) parts.push(<span key={`p-${segIdx}-${mIdx}-pre`}>{text.slice(cursor, charStart)}</span>);
+      const isActive = globalIdx === findCurrentIdx;
+      parts.push(
+        <mark
+          key={`m-${segIdx}-${mIdx}`}
+          style={{
+            backgroundColor: isActive ? 'hsl(var(--accent))' : 'hsl(45,95%,60%/.5)',
+            color: isActive ? 'hsl(var(--accent-foreground))' : 'inherit',
+            borderRadius: '3px',
+            padding: '0 1px',
+            fontWeight: isActive ? 700 : 'inherit',
+          }}
+        >
+          {text.slice(charStart, charEnd)}
+        </mark>
+      );
+      cursor = charEnd;
+    });
+    if (cursor < text.length) parts.push(<span key={`p-${segIdx}-tail`}>{text.slice(cursor)}</span>);
+    return <>{parts}</>;
+  }
+
   const expander = useDictExp && loadedShortcuts.length > 0 ? buildExpander(loadedShortcuts) : null;
 
   if (!segments || segments.length === 0) {
@@ -395,8 +515,8 @@ export default function TranscriptViewer({
       {/* Embedded audio player */}
       {audioUrl && <EmbeddedPlayer src={audioUrl} audioRef={audioRef} />}
 
-      {/* Toolbar row: dict toggle + train button */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px", flexWrap: "wrap", gap: "6px" }}>
+      {/* Toolbar row: dict toggle + train button + find button */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: findOpen ? "0" : "8px", flexWrap: "wrap", gap: "6px" }}>
         {loadedShortcuts.length > 0 && (
           <button
             id="dict-expansion-toggle"
@@ -417,24 +537,138 @@ export default function TranscriptViewer({
         )}
         {!loadedShortcuts.length && <div />}
 
-        {recordingId && (
+        {/* Right side: Train + Find buttons */}
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          {recordingId && (
+            <button
+              id="train-voice-btn"
+              onClick={() => setShowTrainModal(true)}
+              style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: ".35rem .9rem", borderRadius: "999px",
+                border: "1.5px solid hsl(var(--accent) / .35)",
+                background: "hsl(var(--accent) / .08)",
+                color: "hsl(var(--accent))",
+                cursor: "pointer", fontSize: ".74rem", fontWeight: 700, fontFamily: "Inter, sans-serif", transition: "all .15s",
+              }}
+            >
+              <Mic2 size={11} />
+              Train Voice Samples
+            </button>
+          )}
+
+          {/* Find button */}
           <button
-            id="train-voice-btn"
-            onClick={() => setShowTrainModal(true)}
+            id="transcript-find-btn"
+            onClick={openFind}
+            title="Find in transcript (Ctrl+F)"
             style={{
-              display: "flex", alignItems: "center", gap: "6px",
-              padding: ".35rem .9rem", borderRadius: "999px",
-              border: "1.5px solid hsl(var(--accent) / .35)",
-              background: "hsl(var(--accent) / .08)",
-              color: "hsl(var(--accent))",
-              cursor: "pointer", fontSize: ".74rem", fontWeight: 700, fontFamily: "Inter, sans-serif", transition: "all .15s",
+              display: "flex", alignItems: "center", gap: "5px",
+              padding: ".35rem .8rem", borderRadius: "999px",
+              border: `1.5px solid ${findOpen ? "hsl(var(--accent) / .4)" : "hsl(var(--ink) / .15)"}`,
+              background: findOpen ? "hsl(var(--accent) / .1)" : "hsl(var(--muted) / .5)",
+              color: findOpen ? "hsl(var(--accent))" : "hsl(var(--pencil))",
+              cursor: "pointer", fontSize: ".74rem", fontWeight: 600, fontFamily: "Inter, sans-serif", transition: "all .15s",
             }}
           >
-            <Mic2 size={11} />
-            Train Voice Samples
+            <Search size={11} />
+            Find
           </button>
-        )}
+        </div>
       </div>
+
+      {/* Find bar */}
+      {findOpen && (
+        <div style={{
+          position: "sticky",
+          top: "0px",
+          zIndex: 40,
+          display: "flex", alignItems: "center", gap: "6px",
+          padding: ".45rem .75rem",
+          margin: "6px 0 8px",
+          background: "hsl(var(--card))",
+          border: "1.5px solid hsl(var(--accent) / .4)",
+          borderRadius: "10px",
+          boxShadow: "0 4px 16px rgba(0, 0, 0, 0.12)",
+        }}>
+          <Search size={13} style={{ color: "hsl(var(--accent))", flexShrink: 0 }} />
+          <input
+            ref={findInputRef}
+            id="transcript-find-input"
+            type="text"
+            placeholder="Search transcript…"
+            value={findQuery}
+            onChange={e => setFindQuery(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.shiftKey ? findPrev() : findNext(); }
+              if (e.key === 'Escape') closeFind();
+            }}
+            style={{
+              flex: 1, background: "transparent", border: "none", outline: "none",
+              fontSize: ".83rem", fontFamily: "Inter, sans-serif", color: "hsl(var(--ink))",
+              minWidth: 0,
+            }}
+          />
+
+          {/* Match counter */}
+          <span style={{
+            fontSize: ".72rem", fontWeight: 700, fontFamily: "JetBrains Mono, monospace",
+            color: findMatches.length === 0 && findQuery.trim()
+              ? "hsl(var(--destructive))"
+              : "hsl(var(--pencil))",
+            whiteSpace: "nowrap", flexShrink: 0,
+          }}>
+            {findQuery.trim()
+              ? (findMatches.length === 0
+                ? "No matches"
+                : `${findCurrentIdx + 1} of ${findMatches.length}`)
+              : ""}
+          </span>
+
+          {/* Prev */}
+          <button
+            id="transcript-find-prev"
+            onClick={findPrev}
+            disabled={findMatches.length === 0}
+            title="Previous match (Shift+Enter)"
+            style={{
+              background: "none", border: "none", cursor: findMatches.length ? "pointer" : "default",
+              color: "hsl(var(--pencil))", display: "flex", alignItems: "center", padding: "2px 4px", borderRadius: "4px",
+              opacity: findMatches.length === 0 ? 0.35 : 1, transition: "opacity .15s",
+            }}
+          >
+            <ChevronLeft size={14} />
+          </button>
+
+          {/* Next */}
+          <button
+            id="transcript-find-next"
+            onClick={findNext}
+            disabled={findMatches.length === 0}
+            title="Next match (Enter)"
+            style={{
+              background: "none", border: "none", cursor: findMatches.length ? "pointer" : "default",
+              color: "hsl(var(--pencil))", display: "flex", alignItems: "center", padding: "2px 4px", borderRadius: "4px",
+              opacity: findMatches.length === 0 ? 0.35 : 1, transition: "opacity .15s",
+            }}
+          >
+            <ChevronRight size={14} />
+          </button>
+
+          {/* Close */}
+          <button
+            id="transcript-find-close"
+            onClick={closeFind}
+            title="Close find bar (Esc)"
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "hsl(var(--pencil))", display: "flex", alignItems: "center", padding: "2px 4px", borderRadius: "4px",
+            }}
+          >
+            <XIcon size={13} />
+          </button>
+        </div>
+      )}
 
       {/* Segments */}
       {segments.map((seg, i) => {
@@ -445,9 +679,20 @@ export default function TranscriptViewer({
         const avgConf = segmentAvgConf(seg);
         const isLowConf = avgConf !== null && avgConf < LOW_CONF_THRESHOLD;
 
+        // ── Collect find-matches for this segment ────────────────────────────
+        const segMatchesRaw = findQuery.trim()
+          ? findMatches
+              .map((m, gi) => ({ ...m, globalIdx: gi }))
+              .filter(m => m.segIdx === i)
+          : [];
+
+        const isFlashing = highlightFlashId != null && seg.seg_id === highlightFlashId;
+
         return (
           <div
             key={i}
+            ref={el => { segmentRefs.current[i] = el; }}
+            data-segid={seg.seg_id || undefined}
             className="transcript-segment animate-slide-up"
             title={isLowConf
               ? `⚠ Low confidence transcription (avg ${(avgConf! * 100).toFixed(0)}% < ${(LOW_CONF_THRESHOLD * 100).toFixed(0)}%). Excluded from MoM & AI Insights.`
@@ -455,14 +700,19 @@ export default function TranscriptViewer({
             }
             style={{
               "--speaker-color": color,
+              scrollMarginTop: "60px",
               animationDelay: `${Math.min(i * 0.04, 0.5)}s`,
               animationFillMode: "both",
-              background: isLowConf
-                ? "hsl(0, 80%, 96%)"
-                : isActive ? `${color}0d` : undefined,
-              borderLeft: isActive ? `2.5px solid ${color}` : isLowConf ? "2.5px solid hsl(0,75%,65%)" : "2.5px solid transparent",
-              transition: "background .25s, border-color .25s",
-              outline: isLowConf ? "1px solid hsl(0,75%,85%)" : undefined,
+              background: isFlashing
+                ? `${color}28`
+                : isLowConf
+                  ? "hsl(0, 80%, 96%)"
+                  : isActive ? `${color}0d` : undefined,
+              borderLeft: isFlashing
+                ? `3px solid ${color}`
+                : isActive ? `2.5px solid ${color}` : isLowConf ? "2.5px solid hsl(0,75%,65%)" : "2.5px solid transparent",
+              transition: "background .4s, border-color .4s",
+              outline: isFlashing ? `2px solid ${color}50` : isLowConf ? "1px solid hsl(0,75%,85%)" : undefined,
               outlineOffset: "-1px",
             } as React.CSSProperties}
           >
@@ -608,23 +858,57 @@ export default function TranscriptViewer({
               ) : (
                 <>
                   {seg.words && seg.words.length > 0
-                    ? seg.words.map((w, wi) => {
-                        const wordText = expander ? expander(w.word) : w.word;
-                        const conf = wordConf(w);
-                        if (showConfidence) {
+                    ? (() => {
+                        // Build full word text for offset calculation
+                        const wordTexts = seg.words.map(w => expander ? expander(w.word) : w.word);
+                        let charOffset = 0;
+                        return seg.words.map((w, wi) => {
+                          const wordText = wordTexts[wi];
+                          const wordStart = charOffset;
+                          const wordEnd = charOffset + wordText.length;
+                          charOffset += wordText.length + 1; // +1 for space
+
+                          const conf = wordConf(w);
+
+                          // Find matches that overlap this word
+                          const matchesHere = segMatchesRaw.filter(
+                            m => m.charStart < wordEnd && m.charEnd > wordStart
+                          );
+
+                          let inner: React.ReactNode;
+                          if (matchesHere.length > 0) {
+                            // Map global char positions to local word positions
+                            const localMatches = matchesHere.map(m => ({
+                              charStart: Math.max(0, m.charStart - wordStart),
+                              charEnd: Math.min(wordText.length, m.charEnd - wordStart),
+                              globalIdx: m.globalIdx,
+                            }));
+                            inner = renderTextWithHighlights(wordText, i, localMatches);
+                          } else {
+                            inner = wordText;
+                          }
+
+                          if (showConfidence) {
+                            return (
+                              <span key={wi} className={wordClass(conf, wordConfLow, wordConfMid)} title={`${(conf * 100).toFixed(0)}% confidence`}>
+                                {inner}{" "}
+                              </span>
+                            );
+                          }
                           return (
-                            <span key={wi} className={wordClass(conf, wordConfLow, wordConfMid)} title={`${(conf * 100).toFixed(0)}% confidence`}>
-                              {wordText}{" "}
+                            <span key={wi} className={conf < 0.3 ? "word-underlined" : ""} title={conf < 0.3 ? `${(conf * 100).toFixed(0)}% confidence` : ""}>
+                              {inner}{" "}
                             </span>
                           );
+                        });
+                      })()
+                    : (() => {
+                        const rawText = expander ? expander(seg.text) : seg.text;
+                        if (segMatchesRaw.length > 0) {
+                          return renderTextWithHighlights(rawText, i, segMatchesRaw);
                         }
-                        return (
-                          <span key={wi} className={conf < 0.3 ? "word-underlined" : ""} title={conf < 0.3 ? `${(conf * 100).toFixed(0)}% confidence` : ""}>
-                            {wordText}{" "}
-                          </span>
-                        );
-                      })
-                    : expander ? expander(seg.text) : seg.text}
+                        return rawText;
+                      })()}
                 </>
               )}
             </div>

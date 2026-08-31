@@ -38,8 +38,8 @@ python-pptx>=0.6.21
 rapidocr-onnxruntime>=1.4.0
 pypdf>=3.0.0
 # ── RAG / Vector Store ─────────────────────────────────────────────────────
-# CPU FAISS for local vector indexing (no GPU required)
-faiss-cpu>=1.7.4
+# ChromaDB for persistent vector indexing with metadata support
+chromadb>=0.5.0
 # ── Video OCR pipeline ─────────────────────────────────────────────────────
 # Pillow for image handling
 Pillow>=10.0.0

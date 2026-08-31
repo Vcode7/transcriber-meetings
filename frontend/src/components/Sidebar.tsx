@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
-  Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video,
+  Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video, BrainCircuit,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
@@ -19,6 +19,7 @@ const NAV = [
   { to: '/dashboard/history', icon: History, label: 'History' },
   { to: '/dashboard/dictionary', icon: BookOpen, label: 'Dictionary' },
   { to: '/dashboard/global-context', icon: Database, label: 'Global Context' },
+  { to: '/dashboard/training', icon: BrainCircuit, label: 'Training' },
 ]
 const VOICE_NAV = [
   { to: '/dashboard/add-voice', icon: UserPlus, label: 'Add Voice' },

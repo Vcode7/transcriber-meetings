@@ -55,9 +55,11 @@ interface UserSettings {
   rom_transcript_window?: number
   rom_meeting_top_k?: number
   rom_global_top_k?: number
+  rom_min_similarity_threshold?: number | null
   rom_windows_per_batch?: number
   rom_parallel_window_processing?: number
   rom_separate_action_extraction?: boolean
+  rom_pipeline_mode?: string
 
   // Whisper Settings
   whisper_batch_size?: number
@@ -99,8 +101,13 @@ interface UserSettings {
   max_tokens_collection_topic_growth?: number
   max_tokens_vocab_extractor?: number
 
+  // Whisper & Parallel Pipeline Settings
+  whisper_parallel_processing?: number
+  whisper_parallel_chunk_minutes?: number
+
   // Low-Volume Speech Transcription Pipeline Enhancements
   enable_vad?: boolean
+
   enable_transcription_vad?: boolean
   enable_alignment_vad?: boolean
   enable_audio_normalization?: boolean
@@ -126,6 +133,9 @@ interface UserSettings {
   enable_audio_validation?: boolean
   min_audio_duration_seconds?: number
   min_audio_rms_threshold?: number
+
+  // Missing Transcription Recovery
+  missing_transcript_recovery_enabled?: boolean
 }
 
 interface PromptTemplate {
@@ -861,6 +871,13 @@ export default function SettingsPage() {
                       onChange={v => setSettings({ ...settings, rom_global_top_k: Math.round(v) })}
                     />
                     <SettingCard
+                      title="Stage 2 Min Similarity Threshold"
+                      description="Minimum cosine similarity threshold (0.50 - 0.98) required for context chunks. Chunks below this score are ignored."
+                      value={settings.rom_min_similarity_threshold ?? 0.80}
+                      min={0.50} max={0.98} step={0.01}
+                      onChange={v => setSettings({ ...settings, rom_min_similarity_threshold: Number(v.toFixed(2)) })}
+                    />
+                    <SettingCard
                       title="Stage 2 Points per Enhancement Window"
                       description="Number of discussion points grouped into one enhancement window LLM call."
                       value={settings.rom_windows_per_batch ?? 5}
@@ -908,6 +925,43 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 )}
+
+                {/* ROM Pipeline Variant Selector */}
+                {settings && (
+                  <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(205,85%,55%/.25)', background: 'hsl(205,85%,55%/.04)' }}>
+                    <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Cpu size={14} style={{ color: 'hsl(205,85%,55%)' }} /> ROM Pipeline Variant
+                    </div>
+                    <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, marginBottom: '.75rem' }}>
+                      <strong>Base Mode</strong> always uses the default prompts for all ROM stages.<br />
+                      <strong>DSPy Mode</strong> routes Stage 2 enhancement through trained DSPy variants when one is active (falls back to base if none exist).
+                    </div>
+                    <div style={{ display: 'flex', gap: '.6rem' }}>
+                      {(['base', 'dspy'] as const).map(mode => {
+                        const isActive = (settings.rom_pipeline_mode || 'base') === mode
+                        const label = mode === 'base' ? '⚡ Base Mode' : '🧠 DSPy Mode'
+                        const desc = mode === 'base' ? 'Standard prompts (default)' : 'Trained DSPy variants'
+                        return (
+                          <button
+                            key={mode}
+                            onClick={() => setSettings({ ...settings, rom_pipeline_mode: mode })}
+                            style={{
+                              flex: 1, padding: '.55rem .75rem', borderRadius: 8,
+                              border: isActive ? '2px solid hsl(205,85%,55%)' : '1.5px solid hsl(var(--border)/.5)',
+                              background: isActive ? 'hsl(205,85%,55%/.12)' : 'hsl(var(--muted)/.2)',
+                              color: isActive ? 'hsl(205,85%,45%)' : 'hsl(var(--ink))',
+                              cursor: 'pointer', textAlign: 'left', transition: 'all .15s',
+                              fontFamily: 'Inter'
+                            }}
+                          >
+                            <div style={{ fontSize: '.8rem', fontWeight: 700 }}>{label}</div>
+                            <div style={{ fontSize: '.68rem', color: isActive ? 'hsl(205,85%,50%)' : 'hsl(var(--pencil))', marginTop: 2 }}>{desc}</div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* ROM Max Tokens */}
@@ -920,7 +974,7 @@ export default function SettingsPage() {
                     <TokenInput label="Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
                     <TokenInput label="Stage 1 Discussion Only (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
                     <TokenInput label="Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
-                    <TokenInput label="Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 4548} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
+                    <TokenInput label="Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 5048} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
                     <TokenInput label="Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
                     <TokenInput label="Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
                     <TokenInput label="Stage 2 Deduplication" val={settings.max_tokens_rom_deduplicate ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_deduplicate: v })} />
@@ -1366,6 +1420,34 @@ export default function SettingsPage() {
                 </div>
               </div>
 
+              {/* ⚡ Parallel Whisper Processing (Multi-Process Chunking) */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(38 92% 50% / .35)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Zap size={16} style={{ color: 'hsl(38 92% 50%)' }} /> Parallel Whisper Transcription (Multi-Process Chunking)
+                </h3>
+                <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
+                  Splits long audio recordings into parallel chunks for faster multi-process Whisper transcription. 1 = Sequential processing (default). Values &gt; 1 run parallel subprocesses.
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
+                  <SettingCard
+                    title="Parallel Whisper Workers (WHISPER_PARALLEL_PROCESSING)"
+                    description="Number of parallel Whisper transcription worker processes (1 = sequential / lowest VRAM). Higher values speed up transcription but multiply GPU VRAM usage."
+                    value={settings.whisper_parallel_processing ?? 1}
+                    min={1} max={8} step={1}
+                    onChange={v => setSettings({ ...settings, whisper_parallel_processing: Math.round(v) })}
+                  />
+                  <SettingCard
+                    title="Parallel Chunk Duration (WHISPER_PARALLEL_CHUNK_MINUTES)"
+                    description="Duration in minutes of each audio chunk when parallel processing is active (default 10 min, range 1–60 min)."
+                    value={settings.whisper_parallel_chunk_minutes ?? 10}
+                    min={1} max={60} step={1}
+                    onChange={v => setSettings({ ...settings, whisper_parallel_chunk_minutes: Math.round(v) })}
+                  />
+                </div>
+              </div>
+
+
               {/* Audio Validation & Pre-Check Settings */}
               <div style={{ borderRadius: 12, border: '1.5px solid hsl(205,90%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1397,6 +1479,25 @@ export default function SettingsPage() {
                   />
                 </div>
               </div>
+
+              {/* Missing Transcription Recovery Checkpoint */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(280,75%,60%/.35)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Sparkles size={16} style={{ color: 'hsl(280,75%,60%)' }} /> Missing Transcription Recovery Checkpoint
+                </h3>
+                <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
+                  When enabled, pauses the processing pipeline immediately after speech transcription and forced alignment.
+                  An interactive checkpoint panel allows you to review detected speech gaps and manually insert any missed speech before Diarization and AI analysis proceed.
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle
+                    label="Enable Missing Transcription Recovery Review Pause"
+                    checked={settings.missing_transcript_recovery_enabled ?? false}
+                    onChange={v => setSettings({ ...settings, missing_transcript_recovery_enabled: v })}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
@@ -1425,7 +1526,7 @@ export default function SettingsPage() {
                   <TokenInput label="ROM Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
                   <TokenInput label="ROM Stage 1 Discussion (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
                   <TokenInput label="ROM Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
-                  <TokenInput label="ROM Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 4548} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
+                  <TokenInput label="ROM Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 5048} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
                   <TokenInput label="ROM Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
                   <TokenInput label="ROM Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
                   <TokenInput label="ROM Stage 2 Deduplication" val={settings.max_tokens_rom_deduplicate ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_deduplicate: v })} />

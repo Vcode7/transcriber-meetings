@@ -382,7 +382,7 @@ def get_meeting_full_context(
     """
     Retrieve ALL transcript chunks from a meeting (not query-based).
     Used for comparison to get a broad view of the meeting.
-    Reads chunks chronologically from the FAISS store metadata.
+    Reads chunks chronologically from the ChromaDB collection metadata.
     """
     from services.vector_store import get_transcript_store
 

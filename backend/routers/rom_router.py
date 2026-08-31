@@ -18,7 +18,7 @@ from routers.auth import get_current_user
 from docx import Document as DocxDocument
 from docx.shared import Inches
 
-from services.rom_service import rom_service
+from services.rom_service import rom_service, get_stage1_progress as _get_stage1_progress
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rom", tags=["rom"])
@@ -73,10 +73,31 @@ def style_table_header_bold(table):
 class Stage1Request(BaseModel):
     transcript_window_minutes: float = Field(default=2.0, ge=0.5, le=30.0)
 
+class RerunStage1WindowRequest(BaseModel):
+    window_index: int
+    user_feedback: str = ""
+    transcript_window_minutes: float = Field(default=2.0, ge=0.5, le=30.0)
+
+class AcceptRerunStage1WindowRequest(BaseModel):
+    window_index: int
+    user_feedback: str = ""
+    original_points: List[dict] = []
+    corrected_points: List[dict] = []
+    transcript_window: Optional[str] = None
+
 class Stage2Request(BaseModel):
     meeting_context_top_k: int = Field(default=5, ge=0, le=30)
     global_context_top_k: int = Field(default=3, ge=0, le=30)
     discussion_window_size: int = Field(default=5, ge=3, le=50)
+    min_similarity_threshold: Optional[float] = Field(default=0.80, ge=0.0, le=1.0)
+    process_all_together: Optional[bool] = Field(default=None, description="If True, process all discussion points together in a single call")
+    reference_example_points: Optional[List[str]] = Field(default=None, description="Style-only reference example points")
+    previous_meeting_mode: str = Field(default="auto", description="Dual mode: 'auto' | 'select' | 'off'")
+    previous_meeting_id: Optional[str] = Field(default=None, description="Specific meeting ID when previous_meeting_mode is 'select'")
+    previous_meeting_top_k: int = Field(default=3, ge=0, le=20, description="Number of previous Stage 2 points to retrieve")
+
+class Stage2ExamplePointsBody(BaseModel):
+    points: List[str]
 
 class Stage3Request(BaseModel):
     agenda_text: Optional[str] = None
@@ -138,6 +159,30 @@ class RewriteRomRequest(BaseModel):
 class ExtractWritingRulesRequest(BaseModel):
     reference_text: str = Field(..., description="Extracted text of the reference MoM/ROM document")
 
+class MergePointsRequest(BaseModel):
+    point_ids: List[str] = Field(..., min_length=2)
+
+class FindReplaceRequest(BaseModel):
+    find_text: str = Field(..., min_length=1)
+    replace_text: str = ""
+
+class FindPreviewRequest(BaseModel):
+    find_text: str = Field(..., min_length=1)
+
+class SplitPointRequest(BaseModel):
+    point_id: str
+    selected_text: str = Field(..., min_length=1)
+
+class DeleteTextRequest(BaseModel):
+    point_id: str
+    text_to_delete: str = Field(..., min_length=1)
+
+class GenerateEditTrainingRequest(BaseModel):
+    selected_change_ids: List[str] = Field(..., min_length=1)
+
+class ManualEditPointRequest(BaseModel):
+    polished_text: str = Field(..., min_length=1)
+
 
 # ── Defensive Auth Validation Helper ──────────────────────────────────────────
 
@@ -188,18 +233,97 @@ async def _get_recording_or_404(recording_id: str, user_id_param: Any, db) -> di
 
 async def _get_rom_data(recording_id: str, user_id_param: Any, db) -> dict:
     user_id = _validate_user_id(user_id_param)
+    try:
+        res = await db.execute(
+            text("SELECT rom_data FROM rom_metadata WHERE recording_id = :id AND user_id = :uid"),
+            {"id": recording_id, "uid": user_id}
+        )
+        rm_row = res.fetchone()
+        if rm_row and rm_row[0]:
+            parsed = from_json(rm_row[0], {})
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        pass
     row = await _get_recording_or_404(recording_id, user_id, db)
     if row.get("rom_data"):
-        return from_json(row["rom_data"])
+        parsed = from_json(row["rom_data"], {})
+        if isinstance(parsed, dict):
+            return parsed
     return {}
+
 
 async def _save_rom_data(recording_id: str, user_id_param: Any, rom_data: dict, db):
     user_id = _validate_user_id(user_id_param)
+    rom_json = to_json(rom_data)
+    now_str = datetime.now(timezone.utc).isoformat()
     await db.execute(
         text("UPDATE recordings SET rom_data = :data WHERE id = :id AND user_id = :uid"),
-        {"data": to_json(rom_data), "id": recording_id, "uid": user_id}
+        {"data": rom_json, "id": recording_id, "uid": user_id}
+    )
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO rom_metadata (id, recording_id, user_id, rom_data, created_at, updated_at)
+                VALUES (:id, :rid, :uid, :data, :cat, :uat)
+                ON CONFLICT(recording_id) DO UPDATE SET
+                    rom_data = :data,
+                    updated_at = :uat
+            """),
+            {
+                "id": str(uuid.uuid4()),
+                "rid": recording_id,
+                "uid": user_id,
+                "data": rom_json,
+                "cat": now_str,
+                "uat": now_str,
+            }
+        )
+    except Exception as e:
+        logger.warning(f"[ROM Router] Failed to upsert rom_metadata for {recording_id}: {e}")
+    await db.commit()
+
+async def _record_edit_history(
+    db, recording_id: str, user_id: str, change_type: str,
+    point_ids_affected: list, before_state: list, after_state: list,
+    metadata: dict = None
+) -> str:
+    """Record a Stage 2 edit in the history table."""
+    change_id = str(uuid.uuid4())
+    await db.execute(
+        text(
+            "INSERT INTO stage2_edit_history "
+            "(id, recording_id, user_id, change_type, point_ids_affected, "
+            "before_state, after_state, metadata, is_reverted, created_at) "
+            "VALUES (:id, :rid, :uid, :ct, :pids, :bs, :as_, :meta, 0, :cat)"
+        ),
+        {
+            "id": change_id,
+            "rid": recording_id,
+            "uid": user_id,
+            "ct": change_type,
+            "pids": to_json(point_ids_affected),
+            "bs": to_json(before_state),
+            "as_": to_json(after_state),
+            "meta": to_json(metadata or {}),
+            "cat": datetime.utcnow().isoformat(),
+        },
     )
     await db.commit()
+    return change_id
+
+
+async def _clear_stage2_edit_history(db, recording_id: str, user_id: str):
+    """Delete all recorded Stage 2 edit history entries when Stage 2 is regenerated."""
+    try:
+        await db.execute(
+            text("DELETE FROM stage2_edit_history WHERE recording_id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"[ROM Router] Failed to clear stage2_edit_history for {recording_id}: {e}")
+
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -263,6 +387,7 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
             transcript,
             req.transcript_window_minutes,
             user_id,
+            recording_id=recording_id,
             video_transcript=video_transcript,
             source_type=source_type,
             parallel_window_processing=parallel_concurrency,
@@ -280,16 +405,134 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
         "source_type": source_type,
     }
     
-    # Reset subsequent stages
+    # Reset subsequent stages & clear Stage 2 edit history
     if "stage2" in data: del data["stage2"]
     if "stage3" in data: del data["stage3"]
     if "final_rom" in data: del data["final_rom"]
+    await _clear_stage2_edit_history(db, recording_id, user_id)
     
     await _save_rom_data(recording_id, user_id, data, db)
     return {
         "status": "success",
         "stage1": data["stage1"],
         "rom_data": data
+    }
+
+
+@router.get("/{recording_id}/stage1/progress")
+async def get_stage1_progress_endpoint(recording_id: str, current_user: dict = Depends(get_current_user)):
+    """Returns current Stage 1 generation progress for live frontend updates.
+    
+    Polls an in-memory progress tracker updated by rom_service during extraction.
+    Returns windows_completed, windows_total, eta_seconds, and concurrency.
+    """
+    user_id = _validate_user_id(current_user)
+    progress = _get_stage1_progress(user_id, recording_id)
+    return progress
+
+
+@router.post("/{recording_id}/stage1/rerun-window")
+async def rerun_stage1_window_endpoint(
+    recording_id: str,
+    req: RerunStage1WindowRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Stage 1: Re-run extraction for a single transcript window incorporating user feedback."""
+    user_id = _validate_user_id(current_user)
+    rec_row = await _get_recording_or_404(recording_id, user_id, db)
+    transcript = from_json(rec_row.get("transcript") or "[]")
+    
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Transcript is empty")
+
+    data = await _get_rom_data(recording_id, user_id, db)
+    all_points = data.get("stage1", {}).get("discussion_points", [])
+    window_points = [p for p in all_points if p.get("window_index") == req.window_index]
+
+    video_transcript = from_json(rec_row.get("video_transcript") or "[]")
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: rom_service.rerun_single_stage1_window(
+            transcript=transcript,
+            window_index=req.window_index,
+            user_feedback=req.user_feedback,
+            window_minutes=req.transcript_window_minutes,
+            video_transcript=video_transcript,
+            existing_points=window_points,
+        )
+    )
+
+    return {
+        "status": "success",
+        "result": result
+    }
+
+
+@router.post("/{recording_id}/stage1/rerun-window/accept")
+async def accept_rerun_stage1_window_endpoint(
+    recording_id: str,
+    req: AcceptRerunStage1WindowRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Stage 1: Accept regenerated points for a window, update ROM data, and persist for DSPy training."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    if "stage1" not in data or "discussion_points" not in data["stage1"]:
+        raise HTTPException(status_code=400, detail="Stage 1 points not found")
+
+    old_points = data["stage1"]["discussion_points"]
+    # Replace points for window_index with corrected_points
+    new_points = []
+    replaced = False
+    for p in old_points:
+        if p.get("window_index") == req.window_index:
+            if not replaced:
+                new_points.extend(req.corrected_points)
+                replaced = True
+        else:
+            new_points.append(p)
+
+    if not replaced:
+        new_points.extend(req.corrected_points)
+
+    data["stage1"]["discussion_points"] = new_points
+
+    # Reset downstream stages because stage 1 points changed
+    if "stage2" in data: del data["stage2"]
+    if "stage3" in data: del data["stage3"]
+    if "final_rom" in data: del data["final_rom"]
+    await _clear_stage2_edit_history(db, recording_id, user_id)
+
+    await _save_rom_data(recording_id, user_id, data, db)
+
+    # Persist feedback record for DSPy training
+    feedback_id = None
+    try:
+        from services.training.stage1_training_service import save_feedback
+        feedback_id = save_feedback({
+            "user_id": user_id,
+            "meeting_id": recording_id,
+            "window_index": req.window_index,
+            "transcript_window": req.transcript_window or "",
+            "model_output": json.dumps(req.original_points, ensure_ascii=False),
+            "corrected_output": json.dumps(req.corrected_points, ensure_ascii=False),
+            "comment": req.user_feedback,
+            "categories": ["re_run_correction"],
+            "source": "main_stage1_page",
+        })
+    except Exception as err:
+        logger.warning(f"[ROM Router] Failed to save DSPy feedback: {err}")
+
+    return {
+        "status": "success",
+        "stage1": data["stage1"],
+        "rom_data": data,
+        "feedback_id": feedback_id
     }
 
 
@@ -369,16 +612,11 @@ async def download_stage1_docx(recording_id: str, current_user: dict = Depends(g
 
         field_labels = {
             "speakers": "Speakers",
-            "action_owner": "Action Owner",
-            "decisions": "Decisions",
-            "action_items": "Action Items",
             "technical_terms": "Technical Terms",
             "dates": "Dates",
             "numbers": "Numbers/Quantities",
-            "project_names": "Project Names",
             "references": "References",
-            "questions": "Questions Raised",
-            "required_information": "Required Information"
+            "action_items": "Action Items",
         }
 
         for idx, point in enumerate(group["points"], start=1):
@@ -410,6 +648,58 @@ async def download_stage1_docx(recording_id: str, current_user: dict = Depends(g
         headers={"Content-Disposition": f"attachment; filename=rom_stage1_{recording_id}.docx"}
     )
 
+@router.get("/{recording_id}/previous-meetings")
+async def get_previous_meetings_list(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """
+    Return a list of other meetings for the current user that have generated Stage 2 points,
+    along with metadata (meeting name, date, stage2 points count).
+    """
+    user_id = _validate_user_id(current_user)
+    query = text("""
+        SELECT r.id, r.filename, r.title, r.created_at, COALESCE(rm.rom_data, r.rom_data) AS rom_data
+        FROM recordings r
+        LEFT JOIN rom_metadata rm ON r.id = rm.recording_id
+        WHERE r.user_id = :uid AND r.id != :cur_id
+        ORDER BY r.created_at DESC
+    """)
+    rows = (await db.execute(query, {"uid": user_id, "cur_id": recording_id})).fetchall()
+
+    meetings = []
+    for row in rows:
+        rec_id = row[0]
+        filename = row[1]
+        title = row[2]
+        created_at = row[3]
+        rom_data_raw = row[4]
+
+        stage2_count = 0
+        if rom_data_raw:
+            try:
+                rom_data = json.loads(rom_data_raw) if isinstance(rom_data_raw, str) else rom_data_raw
+                stage2_pts = rom_data.get("stage2", {}).get("polished_points", [])
+                stage2_count = len(stage2_pts)
+            except Exception:
+                pass
+
+        meeting_name = title or filename or f"Meeting {rec_id[:8]}"
+        date_str = str(created_at)[:10] if created_at else ""
+
+        meetings.append({
+            "id": rec_id,
+            "name": meeting_name,
+            "title": title or filename or "",
+            "date": date_str,
+            "stage2_count": stage2_count,
+            "has_stage2": stage2_count > 0,
+        })
+
+    return {"meetings": meetings}
+
+
 @router.post("/{recording_id}/stage2/generate")
 async def generate_stage2(recording_id: str, req: Stage2Request, current_user: dict = Depends(get_current_user), db=Depends(get_db)):
     user_id = _validate_user_id(current_user)
@@ -418,13 +708,39 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
     
     if not points:
         raise HTTPException(status_code=400, detail="Stage 1 must be completed first")
-        
+
+    # Fetch transcript from DB to enable Stage 2 Validation Pass
+    rec_row = await _get_recording_or_404(recording_id, user_id, db)
+    transcript_raw = rec_row.get("transcript") or "[]"
+    transcript_for_validation = from_json(transcript_raw) if transcript_raw else []
     r = await db.execute(
-        text("SELECT rom_parallel_window_processing FROM user_settings WHERE user_id = :uid"),
+        text("SELECT rom_parallel_window_processing, rom_min_similarity_threshold, rom_stage2_process_all_together, rom_separate_action_extraction, rom_pipeline_mode FROM user_settings WHERE user_id = :uid"),
         {"uid": user_id},
     )
     us_row = r.fetchone()
     parallel_concurrency = us_row[0] if us_row and us_row[0] is not None else 2
+    
+    # Priority: explicitly passed in request body -> DB user_settings -> default 0.80
+    min_sim_thresh = req.min_similarity_threshold
+    if min_sim_thresh is None and us_row and us_row[1] is not None:
+        min_sim_thresh = us_row[1]
+
+    proc_all_together = req.process_all_together
+    if proc_all_together is None and us_row and us_row[2] is not None:
+        proc_all_together = bool(us_row[2])
+    elif proc_all_together is None:
+        proc_all_together = False
+
+    sep_action_extraction = bool(us_row[3]) if us_row and us_row[3] is not None else False
+
+    # rom_pipeline_mode: "base" (default) uses base prompts; "dspy" enables trained variant check
+    pipeline_mode = str(us_row[4] or "base") if us_row and us_row[4] is not None else "base"
+    use_dspy_mode = (pipeline_mode == "dspy")
+    logger.info(f"[ROM Router] Stage 2: rom_pipeline_mode={pipeline_mode!r}, use_dspy_mode={use_dspy_mode}")
+
+    meeting_name = rec_row.get("title") or rec_row.get("filename") or "Meeting"
+    created_at_val = rec_row.get("created_at")
+    meeting_date = str(created_at_val)[:10] if created_at_val else ""
 
     loop = asyncio.get_event_loop()
     polished = await loop.run_in_executor(
@@ -434,12 +750,27 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
             req.meeting_context_top_k, req.global_context_top_k,
             req.discussion_window_size,
             parallel_window_processing=parallel_concurrency,
+            min_similarity_threshold=min_sim_thresh,
+            transcript=transcript_for_validation,
+            process_all_together=proc_all_together,
+            separate_action_extraction=sep_action_extraction,
+            reference_example_points=req.reference_example_points,
+            previous_meeting_mode=req.previous_meeting_mode,
+            previous_meeting_id=req.previous_meeting_id,
+            previous_meeting_top_k=req.previous_meeting_top_k,
+            meeting_name=meeting_name,
+            meeting_date=meeting_date,
+            use_dspy_mode=use_dspy_mode,
         )
     )
     
+    # Clear Stage 2 edit history when Stage 2 is regenerated (fresh version)
+    await _clear_stage2_edit_history(db, recording_id, user_id)
+
     data["stage2"] = {
         "status": "done",
-        "polished_points": polished
+        "polished_points": polished,
+        "edit_history": None,
     }
     
     # Reset subsequent stages
@@ -452,6 +783,33 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
         "stage2": data["stage2"],
         "rom_data": data
     }
+
+
+@router.get("/stage2/example-points")
+async def get_stage2_example_points_endpoint(current_user: dict = Depends(get_current_user)):
+    """Get persisted style-only Stage 2 reference example points."""
+    _validate_user_id(current_user)
+    try:
+        from services.training.stage2_training_service import load_example_points
+        pts = load_example_points()
+    except Exception:
+        pts = []
+    return {"points": pts, "count": len(pts)}
+
+
+@router.post("/stage2/example-points")
+async def save_stage2_example_points_endpoint(
+    req: Stage2ExamplePointsBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Save style-only Stage 2 reference example points."""
+    _validate_user_id(current_user)
+    try:
+        from services.training.stage2_training_service import save_example_points
+        save_example_points(req.points)
+    except Exception as e:
+        logger.warning(f"[ROM Router] Failed to save example points: {e}")
+    return {"saved": True, "count": len(req.points)}
 
 @router.get("/{recording_id}/stage2/download/docx")
 async def download_stage2_docx(recording_id: str, current_user: dict = Depends(get_current_user), db=Depends(get_db)):
@@ -512,23 +870,74 @@ async def download_stage2_docx(recording_id: str, current_user: dict = Depends(g
         col1_cell = row_cells[1]
         col1_cell.text = ""
         retrieved = p.get("retrieved_context", {})
-        meeting_chunks = retrieved.get("meeting_chunks", []) if isinstance(retrieved, dict) else []
-        global_chunks = retrieved.get("global_chunks", []) if isinstance(retrieved, dict) else []
+        if not isinstance(retrieved, dict):
+            retrieved = {}
+        meeting_chunks = retrieved.get("meeting_chunks", [])
+        global_chunks = retrieved.get("global_chunks", [])
+        previous_chunks = retrieved.get("previous_meeting_chunks", [])
+        cur_report = retrieved.get("context_usage_report", p.get("context_usage_report", {}))
+        if not isinstance(cur_report, dict):
+            cur_report = {}
+
+        context_added = False
 
         if meeting_chunks:
-            m_texts = [ (c.get("text") or c.get("content") or c.get("chunk") or "").strip() for c in meeting_chunks ]
-            m_texts = [ t for t in m_texts if t ]
+            m_texts = [
+                (c.get("_text") or c.get("text") or c.get("content") or c.get("chunk") or "").strip()
+                for c in meeting_chunks
+            ]
+            m_texts = [t for t in m_texts if t]
             if m_texts:
                 add_bold_label(col1_cell, "Meeting Context", "\n\n".join(m_texts))
+                context_added = True
 
         if global_chunks:
-            g_texts = [ (c.get("text") or c.get("content") or c.get("chunk") or "").strip() for c in global_chunks ]
-            g_texts = [ t for t in g_texts if t ]
+            g_texts = [
+                (c.get("_text") or c.get("text") or c.get("content") or c.get("chunk") or "").strip()
+                for c in global_chunks
+            ]
+            g_texts = [t for t in g_texts if t]
             if g_texts:
                 add_bold_label(col1_cell, "Global Context", "\n\n".join(g_texts))
+                context_added = True
 
-        if not col1_cell.text.strip():
-            col1_cell.text = "No additional context retrieved."
+        if previous_chunks:
+            p_texts = [
+                f"[Previous: {c.get('meeting_name', 'Meeting')}] {(c.get('_text') or c.get('text') or '').strip()}"
+                for c in previous_chunks
+            ]
+            p_texts = [t for t in p_texts if t.strip()]
+            if p_texts:
+                add_bold_label(col1_cell, "Previous Meeting Stage 2 Context", "\n\n".join(p_texts))
+                context_added = True
+
+        # Show which documents were referenced
+        docs_used = cur_report.get("documents", [])
+        if docs_used:
+            add_bold_label(col1_cell, "Source Documents", ", ".join(str(d) for d in docs_used))
+            context_added = True
+
+        # Show context usage flags if context was retrieved but no text chunks
+        if not context_added:
+            m_used = cur_report.get("meeting_context_used", False)
+            g_used = cur_report.get("global_context_used", False)
+            p_used = cur_report.get("previous_meeting_context_used", False)
+            c_used = cur_report.get("context_added", False)
+            if m_used or g_used or p_used or c_used:
+                status_parts = []
+                if m_used:
+                    status_parts.append("Meeting context retrieved")
+                if g_used:
+                    status_parts.append("Global context retrieved")
+                if p_used:
+                    status_parts.append("Previous meeting Stage 2 context retrieved")
+                if c_used:
+                    status_parts.append("Context applied to point")
+                add_bold_label(col1_cell, "Context Status", "; ".join(status_parts))
+                context_added = True
+
+        if not context_added:
+            col1_cell.paragraphs[0].add_run("No additional context retrieved.")
 
         # Col 2: Enhanced Discussion Point (Stage 2)
         col2_cell = row_cells[2]
@@ -537,13 +946,11 @@ async def download_stage2_docx(recording_id: str, current_user: dict = Depends(g
 
         field_labels = {
             "speakers": "Speakers",
-            "action_owner": "Action Owner",
-            "decisions": "Decisions",
-            "action_items": "Action Items",
             "technical_terms": "Technical Terms",
             "dates": "Dates",
             "numbers": "Numbers/Quantities",
-            "references": "References"
+            "references": "References",
+            "action_items": "Action Items",
         }
 
         for key, label in field_labels.items():
@@ -692,19 +1099,36 @@ async def upload_agenda_document(
     if not agenda:
         raise HTTPException(status_code=404, detail=f"Agenda {agenda_id} not found. Please create agendas first.")
 
-    # Extract file text
+    # Extract file text supporting DOCX, PDF, TXT, OCR, etc.
     try:
         content = await file.read()
-        # Try UTF-8 decode for plain text; for binary formats, use raw-mom extract endpoint
+        filename = file.filename or "upload.txt"
+        from services.doc_extractor import extract_text_from_file
+        import tempfile
+        import os
+        ext = os.path.splitext(filename.lower())[1] or ".txt"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
         try:
-            text_content = content.decode("utf-8", errors="replace")
-        except Exception:
-            text_content = content.decode("latin-1", errors="replace")
+            text_content = extract_text_from_file(tmp_path, filename)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        if not text_content or not text_content.strip():
+            try:
+                text_content = content.decode("utf-8", errors="replace")
+            except Exception:
+                text_content = content.decode("latin-1", errors="replace")
     except Exception as e:
+        logger.error(f"[ROM UploadDoc] Failed to extract text from '{file.filename}': {e}")
         raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {e}")
 
-    if not text_content.strip():
-        raise HTTPException(status_code=400, detail="Uploaded file appears to be empty or binary-only. Please upload a text-extractable document.")
+    if not text_content or not text_content.strip():
+        raise HTTPException(status_code=400, detail="Uploaded file appears to be empty or unreadable. Please upload a valid text, PDF, or Word document.")
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -1253,113 +1677,7 @@ async def download_final_docx(recording_id: str, current_user: dict = Depends(ge
         headers={"Content-Disposition": f"attachment; filename=rom_final_{recording_id}.docx"}
     )
 
-def format_precise_point_text(pt: dict, p_code: str = "") -> str:
-    from services.rom_service import clean_calendar_dates
 
-    raw_decisions = pt.get("decisions") or []
-    if isinstance(raw_decisions, str): raw_decisions = [raw_decisions]
-    decisions = [str(d).strip() for d in raw_decisions if str(d).strip() and str(d).strip().lower() not in ("none", "n/a", "null")]
-
-    raw_actions = pt.get("action_items") or []
-    if isinstance(raw_actions, str): raw_actions = [raw_actions]
-    actions = [str(a).strip() for a in raw_actions if str(a).strip() and str(a).strip().lower() not in ("none", "n/a", "null")]
-
-    valid_dates = clean_calendar_dates(pt.get("dates") or [])
-
-    content_parts = []
-    if decisions:
-        content_parts.extend(decisions)
-    if actions:
-        content_parts.extend(actions)
-
-    if not content_parts:
-        pt_text = (pt.get("text") or pt.get("polished_text") or pt.get("discussion_point") or "").strip()
-        if pt_text:
-            content_parts.append(pt_text)
-
-    if not content_parts:
-        main_text = "Discussion noted."
-    else:
-        joined = ". ".join(p.rstrip(".") for p in content_parts)
-        main_text = f"{joined}."
-
-    prefix = f"{p_code}: " if p_code else ""
-    if valid_dates:
-        date_str = ", ".join(valid_dates)
-        return f"{prefix}{main_text} ({date_str})"
-    else:
-        return f"{prefix}{main_text}"
-
-@router.get("/{recording_id}/precise/download/docx")
-async def download_precise_docx(recording_id: str, current_user: dict = Depends(get_current_user), db=Depends(get_db)):
-    user_id = _validate_user_id(current_user)
-    data = await _get_rom_data(recording_id, user_id, db)
-    from services.rom_service import apply_speaker_mappings_to_final_rom
-    if data.get("final_rom"):
-        data["final_rom"] = apply_speaker_mappings_to_final_rom(data["final_rom"])
-    agendas = data.get("final_rom", {}).get("agendas", [])
-
-    doc = DocxDocument()
-    doc.add_heading("Precise Record of Meeting (ROM)", 0)
-
-    if agendas:
-        col_widths = [Inches(0.325), Inches(0.975), Inches(3.25), Inches(1.95)]
-        table = doc.add_table(rows=1, cols=4)
-        table.style = 'Table Grid'
-
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'ID'
-        hdr_cells[1].text = 'Agenda'
-        hdr_cells[2].text = 'Discussion Points'
-        hdr_cells[3].text = 'Action / Speaker'
-
-        global_p_counter = 1
-
-        for a_idx, a in enumerate(agendas, 1):
-            a_code = a.get("agenda_id") or f"A{a_idx}"
-            a_title = a.get("title", "")
-            agenda_label = f"{a_code} – {a_title}" if a_title else a_code
-
-            pts = a.get("discussion_points", [])
-
-            if not pts:
-                row_cells = table.add_row().cells
-                row_cells[0].text = str(a_idx)
-                row_cells[1].text = agenda_label
-                row_cells[2].text = "No discussion points mapped"
-                row_cells[3].text = "-"
-            else:
-                for p_idx, pt in enumerate(pts):
-                    p_code = f"P{global_p_counter}"
-                    global_p_counter += 1
-
-                    point_str = format_precise_point_text(pt, p_code)
-
-                    spk = pt.get("speaker")
-                    if not spk and pt.get("speakers"):
-                        speakers_list = pt.get("speakers")
-                        spk = ", ".join(speakers_list) if isinstance(speakers_list, list) else str(speakers_list)
-                    spk_str = str(spk).strip() if spk else "-"
-
-                    row_cells = table.add_row().cells
-                    row_cells[0].text = str(a_idx) if p_idx == 0 else ""
-                    row_cells[1].text = agenda_label if p_idx == 0 else ""
-                    row_cells[2].text = point_str
-                    row_cells[3].text = spk_str
-        set_fixed_table_column_widths(table, col_widths)
-
-    else:
-        doc.add_paragraph("No Precise ROM data available.")
-
-    f = io.BytesIO()
-    doc.save(f)
-    f.seek(0)
-
-    return StreamingResponse(
-        f,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename=rom_precise_{recording_id}.docx"}
-    )
 
 
 @router.get("/{recording_id}/agenda-transcript/download/docx")
@@ -1725,6 +2043,8 @@ async def delete_discussion_point(
     user_id = _validate_user_id(current_user)
     data = await _get_rom_data(recording_id, user_id, db)
 
+    before_s2_pts = list(data.get("stage2", {}).get("polished_points", []))
+
     # 1. Remove from stage2.polished_points
     if "stage2" in data and isinstance(data["stage2"].get("polished_points"), list):
         data["stage2"]["polished_points"] = [
@@ -1757,6 +2077,15 @@ async def delete_discussion_point(
                     pt for pt in fa["discussion_points"] if pt.get("id") != point_id
                 ]
 
+    # Record in edit history
+    deleted_point = next((p for p in before_s2_pts if p.get("id") == point_id), None)
+    if deleted_point:
+        await _record_edit_history(
+            db, recording_id, user_id, "delete",
+            [point_id], [deleted_point], [],
+            {"deletion_source": "manual"}
+        )
+
     await _save_rom_data(recording_id, user_id, data, db)
     return {"status": "success", "rom_data": data}
 
@@ -1785,6 +2114,14 @@ async def generate_mom_from_rom(
         "speakers_detected": row.get("speakers_detected") or [],
     }
 
+    # Read separate_action_extraction setting to choose the correct action extraction mode
+    r_us = await db.execute(
+        text("SELECT rom_separate_action_extraction FROM user_settings WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
+    us_row = r_us.fetchone()
+    separate_action_extraction = bool(us_row[0]) if us_row and us_row[0] is not None else False
+
     loop = asyncio.get_event_loop()
     enhanced_mom = await loop.run_in_executor(
         None,
@@ -1793,6 +2130,7 @@ async def generate_mom_from_rom(
             recording_meta=rec_meta,
             recording_id=recording_id,
             user_id=user_id,
+            separate_action_extraction=separate_action_extraction,
         )
     )
 
@@ -2213,6 +2551,634 @@ async def download_enhanced_mom_docx(
         headers={"Content-Disposition": f"attachment; filename=mom_{recording_id}.docx"}
     )
 
+
+@router.post("/{recording_id}/stage2/merge-points")
+async def merge_stage2_points(
+    recording_id: str,
+    req: MergePointsRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Merge multiple Stage 2 discussion points into one using LLM."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    # Collect points to merge, strictly preserving their original chronological order
+    selected_set = set(req.point_ids)
+    selected = [p for p in pts if p.get("id") in selected_set]
+    if len(selected) < 2:
+        raise HTTPException(400, f"Need at least 2 valid points to merge, found {len(selected)}")
+    
+    # Sort selected points by timeline_start and original array position
+    selected = sorted(selected, key=lambda x: (x.get("timeline_start", 0), pts.index(x)))
+    before_state = [dict(p) for p in selected]
+    
+    # Call LLM to merge
+    from services.ai_provider import get_provider
+    provider = get_provider()
+    loop = asyncio.get_event_loop()
+    merged_result = await loop.run_in_executor(
+        None, lambda: provider.merge_discussion_points(selected)
+    )
+    
+    polished_text = ""
+    if isinstance(merged_result, dict):
+        polished_text = (
+            merged_result.get("polished_text") or 
+            merged_result.get("text") or 
+            merged_result.get("discussion_point") or
+            merged_result.get("summary") or ""
+        )
+    
+    if not polished_text:
+        logger.warning("[merge_stage2_points] LLM output unparseable or empty. Using combined text fallback.")
+        polished_text = " ".join(p.get("polished_text", "") for p in selected if p.get("polished_text"))
+    
+    # Build merged point - inherit timeline from earliest to latest
+    first_pt = next(p for p in pts if p["id"] == req.point_ids[0])
+    first_idx = pts.index(first_pt)
+    
+    merged_point = {
+        "id": str(uuid.uuid4()),
+        "original_point_ids": [pid for p in selected for pid in (p.get("original_point_ids") or [p.get("original_point_id", p["id"])])],
+        "original_point_id": selected[0].get("original_point_id", selected[0]["id"]),
+        "polished_text": polished_text,
+        "timeline_start": min(p.get("timeline_start", 0) for p in selected),
+        "timeline_end": max(p.get("timeline_end", 0) for p in selected),
+        "speakers": list(set(s for p in selected for s in (p.get("speakers") or []))),
+        "technical_terms": (merged_result.get("technical_terms") if isinstance(merged_result, dict) else None) or list(set(t for p in selected for t in (p.get("technical_terms") or []))),
+        "dates": (merged_result.get("dates") if isinstance(merged_result, dict) else None) or list(set(d for p in selected for d in (p.get("dates") or []))),
+        "numbers": (merged_result.get("numbers") if isinstance(merged_result, dict) else None) or list(set(n for p in selected for n in (p.get("numbers") or []))),
+        "references": (merged_result.get("references") if isinstance(merged_result, dict) else None) or list(set(r for p in selected for r in (p.get("references") or []))),
+        "action_items": (merged_result.get("action_items") if isinstance(merged_result, dict) else None) or [ai for p in selected for ai in (p.get("action_items") or [])],
+    }
+    
+    # Replace: remove selected points, insert merged at first position
+    new_pts = [p for p in pts if p["id"] not in req.point_ids]
+    new_pts.insert(first_idx, merged_point)
+    data["stage2"]["polished_points"] = new_pts
+    
+    # Invalidate downstream
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    change_id = await _record_edit_history(
+        db, recording_id, user_id, "merge",
+        req.point_ids, before_state, [merged_point],
+        {"merged_count": len(selected)}
+    )
+    
+    return {"status": "success", "merged_point": merged_point, "change_id": change_id, "rom_data": data}
+
+@router.post("/{recording_id}/stage2/find-replace/preview")
+async def find_replace_preview(
+    recording_id: str,
+    req: FindPreviewRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Preview find occurrences across Stage 2 points."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    total = 0
+    points_affected = []
+    for i, pt in enumerate(pts):
+        text_content = pt.get("polished_text", "")
+        count = text_content.count(req.find_text)
+        if count > 0:
+            total += count
+            points_affected.append({"point_id": pt["id"], "count": count, "point_number": i + 1})
+    
+    return {"total_occurrences": total, "points_affected": points_affected}
+
+@router.post("/{recording_id}/stage2/find-replace")
+async def find_replace_apply(
+    recording_id: str,
+    req: FindReplaceRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Apply find and replace across Stage 2 points."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    before_state = []
+    after_state = []
+    affected_ids = []
+    total_replacements = 0
+    
+    for pt in pts:
+        old_text = pt.get("polished_text", "")
+        count = old_text.count(req.find_text)
+        if count > 0:
+            before_state.append(dict(pt))
+            new_text = old_text.replace(req.find_text, req.replace_text)
+            pt["polished_text"] = new_text
+            after_state.append(dict(pt))
+            affected_ids.append(pt["id"])
+            total_replacements += count
+    
+    if total_replacements == 0:
+        return {"status": "success", "affected_count": 0, "change_id": None, "rom_data": data}
+    
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    change_id = await _record_edit_history(
+        db, recording_id, user_id, "find_replace",
+        affected_ids, before_state, after_state,
+        {"find_text": req.find_text, "replace_text": req.replace_text, "total_replacements": total_replacements}
+    )
+    
+    return {"status": "success", "affected_count": total_replacements, "change_id": change_id, "rom_data": data}
+
+@router.post("/{recording_id}/stage2/split-point")
+async def split_stage2_point(
+    recording_id: str,
+    req: SplitPointRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Split a Stage 2 discussion point into two using LLM."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    original = next((p for p in pts if p.get("id") == req.point_id), None)
+    if not original:
+        raise HTTPException(404, "Point not found")
+    
+    before_state = [dict(original)]
+    original_idx = pts.index(original)
+    
+    from services.ai_provider import get_provider
+    provider = get_provider()
+    loop = asyncio.get_event_loop()
+    split_result = await loop.run_in_executor(
+        None, lambda: provider.split_discussion_point(to_json(original), req.selected_text)
+    )
+    
+    split_points_raw = split_result.get("points", []) if isinstance(split_result, dict) else []
+    if not split_points_raw or len(split_points_raw) < 2:
+        logger.warning("[split_stage2_point] LLM split did not produce 2 points. Using text-based split fallback.")
+        orig_text = original.get("polished_text", "")
+        sel_text = req.selected_text.strip()
+        rem_text = orig_text.replace(sel_text, "").strip()
+        if not rem_text:
+            rem_text = orig_text
+        split_points_raw = [
+            {"polished_text": rem_text, "speakers": original.get("speakers", [])},
+            {"polished_text": sel_text, "speakers": original.get("speakers", [])}
+        ]
+    
+    new_points = []
+    for sp in split_points_raw[:2]:
+        new_pt = {
+            "id": str(uuid.uuid4()),
+            "original_point_ids": original.get("original_point_ids", [original.get("original_point_id", original["id"])]),
+            "original_point_id": original.get("original_point_id", original["id"]),
+            "polished_text": sp.get("polished_text", ""),
+            "timeline_start": original.get("timeline_start", 0),
+            "timeline_end": original.get("timeline_end", 0),
+            "speakers": sp.get("speakers", original.get("speakers", [])),
+            "technical_terms": sp.get("technical_terms", []),
+            "dates": sp.get("dates", []),
+            "numbers": sp.get("numbers", []),
+            "references": sp.get("references", []),
+            "action_items": sp.get("action_items", []),
+        }
+        new_points.append(new_pt)
+    
+    # Replace original with two new points
+    pts.pop(original_idx)
+    for i, np in enumerate(new_points):
+        pts.insert(original_idx + i, np)
+    
+    data["stage2"]["polished_points"] = pts
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    change_id = await _record_edit_history(
+        db, recording_id, user_id, "split",
+        [req.point_id], before_state, new_points,
+        {"selected_text": req.selected_text}
+    )
+    
+    return {"status": "success", "new_points": new_points, "change_id": change_id, "rom_data": data}
+
+@router.post("/{recording_id}/stage2/delete-text")
+async def delete_text_from_point(
+    recording_id: str,
+    req: DeleteTextRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Delete selected text from a Stage 2 point without LLM."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    pt = next((p for p in pts if p.get("id") == req.point_id), None)
+    if not pt:
+        raise HTTPException(404, "Point not found")
+    
+    old_text = pt.get("polished_text", "")
+    if req.text_to_delete not in old_text:
+        raise HTTPException(400, "Selected text not found in point")
+    
+    before_state = [dict(pt)]
+    pt["polished_text"] = old_text.replace(req.text_to_delete, "", 1).strip()
+    after_state = [dict(pt)]
+    
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    change_id = await _record_edit_history(
+        db, recording_id, user_id, "delete_text",
+        [req.point_id], before_state, after_state,
+        {"deleted_text": req.text_to_delete}
+    )
+    
+    return {"status": "success", "updated_point": pt, "change_id": change_id, "rom_data": data}
+
+@router.get("/{recording_id}/stage2/edit-history")
+async def get_stage2_edit_history(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get Stage 2 edit history for a recording."""
+    user_id = _validate_user_id(current_user)
+    result = await db.execute(
+        text(
+            "SELECT * FROM stage2_edit_history "
+            "WHERE recording_id = :rid AND user_id = :uid "
+            "ORDER BY created_at DESC"
+        ),
+        {"rid": recording_id, "uid": user_id},
+    )
+    rows = result.fetchall()
+    changes = []
+    for row in rows:
+        r = dict(row._mapping)
+        r["point_ids_affected"] = from_json(r.get("point_ids_affected", "[]"))
+        r["before_state"] = from_json(r.get("before_state", "[]"))
+        r["after_state"] = from_json(r.get("after_state", "[]"))
+        r["metadata"] = from_json(r.get("metadata", "{}"))
+        changes.append(r)
+    return {"changes": changes}
+
+@router.post("/{recording_id}/stage2/edit-history/{change_id}/revert")
+async def revert_stage2_change(
+    recording_id: str,
+    change_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Revert a Stage 2 edit change."""
+    user_id = _validate_user_id(current_user)
+    
+    # Fetch the change
+    result = await db.execute(
+        text(
+            "SELECT * FROM stage2_edit_history "
+            "WHERE id = :cid AND recording_id = :rid AND user_id = :uid"
+        ),
+        {"cid": change_id, "rid": recording_id, "uid": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(404, "Change not found")
+    
+    change = dict(row._mapping)
+    if change.get("is_reverted"):
+        raise HTTPException(400, "Change already reverted")
+    
+    before_state = from_json(change.get("before_state", "[]"))
+    after_state = from_json(change.get("after_state", "[]"))
+    change_type = change.get("change_type")
+    
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    # Get IDs of after-state points (points created by this change)
+    after_ids = {p["id"] for p in after_state if isinstance(p, dict) and "id" in p}
+    # Get IDs of before-state points (points that existed before this change)
+    before_ids = {p["id"] for p in before_state if isinstance(p, dict) and "id" in p}
+    
+    if change_type == "merge":
+        # Remove merged point(s), re-insert originals
+        insert_idx = None
+        for i, p in enumerate(pts):
+            if p.get("id") in after_ids:
+                insert_idx = i
+                break
+        new_pts = [p for p in pts if p.get("id") not in after_ids]
+        if insert_idx is not None:
+            for j, bp in enumerate(before_state):
+                new_pts.insert(insert_idx + j, bp)
+        else:
+            new_pts.extend(before_state)
+        pts = new_pts
+    elif change_type == "split":
+        # Remove split points, re-insert original
+        insert_idx = None
+        for i, p in enumerate(pts):
+            if p.get("id") in after_ids:
+                insert_idx = i
+                break
+        new_pts = [p for p in pts if p.get("id") not in after_ids]
+        if insert_idx is not None and before_state:
+            new_pts.insert(insert_idx, before_state[0])
+        elif before_state:
+            new_pts.append(before_state[0])
+        pts = new_pts
+    elif change_type == "delete":
+        if before_state:
+            pts.extend(before_state)
+    elif change_type in ("find_replace", "delete_text", "manual_edit"):
+        # Restore before_state text for affected points
+        before_map = {p["id"]: p for p in before_state if isinstance(p, dict) and "id" in p}
+        for i, p in enumerate(pts):
+            if p.get("id") in before_map:
+                pts[i] = before_map[p["id"]]
+    
+    data["stage2"]["polished_points"] = pts
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    # Mark as reverted
+    await db.execute(
+        text(
+            "UPDATE stage2_edit_history SET is_reverted = 1, reverted_at = :rat "
+            "WHERE id = :cid"
+        ),
+        {"cid": change_id, "rat": datetime.utcnow().isoformat()},
+    )
+    await db.commit()
+    
+    return {"status": "success", "reverted_change_id": change_id, "rom_data": data}
+
+@router.post("/{recording_id}/stage2/edit-history/{change_id}/redo")
+async def redo_stage2_change(
+    recording_id: str,
+    change_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Redo a previously reverted Stage 2 edit change."""
+    user_id = _validate_user_id(current_user)
+    
+    result = await db.execute(
+        text(
+            "SELECT * FROM stage2_edit_history "
+            "WHERE id = :cid AND recording_id = :rid AND user_id = :uid"
+        ),
+        {"cid": change_id, "rid": recording_id, "uid": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(404, "Change not found")
+    
+    change = dict(row._mapping)
+    if not change.get("is_reverted"):
+        raise HTTPException(400, "Change is not reverted; cannot redo")
+    
+    before_state = from_json(change.get("before_state", "[]"))
+    after_state = from_json(change.get("after_state", "[]"))
+    change_type = change.get("change_type")
+    
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    before_ids = {p["id"] for p in before_state if isinstance(p, dict) and "id" in p}
+    after_ids = {p["id"] for p in after_state if isinstance(p, dict) and "id" in p}
+    
+    if change_type == "merge":
+        insert_idx = None
+        for i, p in enumerate(pts):
+            if p.get("id") in before_ids:
+                insert_idx = i
+                break
+        new_pts = [p for p in pts if p.get("id") not in before_ids]
+        if insert_idx is not None:
+            for j, ap in enumerate(after_state):
+                new_pts.insert(insert_idx + j, ap)
+        else:
+            new_pts.extend(after_state)
+        pts = new_pts
+    elif change_type == "split":
+        insert_idx = None
+        for i, p in enumerate(pts):
+            if p.get("id") in before_ids:
+                insert_idx = i
+                break
+        new_pts = [p for p in pts if p.get("id") not in before_ids]
+        if insert_idx is not None:
+            for j, ap in enumerate(after_state):
+                new_pts.insert(insert_idx + j, ap)
+        else:
+            new_pts.extend(after_state)
+        pts = new_pts
+    elif change_type == "delete":
+        pts = [p for p in pts if p.get("id") not in before_ids]
+    elif change_type in ("find_replace", "delete_text", "manual_edit"):
+        after_map = {p["id"]: p for p in after_state if isinstance(p, dict) and "id" in p}
+        for i, p in enumerate(pts):
+            if p.get("id") in after_map:
+                pts[i] = after_map[p["id"]]
+    
+    data["stage2"]["polished_points"] = pts
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    await db.execute(
+        text(
+            "UPDATE stage2_edit_history SET is_reverted = 0, reverted_at = NULL "
+            "WHERE id = :cid"
+        ),
+        {"cid": change_id},
+    )
+    await db.commit()
+    
+    return {"status": "success", "redone_change_id": change_id, "rom_data": data}
+
+@router.post("/{recording_id}/stage2/point/{point_id}/manual-edit")
+async def manual_edit_stage2_point(
+    recording_id: str,
+    point_id: str,
+    req: ManualEditPointRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Manually edit a Stage 2 discussion point."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    
+    pt = next((p for p in pts if p.get("id") == point_id), None)
+    if not pt:
+        raise HTTPException(404, "Point not found")
+    
+    old_text = pt.get("polished_text", "")
+    new_text = req.polished_text.strip()
+    
+    if old_text == new_text:
+        return {"status": "success", "message": "No changes made", "rom_data": data}
+    
+    before_state = [dict(pt)]
+    pt["polished_text"] = new_text
+    after_state = [dict(pt)]
+    
+    data.pop("stage3", None)
+    data.pop("final_rom", None)
+    await _save_rom_data(recording_id, user_id, data, db)
+    
+    change_id = await _record_edit_history(
+        db, recording_id, user_id, "manual_edit",
+        [point_id], before_state, after_state,
+        {"old_text": old_text[:200], "new_text": new_text[:200]}
+    )
+    
+    return {"status": "success", "updated_point": pt, "change_id": change_id, "rom_data": data}
+
+@router.get("/{recording_id}/stage2/training-edits")
+async def get_training_edits(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get non-reverted Stage 2 edits suitable for training."""
+    user_id = _validate_user_id(current_user)
+    result = await db.execute(
+        text(
+            "SELECT * FROM stage2_edit_history "
+            "WHERE recording_id = :rid AND user_id = :uid AND is_reverted = 0 "
+            "ORDER BY created_at ASC"
+        ),
+        {"rid": recording_id, "uid": user_id},
+    )
+    rows = result.fetchall()
+    edits = []
+    for row in rows:
+        r = dict(row._mapping)
+        before = from_json(r.get("before_state", "[]"))
+        after = from_json(r.get("after_state", "[]"))
+        original_texts = [p.get("polished_text", "") for p in before if isinstance(p, dict)]
+        final_texts = [p.get("polished_text", "") for p in after if isinstance(p, dict)]
+        edits.append({
+            "change_id": r["id"],
+            "change_type": r["change_type"],
+            "original_text": "\n---\n".join(original_texts),
+            "final_text": "\n---\n".join(final_texts),
+            "metadata": from_json(r.get("metadata", "{}")),
+            "created_at": r["created_at"],
+        })
+    return {"edits": edits}
+
+@router.post("/{recording_id}/stage2/generate-training-from-edits")
+async def generate_training_from_edits(
+    recording_id: str,
+    req: GenerateEditTrainingRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Generate training dataset from Stage 2 edit history."""
+    user_id = _validate_user_id(current_user)
+    
+    # Fetch selected changes
+    placeholders = ",".join(f":cid{i}" for i in range(len(req.selected_change_ids)))
+    params = {"rid": recording_id, "uid": user_id}
+    params.update({f"cid{i}": cid for i, cid in enumerate(req.selected_change_ids)})
+    
+    result = await db.execute(
+        text(
+            f"SELECT * FROM stage2_edit_history "
+            f"WHERE recording_id = :rid AND user_id = :uid AND is_reverted = 0 "
+            f"AND id IN ({placeholders}) "
+            f"ORDER BY created_at ASC"
+        ),
+        params,
+    )
+    rows = result.fetchall()
+    
+    if not rows:
+        raise HTTPException(404, "No valid changes found")
+    
+    samples = []
+    for row in rows:
+        r = dict(row._mapping)
+        before = from_json(r.get("before_state", "[]"))
+        after = from_json(r.get("after_state", "[]"))
+        change_type = r["change_type"]
+        
+        original_texts = [p.get("polished_text", "") for p in before if isinstance(p, dict)]
+        final_texts = [p.get("polished_text", "") for p in after if isinstance(p, dict)]
+        
+        input_text = f"[Change Type: {change_type}]\n" + "\n---\n".join(original_texts)
+        output_text = "\n---\n".join(final_texts)
+        
+        if input_text.strip() and output_text.strip():
+            samples.append({
+                "inputs": {"stage": "stage_2", "change_type": change_type, "text": input_text},
+                "target": output_text,
+                "change_id": r["id"],
+            })
+    
+    # Save as a dataset file
+    dataset_id = str(uuid.uuid4())
+    dataset = {
+        "dataset_id": dataset_id,
+        "user_id": user_id,
+        "stages": ["stage_2"],
+        "source_type": "edit_history",
+        "source_meeting_id": recording_id,
+        "total_samples": len(samples),
+        "samples_by_stage": {"stage_2": len(samples)},
+        "samples": samples,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    
+    from services.training.training_storage_service import save_dataset
+    save_dataset(dataset_id, dataset)
+    
+    # Also store in training_datasets table
+    await db.execute(
+        text(
+            "INSERT INTO training_datasets "
+            "(dataset_id, user_id, stages, source_type, source_meeting_id, total_samples, samples_by_stage, created_at) "
+            "VALUES (:did, :uid, :stages, :st, :smid, :ts, :sbs, :cat)"
+        ),
+        {
+            "did": dataset_id,
+            "uid": user_id,
+            "stages": to_json(["stage_2"]),
+            "st": "edit_history",
+            "smid": recording_id,
+            "ts": len(samples),
+            "sbs": to_json({"stage_2": len(samples)}),
+            "cat": datetime.utcnow().isoformat(),
+        },
+    )
+    await db.commit()
+    
+    return {
+        "status": "success",
+        "dataset_id": dataset_id,
+        "sample_count": len(samples),
+        "samples_preview": samples[:5],
+    }
 
 @router.delete("/{recording_id}")
 async def delete_rom_data(recording_id: str, current_user: dict = Depends(get_current_user), db=Depends(get_db)):

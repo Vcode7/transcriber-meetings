@@ -1,0 +1,11 @@
+{
+  "model_name": "",
+  "optimizer": "BootstrapFewShot",
+  "num_trials": 10,
+  "eval_split": 0.2,
+  "bootstrap_examples": 3,
+  "max_demonstrations": 4,
+  "temperature": 0,
+  "max_tokens": 2048,
+  "points_per_batch": 15
+}

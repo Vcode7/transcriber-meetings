@@ -246,9 +246,9 @@ async def delete_attachment(
                     dim = embedder.embedding_dim()
                     store = get_meeting_context_store(recording_id, dim)
                     store.clear()
-                    logger.info(f"[Attachments] Cleared FAISS vector store for {recording_id}")
+                    logger.info(f"[Attachments] Cleared ChromaDB vector store for {recording_id}")
                 except Exception as e:
-                    logger.warning(f"[Attachments] Failed to clear FAISS store on delete: {e}")
+                    logger.warning(f"[Attachments] Failed to clear ChromaDB store on delete: {e}")
 
         if att_type == "agenda":
             await db.execute(

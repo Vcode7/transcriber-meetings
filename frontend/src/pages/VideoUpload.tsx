@@ -14,6 +14,9 @@ import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 import { useJobsStore } from '../store/jobs'
 
+import AudioTrimmer from '../components/AudioTrimmer'
+import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+
 interface OcrBlock {
   start: number
   end: number
@@ -305,6 +308,8 @@ export default function VideoUploadPage() {
     } else if (currentJob.status === 'transcript_ready') {
       if (currentJob.result?.transcript && result !== currentJob.result) setResult(currentJob.result as ProcessingResult)
       setIsGeneratingMom(true)
+    } else if (currentJob.status === 'pending_transcript_review') {
+      clearProcessing()
     } else {
       setProcessing('video-upload' as ProcessingStage, currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
@@ -385,7 +390,7 @@ export default function VideoUploadPage() {
     }
   }
 
-  const handleUpload = async () => {
+  const handleUpload = async (trimStartSec?: number, trimEndSec?: number) => {
     if (!file) return
     setUploading(true); setError('')
     setProcessing('video-upload' as ProcessingStage, 'uploading')
@@ -396,6 +401,10 @@ export default function VideoUploadPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
+      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
+        form.append('trim_start_sec', String(trimStartSec))
+        form.append('trim_end_sec', String(trimEndSec))
+      }
       const res = await api.post('/video/upload', form)
       const rId = res.data.recording_id
       setRecordingId(rId)
@@ -620,26 +629,27 @@ export default function VideoUploadPage() {
             )}
 
             {file && !recordingId && (
-              <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+                <AudioTrimmer
+                  file={file}
+                  fileName={file.name}
+                  onConfirm={(start, end) => handleUpload(start, end)}
+                  onSkip={() => handleUpload()}
+                />
                 <AdvancedOptionsPanel onChange={setAdvancedOpts} />
-                <button
-                  className="btn btn-primary animate-slide-up"
-                  onClick={handleUpload}
-                  disabled={uploading}
-                  id="video-upload-btn"
-                  style={{
-                    width: '100%', justifyContent: 'center', padding: '.75rem 1.5rem',
-                    fontSize: '.95rem', marginTop: '1rem',
-                    background: 'linear-gradient(135deg, hsl(260 80% 55%), hsl(280 70% 60%))',
-                    boxShadow: '0 4px 15px hsl(260 80% 55% / .3)',
-                  }}
-                >
-                  {uploading ? <Loader size={16} className="spin" /> : <Video size={16} />}
-                  {uploading ? 'Uploading…' : 'Process Video'}
-                </button>
-              </>
+              </div>
             )}
           </div>
+        )}
+
+        {(currentJob?.status === 'pending_transcript_review' || jobData?.status === 'pending_transcript_review') && recordingId && (
+          <TranscriptReviewPanel
+            recordingId={recordingId}
+            onResumed={() => {
+              updateStage('diarizing')
+              setProcessing('video-upload' as ProcessingStage, 'diarizing')
+            }}
+          />
         )}
 
         {/* OCR Timeline (shown after result is ready and OCR ran) */}
@@ -749,6 +759,8 @@ export default function VideoUploadPage() {
           isGeneratingMom={isGeneratingMom}
           onGenerateInsights={handleGenerateInsights}
           isGeneratingInsights={isGeneratingInsights}
+          onScrollToSegment={() => {}}
+          onTranscriptChanged={() => {}}
         />
       </div>
     </div>

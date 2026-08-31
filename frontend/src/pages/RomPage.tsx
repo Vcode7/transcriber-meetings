@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  ArrowLeft, Sparkles, Download, FileText, Clock, User,
+  ArrowLeft, Sparkles, Download, FileText, Clock, User, UserCheck,
   Loader, Pencil, Upload, Save, X, Play, Plus, Brain,
   Target, List, RefreshCw, FileDown, Layers, Video,
   ChevronUp, ChevronDown, ArrowRightLeft, Tag, Trash2, Sliders,
-  RotateCcw, WandSparkles, FileUp
+  RotateCcw, RotateCw, WandSparkles, FileUp, Search, Replace, History,
+  Merge, Scissors, Check, CornerDownRight, GitMerge,
+  BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -36,27 +38,70 @@ interface DiscussionPoint {
   timeline_start: number
   timeline_end: number
   speakers: string[]
-  action_owner: string | null
-  decisions: string[]
-  questions: string[]
   technical_terms: string[]
   dates: string[]
   numbers: string[]
-  project_names: string[]
-  action_items: string[]
   references: string[]
-  required_information: string[]
+  action_items: string[]
+  action_owner?: string | null
+  action_owners?: string[]
   window_index: number
   raw_transcript_text?: string
   video_transcript_context?: string
 }
+
+const getActionOwnerText = (pt: any): string | null => {
+  if (!pt) return null
+  let owner = pt.action_owner || pt.action_owners || pt.owner || pt.assignee || pt.action_assignee || pt.assignees
+
+  // If not found at top-level, extract assignees/owners from action_items array (e.g. separate action extraction)
+  if (!owner && Array.isArray(pt.action_items) && pt.action_items.length > 0) {
+    const itemAssignees: string[] = []
+    for (const item of pt.action_items) {
+      if (typeof item === 'object' && item !== null) {
+        const a = item.assignee || item.owner || item.action_owner || item.action_owners || item.assignees
+        if (a) {
+          if (Array.isArray(a)) itemAssignees.push(...a.map(String))
+          else itemAssignees.push(String(a))
+        }
+      } else if (typeof item === 'string') {
+        const m = item.match(/\((?:Owner|Assignee):\s*([^)]+)\)/i)
+        if (m && m[1]) itemAssignees.push(m[1].trim())
+      }
+    }
+    if (itemAssignees.length > 0) {
+      owner = itemAssignees
+    }
+  }
+
+  // Also check if pt is itself an action item object with assignee/owner
+  if (!owner && typeof pt === 'object') {
+    owner = pt.assignee || pt.owner
+  }
+
+  if (!owner) return null
+  if (Array.isArray(owner)) {
+    const valid = owner
+      .map(o => formatItemText(o))
+      .filter(s => s && s.toLowerCase() !== 'null' && s.toLowerCase() !== 'none' && s.toLowerCase() !== 'n/a' && s.toLowerCase() !== 'undefined' && s.toLowerCase() !== 'unassigned')
+    const unique = Array.from(new Set(valid))
+    return unique.length > 0 ? unique.join(', ') : null
+  }
+  const str = formatItemText(owner)
+  if (!str || str.toLowerCase() === 'null' || str.toLowerCase() === 'none' || str.toLowerCase() === 'n/a' || str.toLowerCase() === 'undefined' || str.toLowerCase() === 'unassigned') {
+    return null
+  }
+  return str
+}
+
+
 
 const formatItemText = (item: any): string => {
   if (item === null || item === undefined) return ''
   if (typeof item === 'string') return item.trim()
   if (typeof item === 'number' || typeof item === 'boolean') return String(item)
   if (typeof item === 'object') {
-    const task = item.task || item.description || item.item || item.text || item.action || item.decision || item.point
+    const task = item.speaker_text || item.speaker_name || item.speaker || item.name || item.task || item.description || item.item || item.text || item.action || item.decision || item.point || item.val || item.value || item.label || item.real_name
     const assignee = item.assignee || item.owner
     const assigner = item.assigner
     const deadline = item.deadline || item.due || item.date
@@ -108,55 +153,38 @@ const cleanCalendarDates = (datesList: any): string[] => {
   return clean
 }
 
-const formatPrecisePointText = (pt: any): string => {
-  const rawDecisions = pt.decisions || []
-  const decList = (Array.isArray(rawDecisions) ? rawDecisions : [rawDecisions])
-    .map((d: any) => formatItemText(d))
-    .filter((d: string) => d && !['none', 'n/a', 'null'].includes(d.toLowerCase()))
-
-  const rawActions = pt.action_items || []
-  const actList = (Array.isArray(rawActions) ? rawActions : [rawActions])
-    .map((a: any) => formatItemText(a))
-    .filter((a: string) => a && !['none', 'n/a', 'null'].includes(a.toLowerCase()))
-
-  const validDates = cleanCalendarDates(pt.dates)
-
-  const parts: string[] = []
-  if (decList.length) parts.push(...decList)
-  if (actList.length) parts.push(...actList)
-
-  if (!parts.length) {
-    const ptText = formatItemText(pt.text || pt.polished_text || pt.discussion_point || '')
-    if (ptText) parts.push(ptText)
-  }
-
-  if (!parts.length) return 'Discussion noted.'
-
-  const mainText = parts.map(p => p.replace(/\.$/, '')).join('. ') + '.'
-
-  if (validDates.length) {
-    return `${mainText} (${validDates.join(', ')})`
-  }
-  return mainText
-}
-
 interface PolishedPoint {
   id: string
   original_point_id: string
+  original_point_ids?: string[]
   polished_text: string
   timeline_start: number
   timeline_end: number
   speakers: string[]
-  action_owner: string | null
-  decisions: string[]
   technical_terms: string[]
   dates: string[]
   numbers: string[]
   references: string[]
-  action_items: string[]
-  retrieved_context: {
+  action_items: Array<{ task: string; assignee: string | null; deadline: string | null }> | string[]
+  context_usage_report?: {
+    meeting_context_used: boolean
+    global_context_used: boolean
+    context_added: boolean
+    documents: string[]
+  }
+  retrieved_context?: {
     meeting_chunks: Array<{ text: string; score: number; filename: string }>
     global_chunks: Array<{ text: string; score: number; filename: string }>
+    previous_meeting_chunks?: Array<{
+      text: string
+      score: number
+      meeting_id?: string
+      meeting_name?: string
+      date?: string
+      speakers?: string
+      action_owner?: string
+    }>
+    context_usage_report?: any
   }
 }
 
@@ -274,32 +302,567 @@ function StatusBadge({ state }: { state: ProcessState }) {
   )
 }
 
-const BUILTIN_PROMPT_TEMPLATES = [
-  {
-    id: 'executive_polish',
-    name: 'Executive Summary Polish',
-    description: 'Polishes discussion points for C-suite executive reporting with high-level outcome bullets and strategic alignment.',
-    prompt: `Enhance all agenda discussion points to be crisp, concise, and structured for C-suite executive review.\n- Focus on strategic decisions, financial/business impacts, and key milestones.\n- Use strong, active business verbs and clear bullet structures.\n- Keep technical jargon minimal unless essential to the decision context.\n- Ensure all action items clearly state the task, owner, and deadline.`
-  },
-  {
-    id: 'technical_spec',
-    name: 'Technical & Architectural Focus',
-    description: 'Emphasizes technical specifications, architecture decisions, system impacts, and engineering tasks.',
-    prompt: `Enhance discussion points with technical precision for engineering and product teams.\n- Highlight specific architectural choices, system components, API contracts, and technology stacks mentioned.\n- Explicitly document technical dependencies, performance/scaling metrics, and security/compliance considerations.\n- Ensure action items clearly define technical deliverables, owner, and implementation target.`
-  },
-  {
-    id: 'action_oriented',
-    name: 'Action-Oriented & Operational',
-    description: 'Prioritizes operational deliverables, task owners, deadlines, and project execution milestones.',
-    prompt: `Format all discussion points into clear, action-oriented operational meeting notes.\n- Highlight operational deliverables, task ownership, and target execution timelines.\n- Clearly separate key discussion takeaways from explicit follow-up commitments.\n- Ensure all action items are listed with complete descriptions, owners, and explicit target dates.`
-  },
-  {
-    id: 'formal_governance',
-    name: 'Formal Governance & Minutes',
-    description: 'Structures notes into formal corporate governance meeting minutes with clear motions and approvals.',
-    prompt: `Format the meeting discussion into formal corporate governance minutes style.\n- Maintain formal, objective, third-person corporate tone throughout.\n- Clearly record formal proposals, consensus reached, and official decisions made.\n- Ensure all task assignments and responsibilities are formally documented with assigned owners.`
+function Stage1ProgressBanner({ progress }: {
+  progress: {
+    windows_completed: number
+    windows_total: number
+    concurrency: number
+    eta_seconds: number | null
+    elapsed_seconds: number
+    status: string
   }
-]
+}) {
+  const { windows_completed, windows_total, eta_seconds, elapsed_seconds, concurrency } = progress
+  const pct = windows_total > 0 ? Math.round((windows_completed / windows_total) * 100) : 0
+
+  const fmtSecs = (s: number | null) => {
+    if (s === null || s === undefined) return null
+    const sRound = Math.round(s)
+    if (sRound < 60) return `${sRound}s`
+    const m = Math.floor(sRound / 60)
+    const rem = sRound % 60
+    return rem > 0 ? `${m}m ${rem}s` : `${m}m`
+  }
+
+  const etaLabel = fmtSecs(eta_seconds)
+  const elapsedLabel = fmtSecs(elapsed_seconds)
+
+  return (
+    <div style={{
+      borderRadius: 12,
+      border: '1.5px solid hsl(280,75%,65%/.35)',
+      background: 'linear-gradient(135deg, hsl(280,75%,65%/.08) 0%, hsl(220,80%,60%/.06) 100%)',
+      padding: '1rem 1.25rem',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.65rem',
+      backdropFilter: 'blur(8px)',
+    }}>
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <Loader size={13} className="spin" style={{ color: 'hsl(280,75%,65%)' }} />
+          <span style={{ fontSize: '.8rem', fontWeight: 700, color: 'hsl(280,75%,65%)', fontFamily: 'Inter' }}>
+            Extracting Stage 1
+          </span>
+          {concurrency > 1 && (
+            <span style={{
+              fontSize: '.65rem', fontWeight: 600, padding: '1px 6px', borderRadius: 999,
+              background: 'hsl(220,80%,60%/.18)', border: '1px solid hsl(220,80%,60%/.3)',
+              color: 'hsl(220,80%,60%)', fontFamily: 'Inter'
+            }}>
+              ×{concurrency} parallel
+            </span>
+          )}
+        </div>
+        <span style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter' }}>
+          Window {windows_completed} / {windows_total}
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ borderRadius: 999, background: 'hsl(var(--border)/.5)', height: 6, overflow: 'hidden' }}>
+        <div style={{
+          height: '100%',
+          width: `${pct}%`,
+          borderRadius: 999,
+          background: 'linear-gradient(90deg, hsl(280,75%,60%), hsl(220,80%,60%))',
+          transition: 'width 0.6s ease',
+          boxShadow: '0 0 8px hsl(280,75%,60%/.5)',
+        }} />
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, fontSize: '.72rem', fontFamily: 'Inter', color: 'hsl(var(--pencil))' }}>
+        <span style={{ fontWeight: 600, color: 'hsl(var(--ink))' }}>{pct}%</span>
+        {elapsedLabel && <span>Elapsed: <strong>{elapsedLabel}</strong></span>}
+        {etaLabel && windows_completed > 0 && (
+          <span style={{ marginLeft: 'auto', color: 'hsl(220,80%,60%)', fontWeight: 600 }}>
+            ~{etaLabel} remaining
+          </span>
+        )}
+        {!etaLabel && windows_completed === 0 && (
+          <span style={{ marginLeft: 'auto', color: 'hsl(var(--pencil))', fontStyle: 'italic' }}>
+            Estimating...
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Stage 1 Window Re-run Modal Component ─────────────────────────────────────
+
+function Stage1WindowRerunModal({
+  recordingId,
+  windowData,
+  transcriptWindowMinutes,
+  onClose,
+  onAccepted,
+}: {
+  recordingId: string
+  windowData: {
+    windowIndex: number
+    timelineStart: number
+    timelineEnd: number
+    points: DiscussionPoint[]
+  }
+  transcriptWindowMinutes: number
+  onClose: () => void
+  onAccepted: (newRomData: RomData) => void
+}) {
+  const [feedback, setFeedback] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [accepting, setAccepting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<{
+    transcript_text: string
+    video_context: string
+    original_points: DiscussionPoint[]
+    regenerated_points: DiscussionPoint[]
+  } | null>(null)
+
+  const handleRerun = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await api.post(`/rom/${recordingId}/stage1/rerun-window`, {
+        window_index: windowData.windowIndex,
+        user_feedback: feedback,
+        transcript_window_minutes: transcriptWindowMinutes,
+      })
+      if (res.data?.result) {
+        setResult(res.data.result)
+        toast.success(`Window ${windowData.windowIndex} points regenerated`)
+      }
+    } catch (e: any) {
+      setError(getApiErrorDetail(e) || 'Failed to re-run window')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleAccept = async () => {
+    if (!result) return
+    setAccepting(true)
+    try {
+      const res = await api.post(`/rom/${recordingId}/stage1/rerun-window/accept`, {
+        window_index: windowData.windowIndex,
+        user_feedback: feedback,
+        original_points: result.original_points || windowData.points,
+        corrected_points: result.regenerated_points,
+        transcript_window: result.transcript_text,
+      })
+      if (res.data?.rom_data) {
+        onAccepted(res.data.rom_data)
+        toast.success(`Window ${windowData.windowIndex} updated and feedback saved for DSPy training!`)
+        onClose()
+      }
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Failed to accept updated points')
+    } finally {
+      setAccepting(false)
+    }
+  }
+
+  const sourceTranscript = result?.transcript_text || windowData.points[0]?.raw_transcript_text || ''
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem',
+    }}>
+      <div style={{
+        background: 'hsl(var(--card))',
+        border: '1.5px solid hsl(280,75%,60%/.4)',
+        borderRadius: 14,
+        width: '100%',
+        maxWidth: 820,
+        maxHeight: '90vh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        boxShadow: '0 20px 40px rgba(0,0,0,0.4)',
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: '.85rem 1.25rem',
+          borderBottom: '1px solid hsl(var(--border)/.5)',
+          background: 'hsl(280,75%,60%/.08)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: 8,
+              background: 'hsl(280,75%,60%/.15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <RotateCcw size={15} color="hsl(280,75%,60%)" />
+            </div>
+            <div>
+              <div style={{ fontSize: '.92rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                Re-run Window {windowData.windowIndex}
+              </div>
+              <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Clock size={10} /> {fmtTime(windowData.timelineStart)} – {fmtTime(windowData.timelineEnd)}
+                <span>•</span>
+                <span>{windowData.points.length} extracted point(s)</span>
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={onClose}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: 4 }}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {/* Source transcript display */}
+          <div style={{ borderRadius: 8, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--muted)/.2)', padding: '.75rem .9rem' }}>
+            <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 4 }}>
+              Window Source Transcript
+            </div>
+            <pre style={{
+              margin: 0, maxHeight: 120, overflowY: 'auto', fontSize: '.75rem', lineHeight: 1.45,
+              whiteSpace: 'pre-wrap', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))'
+            }}>
+              {sourceTranscript || 'Source transcript will load when re-running.'}
+            </pre>
+          </div>
+
+          {/* Current vs Regenerated points */}
+          <div style={{ display: 'grid', gridTemplateColumns: result ? '1fr 1fr' : '1fr', gap: '1rem' }}>
+            {/* Current extracted points */}
+            <div style={{ borderRadius: 8, border: '1px solid hsl(var(--border)/.4)', padding: '.75rem .9rem', background: 'hsl(var(--card))' }}>
+              <div style={{ fontSize: '.74rem', fontWeight: 700, color: 'hsl(var(--pencil))', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <ListChecks size={13} /> Current Extracted Points ({windowData.points.length})
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+                {windowData.points.map((pt, i) => {
+                  const owner = getActionOwnerText(pt)
+                  return (
+                    <div key={i} style={{ padding: '.45rem .6rem', borderRadius: 6, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.3)', fontSize: '.76rem', lineHeight: 1.4 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                        <span style={{ fontWeight: 700, color: 'hsl(280,75%,60%)' }}>P{i + 1}</span>
+                        {owner && (
+                          <span style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <UserCheck size={8} /> Owner: {owner}
+                          </span>
+                        )}
+                      </div>
+                      <div>{formatItemText(pt.discussion_point)}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* Regenerated points */}
+            {result && (
+              <div style={{ borderRadius: 8, border: '1.5px solid hsl(140,70%,45%/.4)', padding: '.75rem .9rem', background: 'hsl(140,70%,45%/.03)' }}>
+                <div style={{ fontSize: '.74rem', fontWeight: 700, color: 'hsl(140,70%,45%)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <CheckCircle size={13} /> Regenerated Points ({result.regenerated_points.length})
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+                  {result.regenerated_points.length === 0 ? (
+                    <div style={{ color: 'hsl(var(--pencil))', fontSize: '.76rem', fontStyle: 'italic' }}>No points extracted.</div>
+                  ) : (
+                    result.regenerated_points.map((pt, i) => {
+                      const owner = getActionOwnerText(pt)
+                      return (
+                        <div key={i} style={{ padding: '.45rem .6rem', borderRadius: 6, background: 'hsl(var(--paper))', border: '1px solid hsl(140,70%,45%/.3)', fontSize: '.76rem', lineHeight: 1.4 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                            <span style={{ fontWeight: 700, color: 'hsl(140,70%,45%)' }}>New P{i + 1}</span>
+                            {owner && (
+                              <span style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                                <UserCheck size={8} /> Owner: {owner}
+                              </span>
+                            )}
+                          </div>
+                          <div>{formatItemText(pt.discussion_point)}</div>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* User Feedback & Instructions */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '.4rem' }}>
+            <label style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 5 }}>
+              <MessageSquare size={13} color="hsl(280,75%,60%)" /> User Feedback & Correction Instructions:
+            </label>
+            <textarea
+              value={feedback}
+              onChange={e => setFeedback(e.target.value)}
+              placeholder="e.g. You didn't extract this point from this window: The team decided to deploy the new release on Sunday night and designated Sarah as the owner."
+              rows={3}
+              style={{
+                width: '100%', padding: '.6rem .75rem', borderRadius: 8,
+                border: '1.5px solid hsl(280,75%,60%/.4)', background: 'hsl(var(--background))',
+                fontSize: '.8rem', color: 'hsl(var(--ink))', fontFamily: 'Inter',
+                outline: 'none', resize: 'vertical', boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ fontSize: '.71rem', color: 'hsl(var(--pencil))' }}>
+              Your feedback will be sent directly to the LLM along with the transcript to guide the re-extraction, and saved for DSPy training.
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ padding: '.5rem .75rem', borderRadius: 6, background: 'hsl(0,75%,55%/.1)', border: '1px solid hsl(0,75%,55%/.3)', color: 'hsl(0,75%,55%)', fontSize: '.75rem' }}>
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          padding: '.75rem 1.25rem',
+          borderTop: '1px solid hsl(var(--border)/.5)',
+          background: 'hsl(var(--muted)/.2)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '.45rem .9rem', borderRadius: 7, border: '1px solid hsl(var(--border))',
+              background: 'transparent', color: 'hsl(var(--ink))', fontSize: '.78rem',
+              fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter',
+            }}
+          >
+            Cancel
+          </button>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={handleRerun}
+              disabled={loading}
+              style={{
+                padding: '.45rem 1rem', borderRadius: 7, border: 'none',
+                background: 'hsl(280,75%,60%)', color: 'white', fontSize: '.78rem',
+                fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer',
+                fontFamily: 'Inter', display: 'flex', alignItems: 'center', gap: 5,
+                opacity: loading ? 0.7 : 1,
+              }}
+            >
+              {loading ? <Loader size={12} className="spin" /> : <Play size={12} />}
+              {loading ? 'Regenerating...' : 'Regenerate Window'}
+            </button>
+
+            {result && (
+              <button
+                onClick={handleAccept}
+                disabled={accepting}
+                style={{
+                  padding: '.45rem 1.1rem', borderRadius: 7, border: 'none',
+                  background: 'hsl(140,70%,45%)', color: 'white', fontSize: '.78rem',
+                  fontWeight: 700, cursor: accepting ? 'not-allowed' : 'pointer',
+                  fontFamily: 'Inter', display: 'flex', alignItems: 'center', gap: 5,
+                  opacity: accepting ? 0.7 : 1,
+                }}
+              >
+                {accepting ? <Loader size={12} className="spin" /> : <Check size={12} />}
+                {accepting ? 'Saving...' : 'Accept & Save Window'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Stage 2 Reference Examples Panel Component ────────────────────────────────
+
+function Stage2ReferenceExamplesPanel({
+  examples,
+  onChange,
+  onSave,
+  saving,
+}: {
+  examples: string[]
+  onChange: (newExamples: string[]) => void
+  onSave: () => Promise<void>
+  saving: boolean
+}) {
+  const [collapsed, setCollapsed] = useState(false)
+  const [savedSuccess, setSavedSuccess] = useState(false)
+
+  const handleSave = async () => {
+    await onSave()
+    setSavedSuccess(true)
+    setTimeout(() => setSavedSuccess(false), 2500)
+  }
+
+  const addExample = () => {
+    onChange([...examples, ''])
+  }
+
+  const removeExample = (idx: number) => {
+    onChange(examples.filter((_, i) => i !== idx))
+  }
+
+  const updateExample = (idx: number, text: string) => {
+    onChange(examples.map((p, i) => (i === idx ? text : p)))
+  }
+
+  return (
+    <div style={{
+      borderRadius: 10,
+      border: '1.5px solid hsl(38,92%,50%/.4)',
+      background: 'hsl(var(--card))',
+      padding: '.85rem 1rem',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '.75rem',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div
+          onClick={() => setCollapsed(v => !v)}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}
+        >
+          <div style={{
+            width: 26, height: 26, borderRadius: 6,
+            background: 'hsl(38,92%,50%/.15)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+          }}>
+            <BookOpen size={14} color="hsl(38,92%,50%)" />
+          </div>
+          <div>
+            <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+              Reference Examples — Writing Style Only
+              <span style={{ fontSize: '.68rem', fontWeight: 700, padding: '1px 6px', borderRadius: 6, background: 'hsl(38,92%,50%/.15)', color: 'hsl(38,92%,45%)' }}>
+                {examples.filter(p => p.trim()).length} examples
+              </span>
+            </div>
+            <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>
+              Used strictly for sentence structure, granularity, and tone during Stage 2 generation.
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {savedSuccess && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: '.72rem', color: 'hsl(140,70%,45%)', fontWeight: 700 }}>
+              <Check size={12} /> Saved
+            </span>
+          )}
+          <button
+            onClick={() => setCollapsed(v => !v)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px 4px' }}
+          >
+            {collapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+          </button>
+        </div>
+      </div>
+
+      {!collapsed && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '.75rem' }}>
+          {/* Style-only warning banner */}
+          <div style={{
+            display: 'flex', gap: 8, padding: '.6rem .75rem', borderRadius: 8,
+            background: 'hsl(38,92%,50%/.08)', border: '1px solid hsl(38,92%,50%/.3)',
+            fontSize: '.74rem', color: 'hsl(var(--ink))', lineHeight: 1.45,
+          }}>
+            <AlertTriangle size={15} color="hsl(38,92%,50%)" style={{ flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <strong>Reference Examples — Writing Style Only:</strong> These examples show how discussion points should be written.
+              They are <strong>NOT context, facts, evidence, or information to use in the output</strong>.
+              The LLM will use them strictly for style, granularity, and tone, and will never copy their facts.
+            </div>
+          </div>
+
+          {/* List of examples */}
+          {examples.length === 0 ? (
+            <div style={{
+              textAlign: 'center', padding: '1rem', color: 'hsl(var(--pencil))', fontSize: '.78rem',
+              border: '1px dashed hsl(var(--border))', borderRadius: 8, background: 'hsl(var(--muted)/.2)'
+            }}>
+              No style examples added yet. Click <strong>Add Example</strong> to guide how Stage 2 points are phrased.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {examples.map((ex, idx) => (
+                <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                  <span style={{
+                    fontSize: '.68rem', fontWeight: 700, color: 'hsl(38,92%,45%)',
+                    background: 'hsl(38,92%,50%/.15)', padding: '2px 6px', borderRadius: 5,
+                    fontFamily: 'JetBrains Mono', marginTop: 4, flexShrink: 0,
+                  }}>
+                    #{idx + 1}
+                  </span>
+                  <textarea
+                    value={ex}
+                    onChange={e => updateExample(idx, e.target.value)}
+                    placeholder="Enter an example discussion point demonstrating the desired writing style, detail level, and structure..."
+                    rows={2}
+                    style={{
+                      flex: 1, padding: '.45rem .65rem', borderRadius: 6,
+                      border: '1px solid hsl(var(--border))', background: 'hsl(var(--background))',
+                      fontSize: '.78rem', color: 'hsl(var(--ink))', fontFamily: 'Inter',
+                      outline: 'none', resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    onClick={() => removeExample(idx)}
+                    title="Remove example"
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'hsl(var(--destructive))', padding: '4px', marginTop: 3
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
+            <button
+              onClick={addExample}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '.35rem .7rem', borderRadius: 6,
+                border: '1px dashed hsl(38,92%,50%/.5)', background: 'hsl(38,92%,50%/.06)',
+                color: 'hsl(38,92%,40%)', fontSize: '.74rem', fontWeight: 700,
+                cursor: 'pointer', fontFamily: 'Inter',
+              }}
+            >
+              <Plus size={12} /> Add Example
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '.35rem .85rem', borderRadius: 6,
+                border: 'none', background: 'hsl(38,92%,45%)',
+                color: 'white', fontSize: '.74rem', fontWeight: 700,
+                cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'Inter',
+                opacity: saving ? 0.7 : 1,
+              }}
+            >
+              {saving ? <Loader size={12} className="spin" /> : <Save size={12} />}
+              {saving ? 'Saving...' : 'Save Examples'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -315,29 +878,88 @@ export default function RomPage() {
   const [romData, setRomData] = useState<RomData | null>(null)
 
   // Active tab
-  const [activeTab, setActiveTab] = useState<'stage1' | 'stage2' | 'stage3' | 'final' | 'advanced'>('stage1')
+  const [activeTab, setActiveTab] = useState<'stage1' | 'stage2' | 'stage3' | 'final'>('stage1')
 
-  // Advanced MoM controls
-  const [advancedCustomPrompt, setAdvancedCustomPrompt] = useState('')
-  const [advancedRegenTitle, setAdvancedRegenTitle] = useState(false)
-  const [advancedRegenIntro, setAdvancedRegenIntro] = useState(false)
-  const [advancedRegenConclusion, setAdvancedRegenConclusion] = useState(false)
-  const [advancedStatus, setAdvancedStatus] = useState<ProcessState>('idle')
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null)
 
   // Stage 1 controls
   const [transcriptWindow, setTranscriptWindow] = useState(2)
   const [stage1Status, setStage1Status] = useState<ProcessState>('idle')
+  const [stage1Progress, setStage1Progress] = useState<{
+    windows_completed: number
+    windows_total: number
+    concurrency: number
+    eta_seconds: number | null
+    elapsed_seconds: number
+    status: string
+  } | null>(null)
+  const stage1PollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Stage 1 Re-run Window state
+  const [rerunModalWindow, setRerunModalWindow] = useState<{
+    windowIndex: number
+    timelineStart: number
+    timelineEnd: number
+    points: DiscussionPoint[]
+  } | null>(null)
 
   // Stage 2 controls
   const [meetingTopK, setMeetingTopK] = useState(5)
   const [globalTopK, setGlobalTopK] = useState(3)
   const [discussionWindowSize, setDiscussionWindowSize] = useState(5)
+  const [minSimilarityThreshold, setMinSimilarityThreshold] = useState<number | null>(0.80)
+  const [processAllTogether, setProcessAllTogether] = useState(false)
   const [stage2Status, setStage2Status] = useState<ProcessState>('idle')
   // Stage 2 meeting documents (uploaded inline, text extracted)
   const [stage2MeetingDocs, setStage2MeetingDocs] = useState<{ id: string; name: string }[]>([])
   const [uploadingStage2Doc, setUploadingStage2Doc] = useState(false)
   const stage2DocInputRef = useRef<HTMLInputElement>(null)
+
+  // Stage 2 Reference Example Points
+  const [stage2ReferenceExamples, setStage2ReferenceExamples] = useState<string[]>([])
+  const [savingStage2Examples, setSavingStage2Examples] = useState(false)
+
+  // Stage 2 Previous Meeting Context (Dual Mode)
+  const [previousMeetingMode, setPreviousMeetingMode] = useState<'auto' | 'select' | 'off'>('auto')
+  const [selectedPreviousMeetingId, setSelectedPreviousMeetingId] = useState<string>('')
+  const [previousMeetingTopK, setPreviousMeetingTopK] = useState(3)
+  const [availablePreviousMeetings, setAvailablePreviousMeetings] = useState<Array<{
+    id: string
+    name: string
+    title: string
+    date: string
+    stage2_count: number
+    has_stage2: boolean
+  }>>([])
+  const [loadingPreviousMeetings, setLoadingPreviousMeetings] = useState(false)
+
+  // Stage 2 editing features
+  const [selectedPointIds, setSelectedPointIds] = useState<Set<string>>(new Set())
+  const [showFindReplace, setShowFindReplace] = useState(false)
+  const [findText, setFindText] = useState('')
+  const [replaceText, setReplaceText] = useState('')
+  const [findPreviewCount, setFindPreviewCount] = useState<number | null>(null)
+  const [findPreviewPoints, setFindPreviewPoints] = useState<{point_id: string; count: number; point_number: number}[]>([])
+  const [applyingFindReplace, setApplyingFindReplace] = useState(false)
+  const [mergingPoints, setMergingPoints] = useState(false)
+  const [splittingPoint, setSplittingPoint] = useState(false)
+  const [deletingText, setDeletingText] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; pointId: string; selectedText: string } | null>(null)
+  const [showChangeHistory, setShowChangeHistory] = useState(false)
+  const [changeHistory, setChangeHistory] = useState<any[]>([])
+  const [loadingHistory, setLoadingHistory] = useState(false)
+  const [revertingChangeId, setRevertingChangeId] = useState<string | null>(null)
+  const [redoingChangeId, setRedoingChangeId] = useState<string | null>(null)
+  const [editingStage2PointId, setEditingStage2PointId] = useState<string | null>(null)
+  const [stage2EditDraft, setStage2EditDraft] = useState('')
+  const [savingStage2Point, setSavingStage2Point] = useState(false)
+
+  useEffect(() => {
+    const handleScrollOrClick = () => {
+      if (contextMenu) setContextMenu(null)
+    }
+    window.addEventListener('scroll', handleScrollOrClick, true)
+    return () => window.removeEventListener('scroll', handleScrollOrClick, true)
+  }, [contextMenu])
 
   // Stage 3 controls
   const [agendaText, setAgendaText] = useState('')
@@ -379,6 +1001,8 @@ export default function RomPage() {
   // Agenda file upload (for text extraction to populate agendaText)
   const [agendaUploadedFiles, setAgendaUploadedFiles] = useState<{ name: string; text: string }[]>([])
   const [uploadingAgendaFile, setUploadingAgendaFile] = useState(false)
+  const [forceRegenerateAgenda, setForceRegenerateAgenda] = useState(false)
+  const [showAgendaTextPreview, setShowAgendaTextPreview] = useState(false)
   const agendaFileInputRef = useRef<HTMLInputElement>(null)
 
   const forceReparseRef = useRef(false)
@@ -393,7 +1017,6 @@ export default function RomPage() {
   const [editingPointId, setEditingPointId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [savingRom, setSavingRom] = useState(false)
-  const [romViewMode, setRomViewMode] = useState<'standard' | 'precise'>('standard')
 
   // Rewrite ROM state
   const DEFAULT_REWRITE_INSTRUCTION = 'Rewrite the ROM in a formal, professional writing style. Improve grammar, sentence structure, readability, and formatting only. Do not change, add, remove, or reinterpret any facts, discussion points, decisions, action items, speakers, or context. Preserve the exact meaning and structure while presenting it in polished formal language.'
@@ -496,8 +1119,11 @@ export default function RomPage() {
       const combined = results.map(r => r.text).join('\n\n')
       setAgendaText(prev => prev ? prev + '\n\n' + combined : combined)
       setAgendaUploadedFiles(prev => [...prev, ...results])
+      setForceRegenerateAgenda(true)
+      setShowAgendaTextPreview(true)
     }
     setUploadingAgendaFile(false)
+    if (agendaFileInputRef.current) agendaFileInputRef.current.value = ''
   }
 
   // Fetch attachments list from backend
@@ -739,32 +1365,6 @@ export default function RomPage() {
     }
   }
 
-  // Generate Advanced MoM using custom prompt and selective regeneration flags
-  const runGenerateAdvancedMom = async (): Promise<boolean> => {
-    if (!id || !advancedCustomPrompt.trim()) return false
-    setAdvancedStatus('processing')
-    try {
-      const res = await api.post(`/rom/${id}/stage3/generate-advanced-mom`, {
-        custom_prompt: advancedCustomPrompt,
-        regenerate_title: advancedRegenTitle,
-        regenerate_intro: advancedRegenIntro,
-        regenerate_conclusion: advancedRegenConclusion,
-      })
-      const fullData = res.data.rom_data || {
-        ...(romData || {} as RomData),
-        stage3: res.data.stage3,
-        final_rom: res.data.final_rom
-      }
-      setRomData(fullData)
-      setAdvancedStatus('done')
-      toast.success('Advanced MoM generated successfully!')
-      return true
-    } catch (e) {
-      setAdvancedStatus('error')
-      toast.error(getApiErrorDetail(e) || 'Advanced MoM generation failed')
-      return false
-    }
-  }
 
   // Download Enhanced MOM DOCX
   const downloadEnhancedMomDocx = async () => {
@@ -907,30 +1507,111 @@ export default function RomPage() {
     await fetchStage2Attachments()
   }, [id, fetchStage2Attachments])
 
+  const fetchPreviousMeetings = useCallback(async () => {
+    if (!id) return
+    setLoadingPreviousMeetings(true)
+    try {
+      const res = await api.get(`/rom/${id}/previous-meetings`)
+      if (Array.isArray(res.data?.meetings)) {
+        setAvailablePreviousMeetings(res.data.meetings)
+        if (!selectedPreviousMeetingId) {
+          const firstWithStage2 = res.data.meetings.find((m: any) => m.has_stage2)
+          if (firstWithStage2) {
+            setSelectedPreviousMeetingId(firstWithStage2.id)
+          } else if (res.data.meetings.length > 0) {
+            setSelectedPreviousMeetingId(res.data.meetings[0].id)
+          }
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingPreviousMeetings(false)
+    }
+  }, [id, selectedPreviousMeetingId])
+
   useEffect(() => {
-    if (id) loadData()
-  }, [id, loadData])
+    if (id) {
+      loadData()
+      fetchPreviousMeetings()
+    }
+    api.get('/rom/stage2/example-points')
+      .then(res => {
+        if (Array.isArray(res.data?.points)) {
+          setStage2ReferenceExamples(res.data.points)
+        }
+      })
+      .catch(() => {})
+    api.get('/settings')
+      .then(res => {
+        if (res.data) {
+          if (typeof res.data.rom_stage2_process_all_together === 'boolean') {
+            setProcessAllTogether(res.data.rom_stage2_process_all_together)
+          }
+          if (typeof res.data.rom_meeting_top_k === 'number') {
+            setMeetingTopK(res.data.rom_meeting_top_k)
+          }
+          if (typeof res.data.rom_global_top_k === 'number') {
+            setGlobalTopK(res.data.rom_global_top_k)
+          }
+          if (typeof res.data.rom_windows_per_batch === 'number') {
+            setDiscussionWindowSize(res.data.rom_windows_per_batch)
+          }
+          if (typeof res.data.rom_min_similarity_threshold === 'number') {
+            setMinSimilarityThreshold(res.data.rom_min_similarity_threshold)
+          }
+        }
+      })
+      .catch(() => {})
+  }, [id, loadData, fetchPreviousMeetings])
 
   // ── Actions ─────────────────────────────────────────────────────────────────
 
   const runStage1 = async (): Promise<boolean> => {
     setStage1Status('processing')
+    setStage1Progress(null)
+
+    // Start polling progress every 2 seconds
+    if (stage1PollRef.current) clearInterval(stage1PollRef.current)
+    stage1PollRef.current = setInterval(async () => {
+      try {
+        const prog = await api.get(`/rom/${id}/stage1/progress`)
+        if (prog.data && prog.data.windows_total > 0) {
+          setStage1Progress(prog.data)
+        }
+        if (prog.data?.status === 'done') {
+          if (stage1PollRef.current) clearInterval(stage1PollRef.current)
+          stage1PollRef.current = null
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    }, 2000)
+
     try {
       const res = await api.post(`/rom/${id}/stage1/generate`, {
         transcript_window_minutes: transcriptWindow
       })
+      // Stop polling on success
+      if (stage1PollRef.current) clearInterval(stage1PollRef.current)
+      stage1PollRef.current = null
       const fullData = res.data.rom_data || {
         ...(romData || {} as RomData),
         stage1: res.data.stage1 || res.data
       }
       setRomData(fullData)
       setStage1Status('done')
+      setStage1Progress(null)
       setActiveTab('stage1')
       const pointCount = fullData.stage1?.discussion_points?.length ?? 0
       toast.success(`Stage 1 complete: ${pointCount} points extracted`)
       return true
     } catch (e) {
+      // Stop polling on failure
+      if (stage1PollRef.current) clearInterval(stage1PollRef.current)
+      stage1PollRef.current = null
       setStage1Status('error')
+      setStage1Progress(null)
       toast.error(getApiErrorDetail(e) || 'Stage 1 failed')
       return false
     }
@@ -943,6 +1624,12 @@ export default function RomPage() {
         meeting_context_top_k: Math.max(0, Number(meetingTopK) || 0),
         global_context_top_k: Math.max(0, Number(globalTopK) || 0),
         discussion_window_size: Math.max(3, Number(discussionWindowSize) || 5),
+        min_similarity_threshold: minSimilarityThreshold,
+        process_all_together: processAllTogether,
+        reference_example_points: stage2ReferenceExamples.filter(p => p && p.trim()),
+        previous_meeting_mode: previousMeetingMode,
+        previous_meeting_id: previousMeetingMode === 'select' ? (selectedPreviousMeetingId || null) : null,
+        previous_meeting_top_k: previousMeetingMode !== 'off' ? Math.max(0, Number(previousMeetingTopK) || 0) : 0,
       })
       const fullData = res.data.rom_data || {
         ...(romData || {} as RomData),
@@ -958,6 +1645,187 @@ export default function RomPage() {
       toast.error(getApiErrorDetail(e) || 'Stage 2 failed')
       return false
     }
+  }
+
+  const handleSaveStage2Examples = async () => {
+    setSavingStage2Examples(true)
+    try {
+      await api.post('/rom/stage2/example-points', {
+        points: stage2ReferenceExamples.filter(p => p.trim())
+      })
+      toast.success('Reference style examples saved')
+    } catch {
+      toast.error('Failed to save example points')
+    } finally {
+      setSavingStage2Examples(false)
+    }
+  }
+
+  // ── Stage 2 Editing Handlers ─────────────────────────────────────
+
+  const togglePointSelection = (pointId: string) => {
+    setSelectedPointIds(prev => {
+      const next = new Set(prev)
+      if (next.has(pointId)) next.delete(pointId)
+      else next.add(pointId)
+      return next
+    })
+  }
+
+  const handleMergePoints = async () => {
+    if (selectedPointIds.size < 2 || !id) return
+    setMergingPoints(true)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/merge-points`, {
+        point_ids: Array.from(selectedPointIds),
+      })
+      setRomData(res.data.rom_data)
+      setSelectedPointIds(new Set())
+      toast.success('Points merged successfully')
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Merge failed')
+    } finally {
+      setMergingPoints(false)
+    }
+  }
+
+  const handleFindPreview = async () => {
+    if (!findText.trim() || !id) return
+    try {
+      const res = await api.post(`/rom/${id}/stage2/find-replace/preview`, { find_text: findText })
+      setFindPreviewCount(res.data.total_occurrences)
+      setFindPreviewPoints(res.data.points_affected || [])
+    } catch {
+      setFindPreviewCount(null)
+    }
+  }
+
+  const handleFindReplace = async () => {
+    if (!findText.trim() || !id) return
+    setApplyingFindReplace(true)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/find-replace`, {
+        find_text: findText,
+        replace_text: replaceText,
+      })
+      if (res.data.rom_data) setRomData(res.data.rom_data)
+      setShowFindReplace(false)
+      setFindText('')
+      setReplaceText('')
+      setFindPreviewCount(null)
+      setFindPreviewPoints([])
+      toast.success(`Replaced ${res.data.affected_count} occurrences`)
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Find & Replace failed')
+    } finally {
+      setApplyingFindReplace(false)
+    }
+  }
+
+  const handleContextMenuAction = async (action: 'split' | 'delete_text') => {
+    if (!contextMenu || !id) return
+    const { pointId, selectedText } = contextMenu
+    setContextMenu(null)
+
+    if (action === 'split') {
+      setSplittingPoint(true)
+      try {
+        const res = await api.post(`/rom/${id}/stage2/split-point`, {
+          point_id: pointId,
+          selected_text: selectedText,
+        })
+        if (res.data.rom_data) setRomData(res.data.rom_data)
+        toast.success('Point split into two')
+      } catch (e: any) {
+        toast.error(getApiErrorDetail(e) || 'Split failed')
+      } finally {
+        setSplittingPoint(false)
+      }
+    } else if (action === 'delete_text') {
+      setDeletingText(true)
+      try {
+        const res = await api.post(`/rom/${id}/stage2/delete-text`, {
+          point_id: pointId,
+          text_to_delete: selectedText,
+        })
+        if (res.data.rom_data) setRomData(res.data.rom_data)
+        toast.success('Text deleted')
+      } catch (e: any) {
+        toast.error(getApiErrorDetail(e) || 'Delete failed')
+      } finally {
+        setDeletingText(false)
+      }
+    }
+  }
+
+  const loadChangeHistory = async () => {
+    if (!id) return
+    setLoadingHistory(true)
+    try {
+      const res = await api.get(`/rom/${id}/stage2/edit-history`)
+      setChangeHistory(res.data.changes || [])
+    } catch {
+      toast.error('Failed to load history')
+    } finally {
+      setLoadingHistory(false)
+    }
+  }
+
+  const handleRevertChange = async (changeId: string) => {
+    if (!id) return
+    setRevertingChangeId(changeId)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/edit-history/${changeId}/revert`)
+      if (res.data.rom_data) setRomData(res.data.rom_data)
+      // Refresh history
+      await loadChangeHistory()
+      toast.success('Change reverted')
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Revert failed')
+    } finally {
+      setRevertingChangeId(null)
+    }
+  }
+
+  const handleRedoChange = async (changeId: string) => {
+    if (!id) return
+    setRedoingChangeId(changeId)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/edit-history/${changeId}/redo`)
+      if (res.data.rom_data) setRomData(res.data.rom_data)
+      await loadChangeHistory()
+      toast.success('Change re-applied (Redo)')
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Redo failed')
+    } finally {
+      setRedoingChangeId(null)
+    }
+  }
+
+  const handleSaveStage2Point = async (pointId: string) => {
+    if (!id || !stage2EditDraft.trim()) return
+    setSavingStage2Point(true)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/point/${pointId}/manual-edit`, {
+        polished_text: stage2EditDraft.trim(),
+      })
+      if (res.data.rom_data) setRomData(res.data.rom_data)
+      setEditingStage2PointId(null)
+      setStage2EditDraft('')
+      toast.success('Discussion point updated')
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Failed to update point')
+    } finally {
+      setSavingStage2Point(false)
+    }
+  }
+
+  const handlePointContextMenu = (e: React.MouseEvent, pointId: string) => {
+    const selection = window.getSelection()
+    const selectedText = selection?.toString()?.trim() || ''
+    if (!selectedText) return
+    e.preventDefault()
+    setContextMenu({ x: e.clientX, y: e.clientY, pointId, selectedText })
   }
 
   const runStage3 = async (forceReextract: boolean = false): Promise<boolean> => {
@@ -996,15 +1864,6 @@ export default function RomPage() {
     }
   }
 
-  const handleGeneratePreciseRom = async () => {
-    if (stage3Status !== 'done') {
-      const ok = await runStage3(false)
-      if (!ok) return
-    }
-    setRomViewMode('precise')
-    setActiveTab('final')
-    toast.success('Precise ROM generated')
-  }
 
   const runCompleteRom = async () => {
     setIsGeneratingAll(true)
@@ -1329,6 +2188,149 @@ export default function RomPage() {
               />
             </div>
 
+            {/* Minimum Similarity Threshold Slider */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>Min Similarity</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    <input
+                      type="checkbox"
+                      checked={minSimilarityThreshold !== null}
+                      onChange={e => setMinSimilarityThreshold(e.target.checked ? 0.80 : null)}
+                      style={{ width: 11, height: 11, accentColor: 'hsl(205,90%,55%)' }}
+                    />
+                    Filter
+                  </label>
+                  <span style={{ fontSize: '.68rem', fontWeight: 700, color: minSimilarityThreshold !== null ? 'hsl(205,90%,55%)' : 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono' }}>
+                    {minSimilarityThreshold !== null ? minSimilarityThreshold.toFixed(2) : 'Off'}
+                  </span>
+                </div>
+              </div>
+              {minSimilarityThreshold !== null && (
+                <input
+                  type="range" min={0.50} max={0.98} step={0.01}
+                  value={minSimilarityThreshold}
+                  onChange={e => setMinSimilarityThreshold(Number(e.target.value))}
+                  style={{ width: '100%', accentColor: 'hsl(205,90%,55%)' }}
+                />
+              )}
+            </div>
+
+            {/* Process All Points Together Toggle */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' }}>
+              <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <input
+                  type="checkbox"
+                  checked={processAllTogether}
+                  onChange={e => setProcessAllTogether(e.target.checked)}
+                  style={{ width: 12, height: 12, accentColor: 'hsl(205,90%,55%)' }}
+                />
+                Process All Points Together
+              </label>
+            </div>
+
+            {/* Previous Meeting Context (Dual Mode) */}
+            <div style={{ padding: '.45rem .5rem', borderRadius: 8, background: 'hsl(270,75%,55%/.06)', border: '1px solid hsl(270,75%,55%/.22)', display: 'flex', flexDirection: 'column', gap: '.35rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(270,75%,60%)', textTransform: 'uppercase', letterSpacing: '.04em', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  ⏮️ Previous Meeting Context
+                </div>
+                {previousMeetingMode !== 'off' && (
+                  <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(270,75%,60%)', fontFamily: 'JetBrains Mono' }}>
+                    K={previousMeetingTopK}
+                  </span>
+                )}
+              </div>
+
+              {/* Mode Pills */}
+              <div style={{ display: 'flex', gap: 3, background: 'hsl(var(--muted)/.4)', padding: 2, borderRadius: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setPreviousMeetingMode('auto')}
+                  style={{
+                    flex: 1, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'auto' ? 700 : 500,
+                    background: previousMeetingMode === 'auto' ? 'hsl(270,75%,60%)' : 'transparent',
+                    color: previousMeetingMode === 'auto' ? 'white' : 'hsl(var(--pencil))',
+                    cursor: 'pointer', transition: 'all .15s ease'
+                  }}
+                  title="Auto-retrieve most similar Stage 2 points from all previous meetings via ChromaDB"
+                >
+                  Auto Retrieve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviousMeetingMode('select')}
+                  style={{
+                    flex: 1, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'select' ? 700 : 500,
+                    background: previousMeetingMode === 'select' ? 'hsl(270,75%,60%)' : 'transparent',
+                    color: previousMeetingMode === 'select' ? 'white' : 'hsl(var(--pencil))',
+                    cursor: 'pointer', transition: 'all .15s ease'
+                  }}
+                  title="Select a specific past meeting to use its Stage 2 points only"
+                >
+                  Select Meeting
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviousMeetingMode('off')}
+                  style={{
+                    flex: 0.6, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'off' ? 700 : 500,
+                    background: previousMeetingMode === 'off' ? 'hsl(var(--muted))' : 'transparent',
+                    color: previousMeetingMode === 'off' ? 'hsl(var(--ink))' : 'hsl(var(--pencil))',
+                    cursor: 'pointer', transition: 'all .15s ease'
+                  }}
+                >
+                  Off
+                </button>
+              </div>
+
+              {/* Select Meeting Dropdown */}
+              {previousMeetingMode === 'select' && (
+                <div style={{ marginTop: 2 }}>
+                  <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))', display: 'block', marginBottom: 2 }}>Target Meeting:</label>
+                  {loadingPreviousMeetings ? (
+                    <div style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))' }}>Loading meetings...</div>
+                  ) : availablePreviousMeetings.length === 0 ? (
+                    <div style={{ fontSize: '.64rem', color: 'hsl(var(--destructive))' }}>No other meetings found.</div>
+                  ) : (
+                    <select
+                      value={selectedPreviousMeetingId}
+                      onChange={e => setSelectedPreviousMeetingId(e.target.value)}
+                      style={{
+                        width: '100%', fontSize: '.68rem', padding: '3px 5px', borderRadius: 5,
+                        border: '1px solid hsl(270,75%,55%/.3)', background: 'hsl(var(--card))',
+                        color: 'hsl(var(--ink))', outline: 'none'
+                      }}
+                    >
+                      {availablePreviousMeetings.map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.name} {m.date ? `(${m.date})` : ''} {m.has_stage2 ? `[${m.stage2_count} Stage 2 pts]` : '[No Stage 2 pts]'}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* Previous Meeting Top-K slider */}
+              {previousMeetingMode !== 'off' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 1 }}>
+                    <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))' }}>Stage 2 Points (Top-K)</label>
+                    <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(270,75%,60%)', fontFamily: 'JetBrains Mono' }}>
+                      {previousMeetingTopK === 0 ? '0 (No Context)' : previousMeetingTopK}
+                    </span>
+                  </div>
+                  <input
+                    type="range" min={0} max={10} value={previousMeetingTopK}
+                    onChange={e => setPreviousMeetingTopK(Number(e.target.value))}
+                    style={{ width: '100%', accentColor: 'hsl(270,75%,60%)' }}
+                  />
+                </div>
+              )}
+            </div>
+
             {/* Meeting Docs upload */}
             <div>
               <div style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 4 }}>Meeting Context Docs</div>
@@ -1422,6 +2424,34 @@ export default function RomPage() {
               )}
             </div>
 
+            {/* Extracted Agenda Text Preview / Editor */}
+            {agendaText && (
+              <div style={{ borderRadius: 6, border: '1px solid hsl(var(--border)/.5)', background: 'hsl(var(--muted)/.15)', overflow: 'hidden' }}>
+                <button
+                  onClick={() => setShowAgendaTextPreview(prev => !prev)}
+                  type="button"
+                  style={{ width: '100%', padding: '4px 8px', background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '.66rem', fontWeight: 600, color: 'hsl(var(--pencil))' }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <FileText size={9} style={{ color: 'hsl(140,70%,45%)' }} />
+                    Agenda Text ({agendaText.length} chars)
+                  </span>
+                  <span style={{ fontSize: '.62rem', color: 'hsl(140,70%,45%)' }}>{showAgendaTextPreview ? 'Hide' : 'View / Edit'}</span>
+                </button>
+                {showAgendaTextPreview && (
+                  <div style={{ padding: '0 6px 6px 6px' }}>
+                    <textarea
+                      value={agendaText}
+                      onChange={e => setAgendaText(e.target.value)}
+                      placeholder="Extracted agenda text..."
+                      rows={4}
+                      style={{ width: '100%', fontSize: '.68rem', fontFamily: 'JetBrains Mono, monospace', padding: '4px 6px', borderRadius: 4, border: '1px solid hsl(var(--border)/.6)', background: 'hsl(var(--paper))', color: 'hsl(var(--ink))', resize: 'vertical' }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Previous Meeting MoMs */}
             <div>
               <div style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Previous MoMs <span style={{ fontWeight: 400, textTransform: 'none', color: 'hsl(var(--pencil)/.6)', fontSize: '.63rem' }}>(optional)</span></div>
@@ -1488,18 +2518,33 @@ export default function RomPage() {
               />
             </div>
 
+            {/* Regenerate / Bypass Cache toggle */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.7rem', color: 'hsl(var(--ink))', padding: '.2rem 0', userSelect: 'none' }}>
+              <input
+                type="checkbox"
+                checked={forceRegenerateAgenda}
+                onChange={e => setForceRegenerateAgenda(e.target.checked)}
+                style={{ accentColor: 'hsl(140,70%,45%)', width: 12, height: 12, cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: forceRegenerateAgenda ? 700 : 500, color: forceRegenerateAgenda ? 'hsl(140,70%,40%)' : 'hsl(var(--pencil))' }}>
+                Regenerate (Bypass Cache)
+              </span>
+            </label>
+
             <button
-              onClick={() => runCreateAgenda(false)}
+              onClick={() => runCreateAgenda(forceRegenerateAgenda)}
               disabled={stage3AgendaStatus === 'processing' || stage2Status !== 'done'}
               style={{
                 width: '100%', padding: '5px 8px', borderRadius: 7, fontSize: '.74rem', fontWeight: 700,
-                background: (stage3AgendaStatus === 'processing' || stage2Status !== 'done') ? 'hsl(var(--muted))' : 'hsl(140,70%,45%)',
+                background: (stage3AgendaStatus === 'processing' || stage2Status !== 'done') ? 'hsl(var(--muted))' : (forceRegenerateAgenda || (romData?.stage3?.agendas?.length ?? 0) > 0 ? 'hsl(140,70%,40%)' : 'hsl(140,70%,45%)'),
                 color: 'white', border: 'none', cursor: (stage3AgendaStatus === 'processing' || stage2Status !== 'done') ? 'not-allowed' : 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, fontFamily: 'Inter'
               }}
             >
-              {stage3AgendaStatus === 'processing' ? <Loader size={11} className="spin" /> : <List size={11} />}
-              {stage3AgendaStatus === 'processing' ? 'Creating Agendas...' : 'Create Agenda'}
+              {stage3AgendaStatus === 'processing' ? <Loader size={11} className="spin" /> : (forceRegenerateAgenda || (romData?.stage3?.agendas?.length ?? 0) > 0 ? <RefreshCw size={11} /> : <List size={11} />)}
+              {stage3AgendaStatus === 'processing'
+                ? 'Creating Agendas...'
+                : ((romData?.stage3?.agendas?.length ?? 0) > 0 && forceRegenerateAgenda ? 'Regenerate Agendas' : (romData?.stage3?.agendas?.length ?? 0) > 0 ? 'Update Agendas' : 'Create Agenda')}
             </button>
           </div>
 
@@ -1618,7 +2663,6 @@ export default function RomPage() {
               { id: 'stage2', label: 'Stage 2 (Enhanced)', count: stage2Count, color: 'hsl(205,90%,55%)' },
               { id: 'stage3', label: 'Stage 3 (Mapped)', count: stage3Count, color: 'hsl(140,70%,50%)' },
               { id: 'final', label: 'Final ROM', count: finalCount, color: 'hsl(30,90%,55%)' },
-              { id: 'advanced', label: 'Advanced MoM', count: 0, color: 'hsl(330,85%,60%)' },
             ].map(tab => {
               const isActive = activeTab === tab.id
               return (
@@ -1655,18 +2699,34 @@ export default function RomPage() {
             {/* ── STAGE 1 TAB ── */}
             {activeTab === 'stage1' && (
               !romData?.stage1?.discussion_points || romData.stage1.discussion_points.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
-                  <Brain size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(280,75%,65%)' }} />
-                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>No Stage 1 Points Extracted Yet</div>
-                  <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
-                    Click <strong>Generate Points</strong> on the left panel to execute sliding window transcript extraction.
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  {/* Stage 1 Progress Banner — shown while processing */}
+                  {stage1Status === 'processing' && stage1Progress && stage1Progress.windows_total > 0 && (
+                    <Stage1ProgressBanner progress={stage1Progress} />
+                  )}
+                  <div style={{ textAlign: 'center', padding: stage1Status === 'processing' ? '2rem 1.5rem' : '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                    <Brain size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(280,75%,65%)' }} />
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>
+                      {stage1Status === 'processing' ? 'Extracting Discussion Points...' : 'No Stage 1 Points Extracted Yet'}
+                    </div>
+                    <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
+                      {stage1Status === 'processing'
+                        ? 'Processing transcript windows in parallel. Results will appear when complete.'
+                        : <>Click <strong>Generate Points</strong> on the left panel to execute sliding window transcript extraction.</>}
+                    </div>
+                    {stage1Status !== 'processing' && (
+                      <button onClick={runStage1} disabled={stage1Status === 'processing'} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
+                        <Sparkles size={14} /> Run Stage 1 Extraction
+                      </button>
+                    )}
                   </div>
-                  <button onClick={runStage1} disabled={stage1Status === 'processing'} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
-                    <Sparkles size={14} /> Run Stage 1 Extraction
-                  </button>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  {/* Progress banner also shown on re-runs when data already exists */}
+                  {stage1Status === 'processing' && stage1Progress && stage1Progress.windows_total > 0 && (
+                    <Stage1ProgressBanner progress={stage1Progress} />
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
                     <SectionHeader icon={<Brain size={14} />} label="Stage 1: Raw Discussion Points" count={stage1Count} color="hsl(280,75%,65%)" />
                     {(Boolean(romData?.stage1?.video_ocr_blocks_used) || romData?.stage1?.discussion_points?.some(p => Boolean(p.video_transcript_context))) && (
@@ -1724,10 +2784,28 @@ export default function RomPage() {
                                     border: '1px solid hsl(280,75%,60%/.2)',
                                     padding: '2px 6px', borderRadius: 8, fontSize: '.68rem', fontWeight: 700,
                                     display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'JetBrains Mono',
-                                    whiteSpace: 'nowrap'
+                                    whiteSpace: 'nowrap', marginBottom: '.45rem'
                                   }}>
                                     <Clock size={10} /> {fmtTime(group.timelineStart)} – {fmtTime(group.timelineEnd)}
                                   </span>
+                                  <div>
+                                    <button
+                                      onClick={() => setRerunModalWindow(group)}
+                                      title="Re-run extraction for this window with custom feedback"
+                                      style={{
+                                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                                        padding: '3px 8px', borderRadius: 6,
+                                        border: '1px solid hsl(280,75%,60%/.35)',
+                                        background: 'hsl(280,75%,60%/.1)',
+                                        color: 'hsl(280,75%,60%)',
+                                        fontSize: '.7rem', fontWeight: 700,
+                                        cursor: 'pointer', fontFamily: 'Inter',
+                                        transition: 'all 0.15s ease'
+                                      }}
+                                    >
+                                      <RotateCcw size={11} /> Re-run
+                                    </button>
+                                  </div>
                                 </td>
                                 <td style={{ padding: '.9rem .85rem', verticalAlign: 'top' }}>
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: '.9rem' }}>
@@ -1741,37 +2819,66 @@ export default function RomPage() {
                                         flexDirection: 'column',
                                         gap: '.45rem'
                                       }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                                           <span style={{ fontSize: '.74rem', fontWeight: 700, color: 'hsl(280,75%,65%)', background: 'hsl(280,75%,60%/.08)', padding: '1px 6px', borderRadius: 4 }}>
                                             Point {pIdx + 1}
                                           </span>
-                                          {pt.speakers && pt.speakers.length > 0 && (
-                                            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                                              {pt.speakers.map((sp, idx) => (
-                                                <span key={idx} style={{
-                                                  background: 'hsl(var(--muted)/.6)', color: 'hsl(var(--ink))',
-                                                  padding: '1px 7px', borderRadius: 10, fontSize: '.68rem', fontWeight: 600,
+                                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                            {pt.speakers && pt.speakers.length > 0 && (
+                                              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                                {pt.speakers.map((sp, idx) => (
+                                                  <span key={idx} style={{
+                                                    background: 'hsl(var(--muted)/.6)', color: 'hsl(var(--ink))',
+                                                    padding: '1px 7px', borderRadius: 10, fontSize: '.68rem', fontWeight: 600,
+                                                    display: 'inline-flex', alignItems: 'center', gap: 3
+                                                  }}>
+                                                    <User size={8} /> {formatItemText(sp)}
+                                                  </span>
+                                                ))}
+                                              </div>
+                                            )}
+                                            {(() => {
+                                              const owner = getActionOwnerText(pt)
+                                              return owner ? (
+                                                <span style={{
+                                                  background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)',
+                                                  border: '1px solid hsl(35,95%,50%/.35)',
+                                                  padding: '1px 7px', borderRadius: 10, fontSize: '.68rem', fontWeight: 700,
                                                   display: 'inline-flex', alignItems: 'center', gap: 3
                                                 }}>
-                                                  <User size={8} /> {sp}
+                                                  <UserCheck size={9} /> Owner: {owner}
                                                 </span>
-                                              ))}
-                                            </div>
-                                          )}
+                                              ) : null
+                                            })()}
+                                          </div>
                                         </div>
                                         <p style={{ fontSize: '.88rem', fontWeight: 500, color: 'hsl(var(--ink))', lineHeight: 1.5, margin: 0 }}>
                                           {formatItemText(pt.discussion_point)}
                                         </p>
-                                        {((pt.decisions?.length || 0) > 0 || (pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0) && (
+                                        {((getActionOwnerText(pt) !== null) || (pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0 || (pt.dates?.length || 0) > 0 || (pt.numbers?.length || 0) > 0 || (pt.references?.length || 0) > 0) && (
                                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                                            {pt.decisions?.map((d, idx) => (
-                                              <span key={`dec-${idx}`} style={{ background: 'hsl(140,70%,45%/.12)', color: 'hsl(140,70%,45%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Decision: {formatItemText(d)}</span>
-                                            ))}
+                                            {(() => {
+                                              const owner = getActionOwnerText(pt)
+                                              return owner ? (
+                                                <span key="owner-tag" style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                                                  <UserCheck size={9} /> Owner: {owner}
+                                                </span>
+                                              ) : null
+                                            })()}
                                             {pt.action_items?.map((a, idx) => (
                                               <span key={`act-${idx}`} style={{ background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Action: {formatItemText(a)}</span>
                                             ))}
                                             {pt.technical_terms?.map((t, idx) => (
-                                              <span key={`tech-${idx}`} style={{ background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,65%)', border: '1px solid hsl(280,70%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>{formatItemText(t)}</span>
+                                              <span key={`tech-${idx}`} style={{ background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,65%)', border: '1px solid hsl(280,70%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Term: {formatItemText(t)}</span>
+                                            ))}
+                                            {pt.dates?.map((d, idx) => (
+                                              <span key={`date-${idx}`} style={{ background: 'hsl(190,80%,50%/.12)', color: 'hsl(190,85%,45%)', border: '1px solid hsl(190,80%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Date: {formatItemText(d)}</span>
+                                            ))}
+                                            {pt.numbers?.map((n, idx) => (
+                                              <span key={`num-${idx}`} style={{ background: 'hsl(210,80%,60%/.12)', color: 'hsl(210,80%,60%)', border: '1px solid hsl(210,80%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Num: {formatItemText(n)}</span>
+                                            ))}
+                                            {pt.references?.map((r, idx) => (
+                                              <span key={`ref-${idx}`} style={{ background: 'hsl(160,70%,45%/.12)', color: 'hsl(160,70%,40%)', border: '1px solid hsl(160,70%,45%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Ref: {formatItemText(r)}</span>
                                             ))}
                                           </div>
                                         )}
@@ -1825,6 +2932,17 @@ export default function RomPage() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* Stage 1 Window Re-run Modal */}
+                  {rerunModalWindow && id && (
+                    <Stage1WindowRerunModal
+                      recordingId={id}
+                      windowData={rerunModalWindow}
+                      transcriptWindowMinutes={transcriptWindow}
+                      onClose={() => setRerunModalWindow(null)}
+                      onAccepted={(newRom) => setRomData(newRom)}
+                    />
+                  )}
                 </div>
               )
             )}
@@ -1832,51 +2950,285 @@ export default function RomPage() {
             {/* ── STAGE 2 TAB ── */}
             {activeTab === 'stage2' && (
               !romData?.stage2?.polished_points || romData.stage2.polished_points.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
-                  <Target size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(205,90%,55%)' }} />
-                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>No Stage 2 Enhanced Points Yet</div>
-                  <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
-                    Complete Stage 1 first, then click <strong>Enhance Points</strong> to run RAG context enrichment and batch point merging.
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                  <Stage2ReferenceExamplesPanel
+                    examples={stage2ReferenceExamples}
+                    onChange={setStage2ReferenceExamples}
+                    onSave={handleSaveStage2Examples}
+                    saving={savingStage2Examples}
+                  />
+
+                  <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                    <Target size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(205,90%,55%)' }} />
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>No Stage 2 Enhanced Points Yet</div>
+                    <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
+                      Complete Stage 1 first, then click <strong>Enhance Points</strong> to run RAG context enrichment and batch point merging.
+                    </div>
+                    <button onClick={runStage2} disabled={stage2Status === 'processing' || stage1Count === 0} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
+                      <Sparkles size={14} /> Run Stage 2 Enhancement
+                    </button>
                   </div>
-                  <button onClick={runStage2} disabled={stage2Status === 'processing' || stage1Count === 0} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
-                    <Sparkles size={14} /> Run Stage 2 Enhancement
-                  </button>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <SectionHeader icon={<Target size={14} />} label="Stage 2: RAG Enhanced & Merged Points" count={stage2Count} color="hsl(205,90%,55%)" />
-                  {romData?.stage2?.polished_points?.map((pt, i) => (
+
+                  {/* ── Reference Example Points (Writing Style Only) ── */}
+                  <Stage2ReferenceExamplesPanel
+                    examples={stage2ReferenceExamples}
+                    onChange={setStage2ReferenceExamples}
+                    onSave={handleSaveStage2Examples}
+                    saving={savingStage2Examples}
+                  />
+
+                  {/* ── Stage 2 Editing Toolbar ── */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    <button
+                      onClick={() => setShowFindReplace(v => !v)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '.35rem .7rem', borderRadius: 8,
+                        border: `1.5px solid ${showFindReplace ? 'hsl(205,90%,55%/.5)' : 'hsl(var(--border)/.4)'}`,
+                        background: showFindReplace ? 'hsl(205,90%,55%/.08)' : 'hsl(var(--card))',
+                        color: showFindReplace ? 'hsl(205,90%,55%)' : 'hsl(var(--ink))',
+                        fontSize: '.74rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter',
+                      }}
+                    >
+                      <Search size={12} /> Find & Replace
+                    </button>
+
+                    <button
+                      onClick={handleMergePoints}
+                      disabled={selectedPointIds.size < 2 || mergingPoints}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '.35rem .7rem', borderRadius: 8,
+                        border: `1.5px solid ${selectedPointIds.size >= 2 ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border)/.3)'}`,
+                        background: selectedPointIds.size >= 2 ? 'hsl(280,75%,60%/.08)' : 'hsl(var(--muted)/.3)',
+                        color: selectedPointIds.size >= 2 ? 'hsl(280,75%,60%)' : 'hsl(var(--pencil))',
+                        fontSize: '.74rem', fontWeight: 600, cursor: selectedPointIds.size >= 2 ? 'pointer' : 'not-allowed',
+                        fontFamily: 'Inter', opacity: mergingPoints ? 0.6 : 1,
+                      }}
+                    >
+                      {mergingPoints ? <Loader size={12} className="spin" /> : <GitMerge size={12} />}
+                      Merge Selected ({selectedPointIds.size})
+                    </button>
+
+                    {selectedPointIds.size > 0 && (
+                      <button
+                        onClick={() => setSelectedPointIds(new Set())}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 4,
+                          padding: '.3rem .55rem', borderRadius: 6,
+                          border: '1px solid hsl(var(--border)/.3)', background: 'none',
+                          color: 'hsl(var(--pencil))', fontSize: '.7rem', fontWeight: 600,
+                          cursor: 'pointer', fontFamily: 'Inter',
+                        }}
+                      >
+                        <X size={11} /> Clear
+                      </button>
+                    )}
+
+                    <div style={{ marginLeft: 'auto' }}>
+                      <button
+                        onClick={() => { setShowChangeHistory(true); loadChangeHistory() }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          padding: '.35rem .7rem', borderRadius: 8,
+                          border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))',
+                          color: 'hsl(var(--ink))', fontSize: '.74rem', fontWeight: 600,
+                          cursor: 'pointer', fontFamily: 'Inter',
+                        }}
+                      >
+                        <History size={12} /> History
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* ── Find & Replace Panel ── */}
+                  {showFindReplace && (
+                    <div className="find-replace-panel">
+                      <div className="fr-input-row">
+                        <label>Find</label>
+                        <input
+                          value={findText}
+                          onChange={e => { setFindText(e.target.value); setFindPreviewCount(null); setFindPreviewPoints([]) }}
+                          onKeyDown={e => e.key === 'Enter' && handleFindPreview()}
+                          placeholder="Search text..."
+                          autoFocus
+                        />
+                        <button onClick={handleFindPreview} className="btn" style={{ padding: '.3rem .6rem', fontSize: '.72rem' }}>
+                          <Search size={12} /> Preview
+                        </button>
+                      </div>
+                      <div className="fr-input-row">
+                        <label>Replace</label>
+                        <input
+                          value={replaceText}
+                          onChange={e => setReplaceText(e.target.value)}
+                          placeholder="Replacement text..."
+                        />
+                      </div>
+                      <div className="fr-actions">
+                        {findPreviewCount !== null && (
+                          <span className="fr-preview-count">
+                            {findPreviewCount} occurrence{findPreviewCount !== 1 ? 's' : ''} in {findPreviewPoints.length} point{findPreviewPoints.length !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                        <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+                          <button
+                            onClick={() => { setShowFindReplace(false); setFindText(''); setReplaceText(''); setFindPreviewCount(null); setFindPreviewPoints([]) }}
+                            className="btn" style={{ padding: '.3rem .6rem', fontSize: '.72rem' }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleFindReplace}
+                            disabled={!findText.trim() || applyingFindReplace || findPreviewCount === 0}
+                            className="btn btn-primary"
+                            style={{ padding: '.3rem .75rem', fontSize: '.72rem', opacity: applyingFindReplace ? 0.6 : 1 }}
+                          >
+                            {applyingFindReplace ? <Loader size={11} className="spin" /> : <ArrowRightLeft size={11} />}
+                            Replace All
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Point Cards with Selection ── */}
+                  {romData?.stage2?.polished_points?.map((pt, i) => {
+                    const isSelected = selectedPointIds.has(pt.id)
+                    return (
                     <div key={pt.id || i} style={{
-                      borderRadius: 10, border: '1.5px solid hsl(var(--border)/.4)',
-                      background: 'hsl(var(--card))', padding: '1rem 1.15rem'
+                      borderRadius: 10, border: `1.5px solid ${isSelected ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border)/.4)'}`,
+                      background: isSelected ? 'hsl(280,75%,60%/.04)' : 'hsl(var(--card))', padding: '1rem 1.15rem',
+                      transition: 'border-color 0.2s, background 0.2s',
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.6rem' }}>
-                        <span style={{
-                          background: 'hsl(205,90%,55%/.12)', color: 'hsl(205,90%,60%)',
-                          border: '1px solid hsl(205,90%,55%/.3)',
-                          padding: '2px 8px', borderRadius: 12, fontSize: '.72rem', fontWeight: 700,
-                          display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono'
-                        }}>
-                          <Clock size={11} /> {fmtTime(pt.timeline_start || 0)} – {fmtTime(pt.timeline_end || 0)}
-                        </span>
-                        <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(205,90%,55%)', background: 'hsl(205,90%,55%/.08)', padding: '1px 6px', borderRadius: 6 }}>
-                          Point P{i + 1}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {/* Merge Checkbox */}
+                          <div
+                            className={`merge-checkbox ${isSelected ? 'checked' : ''}`}
+                            onClick={() => togglePointSelection(pt.id)}
+                            title={isSelected ? 'Deselect for merge' : 'Select for merge'}
+                          >
+                            {isSelected && <Check size={11} />}
+                          </div>
+                          <span style={{
+                            background: 'hsl(205,90%,55%/.12)', color: 'hsl(205,90%,60%)',
+                            border: '1px solid hsl(205,90%,55%/.3)',
+                            padding: '2px 8px', borderRadius: 12, fontSize: '.72rem', fontWeight: 700,
+                            display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'JetBrains Mono'
+                          }}>
+                            <Clock size={11} /> {fmtTime(pt.timeline_start || 0)} – {fmtTime(pt.timeline_end || 0)}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(205,90%,55%)', background: 'hsl(205,90%,55%/.08)', padding: '1px 6px', borderRadius: 6 }}>
+                            Point P{i + 1}
+                          </span>
+                          <button
+                            onClick={() => {
+                              setEditingStage2PointId(pt.id)
+                              setStage2EditDraft(pt.polished_text || '')
+                            }}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 3,
+                              padding: '2px 7px', borderRadius: 6,
+                              border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))',
+                              color: 'hsl(var(--ink))', fontSize: '.68rem', fontWeight: 600,
+                              cursor: 'pointer', fontFamily: 'Inter'
+                            }}
+                            title="Edit discussion point text"
+                          >
+                            <Pencil size={10} /> Edit
+                          </button>
+                        </div>
                       </div>
 
-                      <div style={{ padding: '.75rem .9rem', background: 'hsl(var(--muted)/.3)', borderRadius: 8, border: '1px solid hsl(var(--border)/.3)', marginBottom: '.75rem' }}>
-                        <div style={{ fontSize: '.67rem', fontWeight: 700, color: 'hsl(var(--pencil))', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.04em' }}>Enhanced Point</div>
-                        <p style={{ fontSize: '.92rem', color: 'hsl(var(--ink))', lineHeight: 1.55, margin: 0 }}>
-                          {formatItemText(pt.polished_text)}
-                        </p>
-                      </div>
+                      {editingStage2PointId === pt.id ? (
+                        <div style={{ marginBottom: '.75rem' }}>
+                          <textarea
+                            value={stage2EditDraft}
+                            onChange={(e) => setStage2EditDraft(e.target.value)}
+                            rows={4}
+                            style={{
+                              width: '100%', padding: '.65rem .8rem', borderRadius: 8,
+                              border: '1.5px solid hsl(205,90%,55%/.6)', background: 'hsl(var(--paper))',
+                              color: 'hsl(var(--ink))', fontSize: '.92rem', lineHeight: 1.55,
+                              fontFamily: 'Inter, sans-serif', outline: 'none', resize: 'vertical'
+                            }}
+                            autoFocus
+                          />
+                          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: '.4rem' }}>
+                            <button
+                              onClick={() => setEditingStage2PointId(null)}
+                              disabled={savingStage2Point}
+                              className="btn"
+                              style={{ padding: '.25rem .6rem', fontSize: '.72rem' }}
+                            >
+                              <X size={11} /> Cancel
+                            </button>
+                            <button
+                              onClick={() => handleSaveStage2Point(pt.id)}
+                              disabled={savingStage2Point || !stage2EditDraft.trim()}
+                              className="btn btn-primary"
+                              style={{ padding: '.25rem .75rem', fontSize: '.72rem', opacity: savingStage2Point ? 0.6 : 1 }}
+                            >
+                              {savingStage2Point ? <Loader size={11} className="spin" /> : <Save size={11} />} Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div
+                          onContextMenu={(e) => handlePointContextMenu(e, pt.id)}
+                          style={{ padding: '.75rem .9rem', background: 'hsl(var(--muted)/.3)', borderRadius: 8, border: '1px solid hsl(var(--border)/.3)', marginBottom: '.75rem', cursor: 'text', userSelect: 'text' }}
+                        >
+                          <div style={{ fontSize: '.67rem', fontWeight: 700, color: 'hsl(var(--pencil))', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.04em' }}>Enhanced Point</div>
+                          <p style={{ fontSize: '.92rem', color: 'hsl(var(--ink))', lineHeight: 1.55, margin: 0 }}>
+                            {formatItemText(pt.polished_text)}
+                          </p>
+                        </div>
+                      )}
 
-                      {((pt.retrieved_context?.meeting_chunks?.length || 0) > 0 || (pt.retrieved_context?.global_chunks?.length || 0) > 0) && (
+                      {((pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0 || (pt.dates?.length || 0) > 0 || (pt.numbers?.length || 0) > 0 || (pt.references?.length || 0) > 0) && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: '.75rem' }}>
+                          {pt.action_items?.map((a: any, idx: number) => (
+                            <span key={`act-${idx}`} style={{ background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Action: {formatItemText(a)}</span>
+                          ))}
+                          {pt.technical_terms?.map((t, idx) => (
+                            <span key={`tech-${idx}`} style={{ background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,65%)', border: '1px solid hsl(280,70%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Term: {formatItemText(t)}</span>
+                          ))}
+                          {pt.dates?.map((d, idx) => (
+                            <span key={`date-${idx}`} style={{ background: 'hsl(190,80%,50%/.12)', color: 'hsl(190,85%,45%)', border: '1px solid hsl(190,80%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Date: {formatItemText(d)}</span>
+                          ))}
+                          {pt.numbers?.map((n, idx) => (
+                            <span key={`num-${idx}`} style={{ background: 'hsl(210,80%,60%/.12)', color: 'hsl(210,80%,60%)', border: '1px solid hsl(210,80%,60%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Num: {formatItemText(n)}</span>
+                          ))}
+                          {pt.references?.map((r, idx) => (
+                            <span key={`ref-${idx}`} style={{ background: 'hsl(160,70%,45%/.12)', color: 'hsl(160,70%,40%)', border: '1px solid hsl(160,70%,45%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Ref: {formatItemText(r)}</span>
+                          ))}
+                        </div>
+                      )}
+
+                      {((pt.retrieved_context?.meeting_chunks?.length || 0) > 0 || (pt.retrieved_context?.global_chunks?.length || 0) > 0 || (pt.retrieved_context?.previous_meeting_chunks?.length || 0) > 0) && (
                         <details style={{ background: 'transparent' }}>
                           <summary style={{ cursor: 'pointer', fontSize: '.76rem', fontWeight: 600, color: 'hsl(205,90%,55%)', outline: 'none' }}>
-                            View Context Preview ({((pt.retrieved_context?.meeting_chunks?.length || 0) + (pt.retrieved_context?.global_chunks?.length || 0))})
+                            View Context Preview ({((pt.retrieved_context?.meeting_chunks?.length || 0) + (pt.retrieved_context?.global_chunks?.length || 0) + (pt.retrieved_context?.previous_meeting_chunks?.length || 0))})
                           </summary>
                           <div style={{ marginTop: '.5rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {pt.retrieved_context?.previous_meeting_chunks?.map((c, idx) => {
+                              const txt = (c.text || (c as any).content || '').trim()
+                              return txt ? (
+                                <div key={`p-${idx}`} style={{ padding: '.5rem .65rem', border: '1px solid hsl(270,75%,55%/.3)', borderRadius: 7, fontSize: '.76rem', background: 'hsl(270,75%,55%/.04)', color: 'hsl(var(--ink))', lineHeight: 1.45 }}>
+                                  <span style={{ fontSize: '.62rem', fontWeight: 700, color: 'hsl(270,75%,60%)', textTransform: 'uppercase', letterSpacing: '.04em', display: 'block', marginBottom: 2 }}>
+                                    ⏮️ Previous Meeting · {c.meeting_name || 'Meeting'} {c.date ? `(${c.date})` : ''} {c.speakers ? `· Speakers: ${c.speakers}` : ''}
+                                  </span>
+                                  {txt}
+                                </div>
+                              ) : null
+                            })}
                             {pt.retrieved_context?.meeting_chunks?.map((c, idx) => {
                               const txt = (c.text || (c as any).content || (c as any).chunk || '').trim()
                               return txt ? (
@@ -1900,18 +3252,19 @@ export default function RomPage() {
                       )}
 
                       {/* Context Usage Report */}
-                      {(pt.retrieved_context as any)?.context_usage_report && (() => {
-                        const rep = (pt.retrieved_context as any).context_usage_report
+                      {((pt as any).context_usage_report || (pt.retrieved_context as any)?.context_usage_report) && (() => {
+                        const rep = (pt as any).context_usage_report || (pt.retrieved_context as any).context_usage_report
                         const badges: { label: string; color: string }[] = []
-                        if (rep.verified) badges.push({ label: '✅ Verified', color: 'hsl(140,65%,45%)' })
-                        if (rep.technical_details_added) badges.push({ label: '🔬 Details added', color: 'hsl(205,90%,50%)' })
-                        if (rep.abbreviations_expanded) badges.push({ label: '🔤 Abbrevs expanded', color: 'hsl(270,75%,60%)' })
-                        if (rep.references_added) badges.push({ label: '📎 Refs added', color: 'hsl(30,90%,50%)' })
+                        if (rep.previous_meeting_context_used) badges.push({ label: '⏮️ Previous Meeting Stage 2 Used', color: 'hsl(270,75%,60%)' })
+                        if (rep.meeting_context_used) badges.push({ label: '📄 Meeting Context Used', color: 'hsl(205,90%,50%)' })
+                        if (rep.global_context_used) badges.push({ label: '🌐 Global Context Used', color: 'hsl(30,90%,50%)' })
+                        if (rep.context_added) badges.push({ label: '✨ Context Added', color: 'hsl(140,65%,45%)' })
+                        if (rep.verified && !rep.meeting_context_used) badges.push({ label: '✅ Verified', color: 'hsl(140,65%,45%)' })
+                        if (rep.technical_details_added && !rep.context_added) badges.push({ label: '🔬 Details added', color: 'hsl(205,90%,50%)' })
                         if (rep.terminology_clarified) badges.push({ label: '📘 Terms clarified', color: 'hsl(190,80%,45%)' })
-                        if (rep.no_useful_context) badges.push({ label: '⚠️ No useful context', color: 'hsl(45,90%,50%)' })
-                        const meetingDocs: string[] = rep.meeting_context_docs || []
-                        const globalDocs: string[] = rep.global_context_docs || []
-                        if (badges.length === 0 && meetingDocs.length === 0 && globalDocs.length === 0) return null
+
+                        const docs: string[] = rep.documents || rep.meeting_context_docs || rep.global_context_docs || []
+                        if (badges.length === 0 && docs.length === 0) return null
                         return (
                           <details style={{ marginTop: '.5rem' }}>
                             <summary style={{ cursor: 'pointer', fontSize: '.73rem', fontWeight: 600, color: 'hsl(270,75%,60%)', outline: 'none' }}>
@@ -1919,7 +3272,7 @@ export default function RomPage() {
                             </summary>
                             <div style={{ marginTop: '.45rem', padding: '.55rem .7rem', borderRadius: 8, border: '1px solid hsl(270,75%,55%/.25)', background: 'hsl(270,75%,55%/.05)' }}>
                               {badges.length > 0 && (
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: (meetingDocs.length + globalDocs.length > 0) ? '.5rem' : 0 }}>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: (docs.length > 0) ? '.5rem' : 0 }}>
                                   {badges.map((b, bi) => (
                                     <span key={bi} style={{
                                       fontSize: '.66rem', fontWeight: 700, padding: '1px 7px', borderRadius: 10,
@@ -1928,13 +3281,10 @@ export default function RomPage() {
                                   ))}
                                 </div>
                               )}
-                              {(meetingDocs.length > 0 || globalDocs.length > 0) && (
+                              {docs.length > 0 && (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                  {meetingDocs.map((d, di) => (
-                                    <span key={`md-${di}`} style={{ fontSize: '.65rem', color: 'hsl(205,90%,55%)', display: 'flex', alignItems: 'center', gap: 3 }}>📄 {d}</span>
-                                  ))}
-                                  {globalDocs.map((d, di) => (
-                                    <span key={`gd-${di}`} style={{ fontSize: '.65rem', color: 'hsl(30,90%,55%)', display: 'flex', alignItems: 'center', gap: 3 }}>🌐 {d}</span>
+                                  {docs.map((d, di) => (
+                                    <span key={`doc-${di}`} style={{ fontSize: '.65rem', color: 'hsl(205,90%,55%)', display: 'flex', alignItems: 'center', gap: 3 }}>📄 {d}</span>
                                   ))}
                                 </div>
                               )}
@@ -1943,10 +3293,11 @@ export default function RomPage() {
                         )
                       })()}
                     </div>
-                  ))}
-                </div>
-              )
-            )}
+                  )
+                })}
+              </div>
+            )
+          )}
 
             {/* ── STAGE 3 TAB (Agenda Cards with Doc Upload) ── */}
             {activeTab === 'stage3' && (
@@ -2213,33 +3564,7 @@ export default function RomPage() {
                 {/* Sticky Header Bar for Final ROM */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'hsl(var(--muted)/.3)', padding: '.65rem 1rem', borderRadius: 9, border: '1px solid hsl(var(--border)/.4)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <SectionHeader icon={<Sparkles size={14} />} label={romViewMode === 'precise' ? 'Precise Record of Meeting' : 'Final Record of Meeting'} count={finalCount} color={romViewMode === 'precise' ? 'hsl(280,75%,60%)' : 'hsl(30,90%,55%)'} />
-                    <div style={{ display: 'flex', borderRadius: 6, border: '1px solid hsl(var(--border)/.6)', background: 'hsl(var(--muted)/.4)', padding: 2, gap: 2 }}>
-                      <button
-                        onClick={() => setRomViewMode('standard')}
-                        style={{
-                          padding: '3px 8px', border: 'none', borderRadius: 4, cursor: 'pointer',
-                          fontSize: '.72rem', fontWeight: romViewMode === 'standard' ? 700 : 500,
-                          background: romViewMode === 'standard' ? 'hsl(30,90%,55%)' : 'transparent',
-                          color: romViewMode === 'standard' ? 'white' : 'hsl(var(--pencil))',
-                          transition: 'all .15s', fontFamily: 'Inter'
-                        }}
-                      >
-                        Standard ROM
-                      </button>
-                      <button
-                        onClick={() => setRomViewMode('precise')}
-                        style={{
-                          padding: '3px 8px', border: 'none', borderRadius: 4, cursor: 'pointer',
-                          fontSize: '.72rem', fontWeight: romViewMode === 'precise' ? 700 : 500,
-                          background: romViewMode === 'precise' ? 'hsl(280,75%,60%)' : 'transparent',
-                          color: romViewMode === 'precise' ? 'white' : 'hsl(var(--pencil))',
-                          transition: 'all .15s', fontFamily: 'Inter'
-                        }}
-                      >
-                        Precise ROM
-                      </button>
-                    </div>
+                    <SectionHeader icon={<Sparkles size={14} />} label="Final Record of Meeting" count={finalCount} color="hsl(30,90%,55%)" />
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
@@ -2256,14 +3581,14 @@ export default function RomPage() {
                       {savingRom ? 'Saving...' : 'Save Changes'}
                     </button>
                     <button
-                      onClick={() => downloadDocx(romViewMode === 'precise' ? 'precise' : 'final')}
+                      onClick={() => downloadDocx('final')}
                       style={{
                         padding: '.35rem .85rem', borderRadius: 8,
                         background: 'hsl(205,90%,55%/.1)', color: 'hsl(205,90%,60%)', border: '1px solid hsl(205,90%,55%/.3)',
                         fontWeight: 700, fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: 'Inter'
                       }}
                     >
-                      <FileDown size={12} /> Download {romViewMode === 'precise' ? 'Precise' : 'Final'} DOCX
+                      <FileDown size={12} /> Download Final DOCX
                     </button>
                     <button
                       onClick={() => downloadDocx('agenda-transcript')}
@@ -2580,7 +3905,7 @@ export default function RomPage() {
                             pts.map((pt: any, pIdx: number) => {
                               const isEditing = editingPointId === pt.id
                               const ptText = pt.text || pt.polished_text || ''
-                              const spk = pt.speaker || (pt.speakers?.length ? pt.speakers.join(', ') : '—')
+                              const spk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '—')
                               const isDocPoint = pt.is_doc_point
 
                               return (
@@ -2616,8 +3941,6 @@ export default function RomPage() {
                                             </button>
                                           </div>
                                         </div>
-                                      ) : romViewMode === 'precise' ? (
-                                        <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.5, fontSize: '.83rem', fontWeight: 500 }}>{formatPrecisePointText(pt)}</div>
                                       ) : (
                                         <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{ptText}</div>
                                       )}
@@ -2633,9 +3956,7 @@ export default function RomPage() {
                                     {!isEditing && (
                                       <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flexShrink: 0 }}>
                                         {/* Edit */}
-                                        {romViewMode === 'standard' && (
-                                          <button onClick={() => { setEditingPointId(pt.id); setEditDraft(ptText) }} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}><Pencil size={11} /></button>
-                                        )}
+                                        <button onClick={() => { setEditingPointId(pt.id); setEditDraft(ptText) }} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}><Pencil size={11} /></button>
                                         {/* Move Up */}
                                         <button onClick={() => reorderPoint(aIdx, pIdx, 'up')} disabled={pIdx === 0} title="Move up" style={{ background: 'none', border: 'none', cursor: pIdx === 0 ? 'default' : 'pointer', color: pIdx === 0 ? 'hsl(var(--border))' : 'hsl(var(--pencil))', padding: '2px' }}><ChevronUp size={11} /></button>
                                         {/* Move Down */}
@@ -2673,176 +3994,154 @@ export default function RomPage() {
             )
           )}
 
-            {/* ── ADVANCED MOM TAB ── */}
-            {activeTab === 'advanced' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', maxWidth: 960, margin: '0 auto' }}>
 
-                {/* Header banner */}
-                <div style={{ padding: '1rem 1.25rem', borderRadius: 10, background: 'linear-gradient(135deg, hsl(330,85%,60%/.1), hsl(280,75%,60%/.1))', border: '1px solid hsl(330,85%,60%/.25)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <div style={{ fontSize: '.95rem', fontWeight: 800, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <Sparkles size={16} style={{ color: 'hsl(330,85%,60%)' }} /> Advanced MoM Generation & Custom Refinement
-                    </div>
-                    <div style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
-                      Provide custom instructions or pick a template to enhance Final MoM agenda points while preserving core facts, speakers, and action owners.
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => navigate(`/dashboard/history/${id}/mom`)}
-                    style={{ padding: '.4rem .85rem', borderRadius: 7, background: 'hsl(var(--accent))', color: 'white', border: 'none', fontSize: '.75rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}
-                  >
-                    <FileText size={12} /> View Main MoM Page
-                  </button>
-                </div>
-
-                {/* Prompt Template Preset Selector */}
-                <div>
-                  <div style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem', display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <Sliders size={13} style={{ color: 'hsl(330,85%,60%)' }} /> Built-in Prompt Templates
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '.6rem' }}>
-                    {BUILTIN_PROMPT_TEMPLATES.map(t => {
-                      const isSelected = selectedTemplateId === t.id
-                      return (
-                        <div
-                          key={t.id}
-                          onClick={() => {
-                            setSelectedTemplateId(t.id)
-                            setAdvancedCustomPrompt(t.prompt)
-                          }}
-                          style={{
-                            padding: '.65rem .85rem', borderRadius: 8,
-                            border: isSelected ? '1.5px solid hsl(330,85%,60%)' : '1px solid hsl(var(--border)/.5)',
-                            background: isSelected ? 'hsl(330,85%,60%/.08)' : 'hsl(var(--muted)/.2)',
-                            cursor: 'pointer', transition: 'all .15s'
-                          }}
-                        >
-                          <div style={{ fontSize: '.78rem', fontWeight: 700, color: isSelected ? 'hsl(330,85%,55%)' : 'hsl(var(--ink))' }}>
-                            {t.name}
-                          </div>
-                          <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', marginTop: 2, lineHeight: 1.3 }}>
-                            {t.description}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                {/* Custom Prompt Textarea */}
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.4rem' }}>
-                    <label style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
-                      Custom LLM Instructions (No Character Limit)
-                    </label>
-                    {advancedCustomPrompt && (
-                      <button
-                        onClick={() => { setAdvancedCustomPrompt(''); setSelectedTemplateId(null) }}
-                        style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.7rem', cursor: 'pointer', textDecoration: 'underline' }}
-                      >
-                        Clear prompt
-                      </button>
-                    )}
-                  </div>
-                  <textarea
-                    value={advancedCustomPrompt}
-                    onChange={e => {
-                      setAdvancedCustomPrompt(e.target.value)
-                      setSelectedTemplateId(null)
-                    }}
-                    placeholder="Enter custom instructions to refine agenda points (e.g. Focus on financial impact, format key takeaways as bullet points, use active executive tone...)"
-                    rows={6}
-                    style={{
-                      width: '100%', padding: '.75rem', borderRadius: 8,
-                      border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.3)',
-                      fontSize: '.8rem', fontFamily: 'Inter', color: 'hsl(var(--ink))',
-                      resize: 'vertical', lineHeight: 1.45
-                    }}
-                  />
-                </div>
-
-                {/* Selective Regeneration Checkboxes */}
-                <div style={{ padding: '.85rem 1rem', borderRadius: 8, border: '1px solid hsl(var(--border)/.5)', background: 'hsl(var(--muted)/.15)', display: 'flex', flexWrap: 'wrap', gap: '1.25rem', alignItems: 'center' }}>
-                  <div style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>
-                    Selective Regeneration Options:
-                  </div>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 600, color: 'hsl(var(--ink))', cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={advancedRegenTitle}
-                      onChange={e => setAdvancedRegenTitle(e.target.checked)}
-                      style={{ accentColor: 'hsl(330,85%,60%)' }}
-                    />
-                    Regenerate Title
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 600, color: 'hsl(var(--ink))', cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={advancedRegenIntro}
-                      onChange={e => setAdvancedRegenIntro(e.target.checked)}
-                      style={{ accentColor: 'hsl(330,85%,60%)' }}
-                    />
-                    Regenerate Introduction
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 600, color: 'hsl(var(--ink))', cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={advancedRegenConclusion}
-                      onChange={e => setAdvancedRegenConclusion(e.target.checked)}
-                      style={{ accentColor: 'hsl(330,85%,60%)' }}
-                    />
-                    Regenerate Conclusion
-                  </label>
-                </div>
-
-                {/* Generate Action Button */}
-                <div>
-                  <button
-                    onClick={runGenerateAdvancedMom}
-                    disabled={advancedStatus === 'processing' || !advancedCustomPrompt.trim()}
-                    style={{
-                      width: '100%', padding: '.65rem 1.25rem', borderRadius: 8,
-                      background: (advancedStatus === 'processing' || !advancedCustomPrompt.trim())
-                        ? 'hsl(var(--muted))'
-                        : 'linear-gradient(135deg, hsl(330,85%,60%), hsl(280,75%,60%))',
-                      color: 'white', fontWeight: 700, fontSize: '.84rem',
-                      border: 'none', cursor: (advancedStatus === 'processing' || !advancedCustomPrompt.trim()) ? 'not-allowed' : 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                      boxShadow: '0 2px 8px rgba(0,0,0,0.12)'
-                    }}
-                  >
-                    {advancedStatus === 'processing' ? <Loader size={14} className="spin" /> : <Sparkles size={14} />}
-                    {advancedStatus === 'processing' ? 'Generating Advanced MoM...' : 'Generate Advanced MoM'}
-                  </button>
-                </div>
-
-                {/* Display Enhanced Result Preview */}
-                {romData?.final_rom?.agendas && romData.final_rom.agendas.length > 0 && (
-                  <div style={{ marginTop: '.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <FileText size={14} style={{ color: 'hsl(330,85%,60%)' }} /> Current Enhanced Agendas & Action Items
-                    </div>
-                    {romData.final_rom.agendas.map((ag: any, idx: number) => (
-                      <div key={idx} style={{ borderRadius: 8, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1rem' }}>
-                        <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.5rem' }}>
-                          {ag.title || `Agenda ${idx + 1}`}
-                        </div>
-                        {(ag.discussion_points || []).map((dp: any, dpIdx: number) => (
-                          <div key={dpIdx} style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', lineHeight: 1.45, marginBottom: '.4rem' }}>
-                            • {dp.polished_text || dp.text || ''}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-              </div>
-            )}
 
         </div>
       </div>
     </div>
+
+      {/* ── Context Menu (right-click on selected text) ── */}
+      {contextMenu && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 199 }}
+            onClick={() => setContextMenu(null)}
+          />
+          <div
+            className="stage2-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <button
+              className="stage2-context-menu-item"
+              onClick={() => handleContextMenuAction('split')}
+              disabled={splittingPoint}
+            >
+              {splittingPoint ? <Loader size={14} className="spin" /> : <Scissors size={14} />}
+              Create Separate Point
+            </button>
+            <div className="stage2-context-menu-divider" />
+            <button
+              className="stage2-context-menu-item danger"
+              onClick={() => handleContextMenuAction('delete_text')}
+              disabled={deletingText}
+            >
+              {deletingText ? <Loader size={14} className="spin" /> : <Trash2 size={14} />}
+              Delete Selected Text
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Change History Drawer ── */}
+      {showChangeHistory && (
+        <>
+          <div className="change-history-drawer-backdrop" onClick={() => setShowChangeHistory(false)} />
+          <div className={`change-history-drawer ${showChangeHistory ? 'open' : ''}`}>
+            <div className="change-history-header">
+              <h3><History size={16} /> Change History</h3>
+              <button className="icon-btn" onClick={() => setShowChangeHistory(false)}><X size={16} /></button>
+            </div>
+            <div className="change-history-list">
+              {loadingHistory ? (
+                <div style={{ textAlign: 'center', padding: '2rem', color: 'hsl(var(--pencil))' }}>
+                  <Loader size={20} className="spin" style={{ margin: '0 auto .5rem' }} />
+                  <div style={{ fontSize: '.82rem' }}>Loading history...</div>
+                </div>
+              ) : changeHistory.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '2rem', color: 'hsl(var(--pencil))', fontSize: '.85rem' }}>
+                  No changes recorded yet
+                </div>
+              ) : (
+                changeHistory.map((change: any) => (
+                  <div key={change.id} className={`change-history-card ${change.is_reverted ? 'reverted' : ''}`}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.4rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span className={`change-type-badge ${change.change_type}`}>
+                          {change.change_type === 'merge' && <GitMerge size={10} />}
+                          {change.change_type === 'split' && <Scissors size={10} />}
+                          {change.change_type === 'find_replace' && <ArrowRightLeft size={10} />}
+                          {change.change_type === 'delete_text' && <Trash2 size={10} />}
+                          {change.change_type === 'delete' && <Trash2 size={10} />}
+                          {change.change_type === 'manual_edit' && <Pencil size={10} />}
+                          {change.change_type?.replace(/_/g, ' ')}
+                        </span>
+                        {change.is_reverted && <span className="change-type-badge reverted-badge">Reverted</span>}
+                      </div>
+                      <span style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))' }}>
+                        {new Date(change.created_at).toLocaleString()}
+                      </span>
+                    </div>
+
+                    {/* Before/After Preview */}
+                    {change.before_state?.length > 0 && (
+                      <details style={{ marginTop: '.35rem' }}>
+                        <summary style={{ cursor: 'pointer', fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', outline: 'none' }}>
+                          View changes ({change.before_state.length} point{change.before_state.length !== 1 ? 's' : ''})
+                        </summary>
+                        <div style={{ marginTop: '.35rem', display: 'flex', flexDirection: 'column', gap: '.35rem' }}>
+                          <div className="diff-before">
+                            <div style={{ fontSize: '.6rem', fontWeight: 700, textTransform: 'uppercase', marginBottom: 2, color: 'hsl(0,75%,55%)' }}>Before</div>
+                            {change.before_state.map((bs: any, bi: number) => (
+                              <div key={bi} style={{ fontSize: '.75rem', lineHeight: 1.4 }}>
+                                {(bs.polished_text || '').substring(0, 200)}{(bs.polished_text || '').length > 200 ? '…' : ''}
+                              </div>
+                            ))}
+                          </div>
+                          <div className="diff-after">
+                            <div style={{ fontSize: '.6rem', fontWeight: 700, textTransform: 'uppercase', marginBottom: 2, color: 'hsl(130,60%,42%)' }}>After</div>
+                            {(change.after_state || []).map((as_: any, ai: number) => (
+                              <div key={ai} style={{ fontSize: '.75rem', lineHeight: 1.4 }}>
+                                {(as_.polished_text || '').substring(0, 200)}{(as_.polished_text || '').length > 200 ? '…' : ''}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </details>
+                    )}
+
+                    {/* Revert / Redo Actions */}
+                    <div style={{ marginTop: '.5rem', display: 'flex', gap: 6 }}>
+                      {!change.is_reverted ? (
+                        <button
+                          onClick={() => handleRevertChange(change.id)}
+                          disabled={revertingChangeId === change.id}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 5,
+                            padding: '.3rem .65rem', borderRadius: 6,
+                            border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))',
+                            color: 'hsl(var(--ink))', fontSize: '.7rem', fontWeight: 600,
+                            cursor: 'pointer', fontFamily: 'Inter',
+                            opacity: revertingChangeId === change.id ? 0.5 : 1,
+                          }}
+                        >
+                          {revertingChangeId === change.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
+                          Revert
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleRedoChange(change.id)}
+                          disabled={redoingChangeId === change.id}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 5,
+                            padding: '.3rem .65rem', borderRadius: 6,
+                            border: '1px solid hsl(205,90%,55%/.4)', background: 'hsl(205,90%,55%/.1)',
+                            color: 'hsl(205,90%,60%)', fontSize: '.7rem', fontWeight: 600,
+                            cursor: 'pointer', fontFamily: 'Inter',
+                            opacity: redoingChangeId === change.id ? 0.5 : 1,
+                          }}
+                        >
+                          {redoingChangeId === change.id ? <Loader size={11} className="spin" /> : <RotateCw size={11} />}
+                          Redo
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
   </div>
 )
 }

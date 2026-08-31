@@ -91,57 +91,77 @@ def _is_duplicate(selectable_text: str, ocr_text: str) -> bool:
     return False
 
 
-def _extract_pdf(path: str) -> str:
-    """Extract plain text and run OCR on embedded images in page order."""
-    try:
-        import fitz
-        doc = fitz.open(path)
-        parts = []
+def _run_parallel_image_ocr(
+    tasks: list[dict],
+    filename: str,
+    total_images: int,
+    max_workers: int = 5,
+) -> list[dict]:
+    """
+    Process a batch of image OCR tasks in parallel using max_workers=5 worker threads.
+    Runs 5 different images simultaneously while logging real-time progress.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for page_idx, page in enumerate(doc, 1):
-            page_parts = []
-            # Extract selectable text
-            text = page.get_text()
-            if text.strip():
-                page_parts.append(text.strip())
+    if not tasks:
+        return []
 
-            # Extract page images
+    logger.info(
+        f"[DocExtractor] [{filename}] Submitting {len(tasks)} candidate image(s) "
+        f"to parallel OCR pool (processing 5 different images concurrently)."
+    )
+
+    def _worker(task: dict) -> dict:
+        g_idx = task["global_idx"]
+        p_idx = task.get("page_idx", 1)
+        w, h = task.get("w", 0), task.get("h", 0)
+        label = task.get("label", "<bytes>")
+        img_bytes = task["image_bytes"]
+        context_text = task.get("context_text", "")
+
+        logger.info(
+            f"[DocExtractor] [{filename}] [Parallel Pool] Starting OCR image {g_idx}/{total_images} "
+            f"(Page {p_idx}, xref {task.get('xref')}, {w}x{h}px)..."
+        )
+        ocr_text = _ocr_image_bytes(img_bytes, label=label)
+
+        extracted = ""
+        if ocr_text:
+            if not _is_duplicate(context_text, ocr_text):
+                extracted = ocr_text
+                logger.info(
+                    f"[DocExtractor] [{filename}] [Parallel Pool] Image {g_idx}/{total_images} "
+                    f"complete -> Extracted {len(ocr_text)} chars"
+                )
+            else:
+                logger.info(
+                    f"[DocExtractor] [{filename}] [Parallel Pool] Image {g_idx}/{total_images} "
+                    f"complete -> Skipped (duplicate of page text)"
+                )
+        else:
+            logger.info(
+                f"[DocExtractor] [{filename}] [Parallel Pool] Image {g_idx}/{total_images} "
+                f"complete -> No text detected"
+            )
+
+        task_out = dict(task)
+        task_out["ocr_text"] = extracted
+        return task_out
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_worker, t): t for t in tasks}
+        for future in as_completed(futures):
             try:
-                images = page.get_images(full=True)
-                for img_info in images:
-                    xref = img_info[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    ocr_text = _ocr_image_bytes(
-                        image_bytes,
-                        label=f"PDF page {page_idx} img xref={xref}",
-                    )
-                    if ocr_text and not _is_duplicate(text, ocr_text):
-                        page_parts.append(f"[Embedded Image OCR: {ocr_text}]")
-            except Exception as img_err:
+                res = future.result()
+                results.append(res)
+            except Exception as e:
+                task_failed = futures[future]
                 logger.warning(
-                    f"[DocExtractor] PDF image extraction failed on page {page_idx} of {path}: {img_err}"
+                    f"[DocExtractor] [{filename}] Worker failed for image {task_failed.get('global_idx')}: {e}"
                 )
 
-            if page_parts:
-                parts.append("\n\n".join(page_parts))
-
-        return "\n\n".join(parts)
-    except Exception as e:
-        logger.warning(f"[DocExtractor] PDF PyMuPDF extraction failed for {path}: {e}. Falling back to pypdf.")
-        # Fallback to pypdf
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(path)
-            parts = []
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    parts.append(text.strip())
-            return "\n\n".join(parts)
-        except Exception as pypdf_err:
-            logger.warning(f"[DocExtractor] PDF fallback pypdf extraction also failed: {pypdf_err}")
-            return ""
+    return results
 
 
 def _format_table_matrix_to_markdown(matrix: list[list[str]], title: str = "Table") -> str:
@@ -192,6 +212,162 @@ def _format_table_matrix_to_markdown(matrix: list[list[str]], title: str = "Tabl
         lines.append("| " + " | ".join(row) + " |")
 
     return "\n".join(lines)
+
+
+def _extract_pdf(path: str) -> str:
+    """Extract plain text, structured tables, and run OCR on embedded images/scans in parallel."""
+    filename = os.path.basename(path)
+    try:
+        import fitz
+        doc = fitz.open(path)
+
+        MIN_DIM = 100
+        MIN_AREA = 10000
+
+        # 1. Collect selectable text, tables, and candidate image tasks per page
+        page_texts = []
+        page_tables = {}
+        raw_image_tasks = []
+        global_img_count = 0
+
+        for page_idx, page in enumerate(doc, 1):
+            text = (page.get_text() or "").strip()
+            page_texts.append((page_idx, text))
+
+            # 1a. Extract structured tables if present on the page
+            try:
+                if hasattr(page, "find_tables"):
+                    tabs = page.find_tables()
+                    if tabs and getattr(tabs, "tables", None):
+                        tbl_md_list = []
+                        for t_idx, tab in enumerate(tabs.tables, 1):
+                            matrix = tab.extract()
+                            if matrix and any(any(c for c in row if c and str(c).strip()) for row in matrix):
+                                tbl_md = _format_table_matrix_to_markdown(
+                                    matrix, title=f"Table (Page {page_idx}, #{t_idx})"
+                                )
+                                if tbl_md:
+                                    tbl_md_list.append(tbl_md)
+                        if tbl_md_list:
+                            page_tables[page_idx] = tbl_md_list
+            except Exception as tbl_err:
+                logger.warning(
+                    f"[DocExtractor] Failed extracting tables on page {page_idx} of {filename}: {tbl_err}"
+                )
+
+            # 1b. Collect embedded images
+            has_embedded_images = False
+            try:
+                images = page.get_images(full=True)
+                for img_info in images:
+                    global_img_count += 1
+                    xref = img_info[0]
+                    base_image = doc.extract_image(xref)
+                    w = base_image.get("width", 0)
+                    h = base_image.get("height", 0)
+
+                    # Filter small images (<100px or <10,000 total pixels) before OCR
+                    if w > 0 and h > 0 and (w < MIN_DIM or h < MIN_DIM or (w * h) < MIN_AREA):
+                        logger.info(
+                            f"[DocExtractor] [{filename}] Image {global_img_count}/? "
+                            f"(Page {page_idx}, xref {xref}, {w}x{h}px) -> SKIPPED (too small < 100px)"
+                        )
+                        continue
+
+                    has_embedded_images = True
+                    raw_image_tasks.append({
+                        "global_idx": global_img_count,
+                        "page_idx": page_idx,
+                        "xref": xref,
+                        "w": w,
+                        "h": h,
+                        "image_bytes": base_image["image"],
+                        "context_text": text,
+                        "label": f"PDF page {page_idx} img xref={xref}",
+                    })
+            except Exception as page_img_err:
+                logger.warning(
+                    f"[DocExtractor] Failed inspecting images on page {page_idx} of {filename}: {page_img_err}"
+                )
+
+            # 1c. Scanned PDF fallback: If page has virtually no selectable text and no embedded images,
+            # render the page to a pixmap and run OCR on the rendered image.
+            if len(text) < 20 and not has_embedded_images and not page_tables.get(page_idx):
+                try:
+                    pix = page.get_pixmap(dpi=150)
+                    img_bytes = pix.tobytes("png")
+                    global_img_count += 1
+                    raw_image_tasks.append({
+                        "global_idx": global_img_count,
+                        "page_idx": page_idx,
+                        "xref": f"scan_{page_idx}",
+                        "w": pix.width,
+                        "h": pix.height,
+                        "image_bytes": img_bytes,
+                        "context_text": text,
+                        "label": f"PDF page {page_idx} full-page scan",
+                    })
+                    logger.info(
+                        f"[DocExtractor] [{filename}] Page {page_idx} has minimal text ({len(text)} chars) "
+                        f"and 0 embedded images -> Added full-page scan OCR task ({pix.width}x{pix.height}px)"
+                    )
+                except Exception as scan_err:
+                    logger.warning(
+                        f"[DocExtractor] Failed rendering page {page_idx} scan for {filename}: {scan_err}"
+                    )
+
+        total_images = global_img_count
+        if total_images > 0:
+            logger.info(
+                f"[DocExtractor] PDF '{filename}': Found {total_images} total image/scan candidate(s) across {len(doc)} pages. "
+                f"{len(raw_image_tasks)} qualify for parallel OCR."
+            )
+        else:
+            logger.info(f"[DocExtractor] PDF '{filename}': 0 image OCR candidates across {len(doc)} pages.")
+
+        # 2. Process candidate images in parallel (5 different images at once)
+        completed_tasks = _run_parallel_image_ocr(raw_image_tasks, filename, total_images=total_images, max_workers=5)
+
+        # 3. Group extracted OCR text by page_idx
+        ocr_by_page = {}
+        for t in completed_tasks:
+            p_idx = t["page_idx"]
+            ocr_txt = t.get("ocr_text", "").strip()
+            if ocr_txt:
+                ocr_by_page.setdefault(p_idx, []).append(ocr_txt)
+
+        # 4. Re-assemble document text in original page order
+        parts = []
+        for page_idx, text in page_texts:
+            page_parts = []
+            if text:
+                page_parts.append(text)
+            if page_idx in page_tables:
+                for tbl_md in page_tables[page_idx]:
+                    page_parts.append(tbl_md)
+            if page_idx in ocr_by_page:
+                for ocr_txt in ocr_by_page[page_idx]:
+                    page_parts.append(f"[Embedded Image OCR: {ocr_txt}]")
+
+            if page_parts:
+                parts.append("\n\n".join(page_parts))
+
+        return "\n\n".join(parts)
+    except Exception as e:
+        logger.warning(f"[DocExtractor] PDF PyMuPDF extraction failed for {path}: {e}. Falling back to pypdf.")
+        # Fallback to pypdf
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(path)
+            parts = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    parts.append(text.strip())
+            return "\n\n".join(parts)
+        except Exception as pypdf_err:
+            logger.warning(f"[DocExtractor] PDF fallback pypdf extraction also failed: {pypdf_err}")
+            return ""
 
 
 def _process_docx_paragraph(para, doc, parts_acc: list[str]) -> None:
@@ -335,7 +511,24 @@ def _extract_docx(path: str) -> str:
                         if t_md:
                             parts.append(t_md)
 
-        return "\n\n".join(parts)
+        res_text = "\n\n".join(parts).strip()
+        if not res_text and hasattr(doc, "part") and hasattr(doc.part, "related_parts"):
+            # Image-only document fallback: inspect all media parts directly
+            filename = os.path.basename(path)
+            logger.info(f"[DocExtractor] DOCX '{filename}' contains no body text. Scanning all embedded media parts for OCR...")
+            for rId, rel in doc.part.related_parts.items():
+                try:
+                    c_type = getattr(rel, "content_type", "") or ""
+                    if "image" in c_type.lower() and hasattr(rel, "blob") and rel.blob:
+                        ocr_txt = _ocr_image_bytes(rel.blob, label=f"DOCX media part {rId}")
+                        if ocr_txt:
+                            parts.append(f"[Embedded Image OCR: {ocr_txt}]")
+                except Exception as rel_err:
+                    logger.warning(f"[DocExtractor] Failed OCR on media part {rId} in {filename}: {rel_err}")
+
+            res_text = "\n\n".join(parts).strip()
+
+        return res_text
     except Exception as e:
         logger.warning(f"[DocExtractor] DOCX extraction failed for {path}: {e}")
         return ""

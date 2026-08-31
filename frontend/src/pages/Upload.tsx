@@ -14,6 +14,9 @@ import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 import { useJobsStore } from '../store/jobs'
 
+import AudioTrimmer from '../components/AudioTrimmer'
+import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+
 export default function UploadPage() {
   const [showConfidence, setShowConfidence] = useState(true);
   const [file, setFile] = useState<File | null>(null)
@@ -90,9 +93,6 @@ export default function UploadPage() {
   const currentJob = jobs.find((j) => j.jobId === recordingId)
 
   const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
-    // Direct assignment — never spread-merge transcript arrays to avoid duplicates.
-    // The per-page poller only fires this when currentJob is NOT in the global store;
-    // once the global store tracks the job, shouldPoll becomes false.
     console.log('[Upload] onTranscriptReady fired from per-page poller')
     setResult(data as ProcessingResult)
     setIsGeneratingMom(true)
@@ -100,18 +100,12 @@ export default function UploadPage() {
   }, [clearProcessing])
 
   const onDone = useCallback((data: ProcessingResult) => {
-    // Direct assignment — same rationale as onTranscriptReady above.
     console.log('[Upload] onDone fired from per-page poller')
     setResult(data)
     setIsGeneratingMom(false)
     clearProcessing()
   }, [clearProcessing])
 
-  // Only run the per-page poller when:
-  // 1. We have a recordingId (job exists)
-  // 2. We don't yet have a result (transcript not loaded)
-  // 3. The job is NOT yet tracked in the global store
-  //    (global poller handles all known jobs — running both causes duplicate setResult calls)
   const shouldPoll = recordingId && !result && !currentJob
   const jobData = useJobPoller(shouldPoll ? recordingId : null, { onTranscriptReady, onDone })
 
@@ -122,17 +116,13 @@ export default function UploadPage() {
     setRecordingId(priorJob.jobId)
 
     if (priorJob.result?.transcript) {
-      // Result is already in the store (persisted from a previous session)
       setResult(priorJob.result as ProcessingResult)
       setIsGeneratingMom(priorJob.status === 'transcript_ready')
       clearProcessing()
     } else if (isActiveJobStatus(priorJob.status)) {
-      // Still in-flight: show the processing overlay, poller will update
       setIsGeneratingMom(priorJob.status === 'transcript_ready')
       setProcessing('upload', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
     } else {
-      // Done/terminal but result not yet in store — the global poller reconcile
-      // will re-fetch it and dispatch a JOB_DONE_EVENT / JOB_TRANSCRIPT_READY_EVENT.
       setIsGeneratingMom(false)
       clearProcessing()
     }
@@ -154,8 +144,6 @@ export default function UploadPage() {
       setIsGeneratingMom(false)
       clearProcessing()
     } else if (currentJob.status === 'done') {
-      // Apply result from store when the global poller provides it.
-      // Guard: only apply if the store has a result and it's different from our local state
       if (currentJob.result?.transcript && result !== currentJob.result) {
         console.log('[Upload] Applying done result from store')
         setResult(currentJob.result as ProcessingResult)
@@ -166,17 +154,18 @@ export default function UploadPage() {
       setIsGeneratingMom(false)
       clearProcessing()
     } else if (currentJob.status === 'transcript_ready') {
-      // Apply result from store if poller already has it (reconnect path).
       if (currentJob.result?.transcript && result !== currentJob.result) {
         console.log('[Upload] Applying transcript_ready result from store')
         setResult(currentJob.result as ProcessingResult)
       }
       setIsGeneratingMom(true)
+    } else if (currentJob.status === 'pending_transcript_review') {
+      clearProcessing()
     } else {
-      // In-flight pending/processing stages (sync stage reactively)
       setProcessing('upload', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
   }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (jobData?.progress) {
       updateStage(jobData.progress as ProcessingStage)
@@ -235,7 +224,7 @@ export default function UploadPage() {
     }
   }
 
-  const handleUpload = async () => {
+  const handleUpload = async (trimStartSec?: number, trimEndSec?: number) => {
     if (!file) return
     setUploading(true); setError('')
     setProcessing('upload', 'uploading')
@@ -246,6 +235,10 @@ export default function UploadPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
+      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
+        form.append('trim_start_sec', String(trimStartSec))
+        form.append('trim_end_sec', String(trimEndSec))
+      }
       const res = await api.post('/audio/upload', form)
       const rId = res.data.recording_id
       setRecordingId(rId)
@@ -460,21 +453,27 @@ export default function UploadPage() {
             )}
 
             {file && !recordingId && (
-              <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+                <AudioTrimmer
+                  file={file}
+                  fileName={file.name}
+                  onConfirm={(start, end) => handleUpload(start, end)}
+                  onSkip={() => handleUpload()}
+                />
                 <AdvancedOptionsPanel onChange={setAdvancedOpts} />
-                <button
-                  className="btn btn-primary animate-slide-up"
-                  onClick={handleUpload}
-                  disabled={uploading}
-                  id="upload-btn"
-                  style={{ width: '100%', justifyContent: 'center', padding: '.75rem 1.5rem', fontSize: '.95rem', marginTop: '1rem' }}
-                >
-                  {uploading ? <Loader size={16} className="spin" /> : <CloudUpload size={16} />}
-                  {uploading ? 'Uploading…' : 'Process Audio'}
-                </button>
-              </>
+              </div>
             )}
           </div>
+        )}
+
+        {(currentJob?.status === 'pending_transcript_review' || jobData?.status === 'pending_transcript_review') && recordingId && (
+          <TranscriptReviewPanel
+            recordingId={recordingId}
+            onResumed={() => {
+              updateStage('diarizing')
+              setProcessing('upload', 'diarizing')
+            }}
+          />
         )}
 
         <div className="transcript-scroll" style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem', background: 'hsl(var(--paper) / .4)' }}>
@@ -558,6 +557,8 @@ export default function UploadPage() {
           isGeneratingMom={isGeneratingMom}
           onGenerateInsights={handleGenerateInsights}
           isGeneratingInsights={isGeneratingInsights}
+          onScrollToSegment={() => {}}
+          onTranscriptChanged={() => {}}
         />
       </div>
     </div>

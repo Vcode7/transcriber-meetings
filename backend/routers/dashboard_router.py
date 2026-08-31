@@ -1372,7 +1372,8 @@ async def get_db_stats() -> dict:
 
 
 def get_vector_store_stats() -> dict:
-    """Scan and compute metadata row counts across all vector directories."""
+    """Scan and compute metadata row counts across vector store collections and directories."""
+    chroma_dir = Path(getattr(settings, "CHROMADB_DIR", settings.VECTOR_STORE_DIR))
     store_dir = Path(settings.VECTOR_STORE_DIR)
     stats = {
         "global_context": {"count": 0, "vectors": 0, "size": 0},
@@ -1381,39 +1382,64 @@ def get_vector_store_stats() -> dict:
         "total_size": 0
     }
 
-    if not store_dir.exists():
+    # Compute disk sizes
+    for d in (chroma_dir, store_dir):
+        if d.exists():
+            for f in d.rglob('*'):
+                if f.is_file():
+                    stats["total_size"] += f.stat().st_size
+
+    # Try ChromaDB collection metrics
+    try:
+        from services.vector_store import _get_chroma_client
+        client = _get_chroma_client()
+        colls = client.list_collections()
+        for coll in colls:
+            name = coll.name
+            cnt = coll.count()
+            if name.startswith("global_context_"):
+                stats["global_context"]["count"] += 1
+                stats["global_context"]["vectors"] += cnt
+            elif name.startswith("meeting_"):
+                stats["meeting_context"]["count"] += 1
+                stats["meeting_context"]["vectors"] += cnt
+            elif name.startswith("transcript_"):
+                stats["transcript"]["count"] += 1
+                stats["transcript"]["vectors"] += cnt
         return stats
+    except Exception:
+        pass
 
-    for p in store_dir.iterdir():
-        if not p.is_dir():
-            continue
-        name = p.name
-        dir_size = sum(f.stat().st_size for f in p.glob('*') if f.is_file())
-        stats["total_size"] += dir_size
+    # Legacy FAISS scan fallback
+    if store_dir.exists():
+        for p in store_dir.iterdir():
+            if not p.is_dir():
+                continue
+            name = p.name
+            dir_size = sum(f.stat().st_size for f in p.glob('*') if f.is_file())
 
-        # Read meta file
-        meta_file = p / "index_meta.json"
-        vector_count = 0
-        if meta_file.exists():
-            try:
-                with open(meta_file, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                    vector_count = len(meta)
-            except Exception:
-                pass
+            meta_file = p / "index_meta.json"
+            vector_count = 0
+            if meta_file.exists():
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                        vector_count = len(meta)
+                except Exception:
+                    pass
 
-        if name.startswith("global_context_"):
-            stats["global_context"]["count"] += 1
-            stats["global_context"]["vectors"] += vector_count
-            stats["global_context"]["size"] += dir_size
-        elif name.startswith("meeting_"):
-            stats["meeting_context"]["count"] += 1
-            stats["meeting_context"]["vectors"] += vector_count
-            stats["meeting_context"]["size"] += dir_size
-        elif name.startswith("transcript_"):
-            stats["transcript"]["count"] += 1
-            stats["transcript"]["vectors"] += vector_count
-            stats["transcript"]["size"] += dir_size
+            if name.startswith("global_context_"):
+                stats["global_context"]["count"] += 1
+                stats["global_context"]["vectors"] += vector_count
+                stats["global_context"]["size"] += dir_size
+            elif name.startswith("meeting_"):
+                stats["meeting_context"]["count"] += 1
+                stats["meeting_context"]["vectors"] += vector_count
+                stats["meeting_context"]["size"] += dir_size
+            elif name.startswith("transcript_"):
+                stats["transcript"]["count"] += 1
+                stats["transcript"]["vectors"] += vector_count
+                stats["transcript"]["size"] += dir_size
 
     return stats
 

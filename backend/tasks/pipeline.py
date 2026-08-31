@@ -32,7 +32,7 @@ from services.llm import (
     generate_speaker_summaries, generate_mom, build_context_summary,
 )
 from services.prompt_builder import build_whisper_prompt
-from services.dictionary_service import get_global_prompt, list_vocabulary
+from services.dictionary_service import get_global_prompt, list_vocabulary, list_shortcuts
 from config import settings
 logger = logging.getLogger(__name__)
 
@@ -576,7 +576,8 @@ async def _run_pipeline_impl(
     try:
         async with get_db_context() as db:
             global_prompt = await get_global_prompt(db, user_id)
-            vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
+            vocab_items = await list_vocabulary(db, user_id)
+            shortcut_items = await list_shortcuts(db, user_id)
 
         vocab_words = [item["word"] for item in vocab_items]
         initial_prompt = build_whisper_prompt(
@@ -584,12 +585,18 @@ async def _run_pipeline_impl(
             meeting_prompt=meeting_prompt,
             vocabulary=vocab_words,
             use_vocabulary=use_vocabulary,
+            shortcuts=shortcut_items,
         )
-        logger.info(
-            f"[Pipeline] {recording_id} — Built initial_prompt "
-            f"({len(initial_prompt)} chars, {len(vocab_words)} vocab terms)"
-        )
+        if initial_prompt:
+            logger.info(
+                f"[Pipeline] {recording_id} — Initial prompt ACTIVE for Whisper: "
+                f"{len(initial_prompt)} chars ({len(vocab_words)} vocab words, {len(shortcut_items)} shortcuts) | "
+                f"Preview: {repr(initial_prompt[:160])}"
+            )
+        else:
+            logger.info(f"[Pipeline] {recording_id} — Initial prompt INACTIVE / EMPTY (no vocab, shortcuts, or global prompts configured)")
         _analytics["vocab_term_count"] = len(vocab_words)
+        _analytics["shortcut_count"] = len(shortcut_items)
         _analytics["initial_prompt_chars"] = len(initial_prompt)
     except Exception as e:
         logger.warning(f"[Pipeline] {recording_id} — Prompt build failed (non-fatal): {e}")
@@ -617,11 +624,33 @@ async def _run_pipeline_impl(
             pass
 
         _t0_transcription = time.monotonic()
+
+        # ── Route to parallel or sequential transcription ─────────────────
+        _whisper_workers = int(user_settings_dict.get("whisper_parallel_processing") or getattr(settings, "WHISPER_PARALLEL_PROCESSING", 1))
+        _chunk_minutes = int(user_settings_dict.get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
+        logger.info(
+            f"[Pipeline] {recording_id} — Whisper workers={_whisper_workers} "
+            f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
+        )
         try:
-            t_result = await loop.run_in_executor(
-                None,
-                lambda: transcribe(file_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
-            )
+            if _whisper_workers > 1:
+                from services.transcription import transcribe_parallel
+                t_result = await loop.run_in_executor(
+                    None,
+                    lambda: transcribe_parallel(
+                        file_path,
+                        initial_prompt=initial_prompt,
+                        user_settings=user_settings_dict,
+                        workers=_whisper_workers,
+                        chunk_minutes=_chunk_minutes,
+                    ),
+                )
+
+            else:
+                t_result = await loop.run_in_executor(
+                    None,
+                    lambda: transcribe(file_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
+                )
         except Exception as e:
             logger.error(f"[Pipeline] {recording_id} — Transcription FAILED: {e}", exc_info=True)
             _analytics["error_stage"] = "transcription"
@@ -632,6 +661,8 @@ async def _run_pipeline_impl(
             unload_all_models()
             return
         _analytics["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+        _analytics["whisper_workers"] = _whisper_workers
+
 
         transcript_segs = t_result["segments"]
         raw_text = t_result["raw_text"]
@@ -658,11 +689,79 @@ async def _run_pipeline_impl(
         except Exception as e:
             logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
 
+        # ── Optional: Missing Transcription Recovery pause ─────────────────────
+        # When enabled in user settings, the pipeline pauses here so the user can
+        # review the raw transcript, fill in silence gaps, and submit corrections.
+        # The pipeline resumes when the frontend POST /audio/{id}/transcript/corrections
+        # sets status back to 'processing', or after a 60-minute timeout.
+        _missing_recovery = bool(user_settings_dict.get("missing_transcript_recovery_enabled", False))
+        if _missing_recovery:
+            logger.info(
+                f"[Pipeline] {recording_id} — Missing Transcription Recovery enabled: "
+                f"saving raw transcript ({len(transcript_segs)} segs) & pausing"
+            )
+            _raw_segs_json = to_json(transcript_segs)
+            await _update_status_safe(recording_id, "pending_transcript_review", {
+                "raw_transcript": _raw_segs_json,
+                "progress": "pending_transcript_review",
+            })
+            _review_resumed = False
+            for _wait_iter in range(720):  # max 60 min (720 × 5 s)
+                await asyncio.sleep(5)
+                # Honour cooperative cancellation
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    return
+                try:
+                    async with get_db_context() as _rdb:
+                        _rr = await _rdb.execute(
+                            text("SELECT status, raw_transcript FROM recordings WHERE id = :rid"),
+                            {"rid": recording_id},
+                        )
+                        _rrow = _rr.mappings().fetchone()
+                    if _rrow:
+                        _st = _rrow.get("status", "")
+                        if _st == "processing":
+                            # User submitted corrections — reload the (possibly updated) segments
+                            _upd_json = _rrow.get("raw_transcript") or _raw_segs_json
+                            try:
+                                _upd_segs = from_json(_upd_json, [])
+                                if _upd_segs:
+                                    transcript_segs = _upd_segs
+                                    aligned_result = {"segments": transcript_segs}
+                                    logger.info(
+                                        f"[Pipeline] {recording_id} — Corrections applied: "
+                                        f"{len(transcript_segs)} segments; pipeline resuming"
+                                    )
+                            except Exception as _ce:
+                                logger.warning(
+                                    f"[Pipeline] {recording_id} — Could not apply corrections ({_ce}); "
+                                    "using original transcript"
+                                )
+                            _review_resumed = True
+                            break
+                        elif _st in ("cancelled", "error"):
+                            logger.info(
+                                f"[Pipeline] {recording_id} — Cancelled/errored during transcript review"
+                            )
+                            return
+                except Exception as _poll_err:
+                    logger.warning(
+                        f"[Pipeline] {recording_id} — Review-poll error (non-fatal): {_poll_err}"
+                    )
+            if not _review_resumed:
+                logger.warning(
+                    f"[Pipeline] {recording_id} — Transcript review timed out (60 min); "
+                    "continuing with original transcript"
+                )
+                await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
+
         # ── Stage 2: Diarization ──────────────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
         await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
         _t0_diarization = time.monotonic()
         diar_segs = await loop.run_in_executor(None, diarize, file_path)
+
         _analytics["diarization_sec"] = round(time.monotonic() - _t0_diarization, 3)
         _analytics["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
         _analytics["diar_raw_segment_count"] = len(diar_segs)
@@ -1789,15 +1888,26 @@ async def _run_finalize_pipeline_impl(
         try:
             async with get_db_context() as db:
                 global_prompt = await get_global_prompt(db, user_id)
-                vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
+                vocab_items = await list_vocabulary(db, user_id)
+                shortcut_items = await list_shortcuts(db, user_id)
             vocab_words = [item["word"] for item in vocab_items]
             initial_prompt = build_whisper_prompt(
                 global_prompt=global_prompt,
                 meeting_prompt=meeting_prompt,
                 vocabulary=vocab_words,
                 use_vocabulary=use_vocabulary,
+                shortcuts=shortcut_items,
             )
+            if initial_prompt:
+                logger.info(
+                    f"[FinalPipeline] {recording_id} — Initial prompt ACTIVE for Whisper: "
+                    f"{len(initial_prompt)} chars ({len(vocab_words)} vocab words, {len(shortcut_items)} shortcuts) | "
+                    f"Preview: {repr(initial_prompt[:160])}"
+                )
+            else:
+                logger.info(f"[FinalPipeline] {recording_id} — Initial prompt INACTIVE / EMPTY")
             _analytics_fin["vocab_term_count"] = len(vocab_words)
+            _analytics_fin["shortcut_count"] = len(shortcut_items)
             _analytics_fin["initial_prompt_chars"] = len(initial_prompt)
         except Exception as e:
             logger.warning(f"[FinalPipeline] {recording_id} — Prompt build failed (non-fatal): {e}")
@@ -1816,11 +1926,34 @@ async def _run_finalize_pipeline_impl(
             pass
 
         _t0_transcription = time.monotonic()
+
+        # ── Route to parallel or sequential transcription ─────────────────
+        _whisper_workers = int(user_settings_dict.get("whisper_parallel_processing") or getattr(settings, "WHISPER_PARALLEL_PROCESSING", 1))
+        _chunk_minutes = int(user_settings_dict.get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
+        logger.info(
+            f"[FinalPipeline] {recording_id} — Whisper workers={_whisper_workers} "
+            f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
+        )
         try:
-            t_result = await loop.run_in_executor(
-                None,
-                lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language, user_settings=user_settings_dict),
-            )
+            if _whisper_workers > 1:
+                from services.transcription import transcribe_parallel
+                t_result = await loop.run_in_executor(
+                    None,
+                    lambda: transcribe_parallel(
+                        full_wav_path,
+                        initial_prompt=initial_prompt,
+                        language=detected_language,
+                        user_settings=user_settings_dict,
+                        workers=_whisper_workers,
+                        chunk_minutes=_chunk_minutes,
+                    ),
+                )
+
+            else:
+                t_result = await loop.run_in_executor(
+                    None,
+                    lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language, user_settings=user_settings_dict),
+                )
             full_raw_text = t_result.get("raw_text", "")
             language = t_result.get("language", "en")
             # Use full-audio aligned result for speaker assignment (most accurate timestamps)
@@ -1849,6 +1982,8 @@ async def _run_finalize_pipeline_impl(
             unload_all_models()
             return
         _analytics_fin["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+        _analytics_fin["whisper_workers"] = _whisper_workers
+
 
         # Unload transcription models immediately to free VRAM
         try:

@@ -25,7 +25,7 @@ from sqlalchemy import text
 from database import get_db, get_db_context, to_json
 from services.transcription import transcribe
 from services.prompt_builder import build_whisper_prompt
-from services.dictionary_service import get_global_prompt, list_vocabulary
+from services.dictionary_service import get_global_prompt, list_vocabulary, list_shortcuts
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +74,24 @@ async def run_chunk_pipeline(
     try:
         async with get_db_context() as db:
             global_prompt = await get_global_prompt(db, user_id)
-            vocab_items = await list_vocabulary(db, user_id) if use_vocabulary else []
+            vocab_items = await list_vocabulary(db, user_id)
+            shortcut_items = await list_shortcuts(db, user_id)
         vocab_words = [item["word"] for item in vocab_items]
         initial_prompt = build_whisper_prompt(
             global_prompt=global_prompt,
             meeting_prompt=meeting_prompt,
             vocabulary=vocab_words,
             use_vocabulary=use_vocabulary,
+            shortcuts=shortcut_items,
         )
+        if initial_prompt:
+            logger.info(
+                f"[ChunkPipeline] {chunk_id} — Initial prompt ACTIVE for Whisper: "
+                f"{len(initial_prompt)} chars ({len(vocab_words)} vocab words, {len(shortcut_items)} shortcuts) | "
+                f"Preview: {repr(initial_prompt[:160])}"
+            )
+        else:
+            logger.info(f"[ChunkPipeline] {chunk_id} — Initial prompt INACTIVE / EMPTY")
     except Exception as e:
         logger.warning(f"[ChunkPipeline] {chunk_id} — Prompt build failed (non-fatal): {e}")
 

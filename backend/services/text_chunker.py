@@ -716,6 +716,217 @@ class _StructuralSplitter:
 # §6  Layer 3 — Metadata Enricher
 # ══════════════════════════════════════════════════════════════════════════════
 
+class _TechnicalTerminologyExtractor:
+    """
+    Multi-signal technical terminology extractor for RAG retrieval & metadata indexing.
+    Extracts:
+      - Technology, model, framework, library, database, API, protocol, architecture,
+        and standard names (e.g. PyTorch, ChromaDB, FastAPI, ONNX, CUDA, DO-178C).
+      - Multi-word compound technical terms and noun phrases (e.g. diffusion model,
+        image embeddings, vector database, fine-tuning pipeline, reciprocal rank fusion).
+      - Acronym ↔ Expanded Terminology relationships (e.g. Retrieval-Augmented Generation (RAG)).
+      - Standard/Requirement/Part identifiers (e.g. REQ-101, PN-99482-A, MIL-STD-810G).
+      - Heading and frequency contextual signal weighting.
+      - Comprehensive noise filtering for UI labels, generic verbs, boilerplate, and fillers.
+      - Normalized variants generation for flexible matching (DO-178C → do-178c, do178c, do 178c).
+    """
+
+    _KNOWN_TECH_SEEDS = frozenset({
+        "pytorch", "onnx", "onnxruntime", "fastapi", "uvicorn", "chromadb", "faiss",
+        "python", "react", "typescript", "vite", "cuda", "gpu", "cpu", "vram", "ram",
+        "whisper", "pyannote", "qwen", "bge", "bert", "llm", "rag", "ocr", "rapidocr",
+        "spacy", "nltk", "docker", "kubernetes", "grpc", "rest", "http", "https", "json",
+        "yaml", "sql", "sqlite", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+        "do-178c", "do-254", "mil-std-810g", "iso-9001", "as9100", "ieee-802.11", "ada",
+        "nlp", "cv", "ai", "ml", "dl", "api", "sdk", "cli", "gui", "ui",
+    })
+
+    _TECH_NOUN_SUFFIXES = frozenset({
+        "model", "models", "embedding", "embeddings", "pipeline", "pipelines",
+        "database", "databases", "vector", "vectors", "retrieval", "index",
+        "indexing", "architecture", "architectures", "algorithm", "algorithms",
+        "framework", "frameworks", "library", "libraries", "transformer",
+        "encoder", "decoder", "checkpoint", "checkpoints", "endpoint", "endpoints",
+        "runtime", "runtimes", "tensor", "tensors", "neural", "network", "networks",
+        "cache", "session", "cluster", "clusters", "workflow", "workflows",
+        "token", "tokens", "tokenizer", "tokenizers", "schema", "schemas",
+        "payload", "payloads", "repository", "repositories", "protocol", "protocols",
+        "interface", "interfaces", "system", "systems", "service", "services",
+        "router", "routers", "dataset", "datasets", "matrix", "matrices",
+        "standard", "standards", "specification", "specifications", "requirement",
+        "requirements", "module", "modules", "version", "parameter", "parameters",
+    })
+
+    _TECH_MODIFIERS = frozenset({
+        "diffusion", "vector", "image", "text", "fine-tuning", "fine", "tuning",
+        "semantic", "hybrid", "reciprocal", "rank", "fusion", "cosine", "similarity",
+        "contextual", "dense", "sparse", "latent", "attention", "transformer",
+        "neural", "deep", "machine", "learning", "artificial", "intelligence",
+        "natural", "language", "speech", "audio", "video", "spatial", "graph",
+        "tree", "binary", "linear", "logistic", "convolutional", "recurrent",
+        "backpropagation", "gradient", "descent", "optimizer", "loss", "metric",
+    })
+
+    _NOISE_BLOCKLIST = frozenset({
+        "showing preview", "first 1200 chars", "first 1,200 chars", "click below", "document details",
+        "full text extraction", "on demand", "on-demand", "saved at", "created at",
+        "updated at", "document inspection", "select option", "table of contents",
+        "page number", "page count", "file size", "file path", "relative path",
+        "user id", "recording id", "meeting id", "doc id", "total chunks",
+        "chunk index", "extracted text", "context summary", "pipeline steps",
+        "show preview", "show full text", "extract full text", "cancel", "submit",
+        "is used to", "can be found", "according to", "in order to", "as shown in",
+        "refer to", "for example", "such as", "more information", "this document",
+        "following section", "overview", "introduction", "conclusion", "summary",
+        "chapter", "section", "subsection", "appendix", "table", "figure",
+    })
+
+    _GENERIC_STANDALONE_WORDS = frozenset({
+        "data", "text", "file", "page", "code", "test", "type", "user", "time",
+        "name", "list", "item", "value", "view", "info", "row", "col", "date",
+        "note", "notes", "path", "key", "keys", "mode", "modes", "rule", "rules",
+    })
+
+    _RE_ACRONYM_PAIR = re.compile(
+        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z]{2,8})\)"
+    )
+
+    _RE_IDENTIFIER = re.compile(
+        r"\b(?:"
+        r"(?:DOC|TICKET|JIRA|BUG|ISSUE|INCIDENT|TASK|PR|RFC|SPEC|VER|MODEL|PN|SN|CAT|REF|ID|REQ|SRS|ICD)-?\d+[\w.-]*"
+        r"|[A-Z]{2,6}-\d{2,}[\w.-]*"
+        r"|[A-Z][0-9]{3,8}[A-Z0-9\-]*"
+        r"|MIL-STD-\d+[\w.-]*"
+        r"|DO-\d+[\w.-]*"
+        r"|ISO\s?\d{4,}[\w.-]*"
+        r"|IEEE\s?\d{3,}[\w.-]*"
+        r"|v\d+\.\d+[\w.-]*"
+        r"|Rev\s?[A-Z0-9]+"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    _RE_WORD_TOKENS = re.compile(r"\b[a-zA-Z0-9_\-.]+\b")
+
+    def extract(self, text: str, heading_context: str = "") -> Dict[str, Any]:
+        if not text or not text.strip():
+            return {
+                "technical_terms": [],
+                "acronym_mappings": {},
+                "identifiers": [],
+            }
+
+        text_clean = text.strip()
+
+        tech_terms_set: set[str] = set()
+        acronym_mappings: Dict[str, str] = {}
+        identifiers_set: set[str] = set()
+
+        # ── 1. Acronym ↔ Full Term Pairs ──────────────────────────────────────
+        for m in self._RE_ACRONYM_PAIR.finditer(text_clean):
+            full_form = m.group(1).strip()
+            acronym = m.group(2).strip()
+            if len(acronym) >= 2 and acronym.lower() not in _STOPWORDS:
+                acronym_mappings[acronym] = full_form
+                acronym_mappings[full_form] = acronym
+                tech_terms_set.add(full_form)
+                tech_terms_set.add(acronym)
+
+        # ── 2. Standard & Requirement Identifiers ──────────────────────────────
+        for m in self._RE_IDENTIFIER.finditer(text_clean):
+            ident = m.group(0).strip()
+            if len(ident) >= 2:
+                identifiers_set.add(ident)
+                tech_terms_set.add(ident)
+
+        # ── 3. Known Technology & Standard Names ───────────────────────────────
+        tokens = self._RE_WORD_TOKENS.findall(text_clean)
+        for tok in tokens:
+            tok_lower = tok.lower()
+            if tok_lower in self._KNOWN_TECH_SEEDS:
+                tech_terms_set.add(tok)
+
+        # ── 4. Compound Technical Noun Phrases (2 to 4 words) ──────────────────
+        words = text_clean.split()
+        for window_size in (2, 3, 4):
+            for i in range(len(words) - window_size + 1):
+                phrase_words = words[i : i + window_size]
+                phrase_str = " ".join(phrase_words).strip(".,;:()[]{}'\"")
+                phrase_lower = phrase_str.lower()
+
+                if any(noise in phrase_lower for noise in self._NOISE_BLOCKLIST):
+                    continue
+
+                p_tokens = phrase_lower.split()
+                if len(p_tokens) < 2:
+                    continue
+
+                has_tech_suffix = p_tokens[-1] in self._TECH_NOUN_SUFFIXES
+                has_tech_modifier = any(tok in self._TECH_MODIFIERS for tok in p_tokens[:-1])
+                has_known_seed = any(tok in self._KNOWN_TECH_SEEDS for tok in p_tokens)
+
+                if has_tech_suffix or has_tech_modifier or has_known_seed:
+                    if p_tokens[0] not in _STOPWORDS and p_tokens[-1] not in _STOPWORDS:
+                        tech_terms_set.add(phrase_str)
+
+        # ── 5. Heading Context Boost ───────────────────────────────────────────
+        if heading_context:
+            h_words = heading_context.split()
+            for w_size in (1, 2, 3, 4):
+                for i in range(len(h_words) - w_size + 1):
+                    h_phrase = " ".join(h_words[i : i + w_size]).strip(".,;:()[]{}'\"")
+                    hp_lower = h_phrase.lower()
+                    if hp_lower not in self._NOISE_BLOCKLIST and len(hp_lower) >= 3:
+                        hp_toks = hp_lower.split()
+                        if any(tok in self._TECH_NOUN_SUFFIXES or tok in self._TECH_MODIFIERS or tok in self._KNOWN_TECH_SEEDS for tok in hp_toks):
+                            if hp_toks[0] not in _STOPWORDS and hp_toks[-1] not in _STOPWORDS:
+                                tech_terms_set.add(h_phrase)
+
+        # ── 6. Filter Out Noise & Standalone Generic Words ────────────────────
+        filtered_terms: List[str] = []
+        for term in tech_terms_set:
+            t_clean = term.strip(".,;:()[]{}'\"")
+            t_lower = t_clean.lower()
+            if not t_clean or len(t_clean) < 2:
+                continue
+            if t_lower in _STOPWORDS or t_lower in self._NOISE_BLOCKLIST or t_lower in self._GENERIC_STANDALONE_WORDS:
+                continue
+            if any(noise == t_lower for noise in self._NOISE_BLOCKLIST):
+                continue
+            filtered_terms.append(t_clean)
+
+        # ── 7. Generate Normalized Variants ───────────────────────────────────
+        all_terms_with_variants: set[str] = set(filtered_terms)
+        for term in list(filtered_terms):
+            variants = self.generate_normalized_variants(term)
+            for v in variants:
+                all_terms_with_variants.add(v)
+
+        return {
+            "technical_terms": sorted(all_terms_with_variants),
+            "acronym_mappings": acronym_mappings,
+            "identifiers": sorted(identifiers_set),
+        }
+
+    def generate_normalized_variants(self, term: str) -> List[str]:
+        if not term:
+            return []
+
+        variants: set[str] = set()
+        t_lower = term.lower().strip()
+        variants.add(t_lower)
+
+        unhyphenated = re.sub(r'[\-_.]+', ' ', t_lower).strip()
+        if unhyphenated != t_lower:
+            variants.add(unhyphenated)
+
+        collapsed = re.sub(r'[\-_.\s]+', '', t_lower).strip()
+        if len(collapsed) >= 3:
+            variants.add(collapsed)
+
+        return sorted(variants)
+
+
 # Heuristic patterns for entity extraction
 _RE_ACRONYM        = re.compile(r"\b([A-Z]{2,8})\b")
 _RE_TECH_ENTITY    = re.compile(
@@ -773,6 +984,69 @@ class _MetadataEnricher:
     All extraction is heuristic/regex — no LLM calls.
     """
 
+    # ── Extra regex patterns for enhanced metadata ────────────────────────────
+    _RE_ACRONYM_MAPPING = re.compile(
+        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z]{2,8})\)"
+    )
+
+    _RE_GENERIC_IDENTIFIERS = re.compile(
+        r"\b(?:"
+        r"(?:DOC|TICKET|JIRA|BUG|ISSUE|INCIDENT|TASK|PR|RFC|SPEC|VER|MODEL|PN|SN|CAT|REF|ID|REQ|SRS|ICD)-?\d+[\w.-]*"
+        r"|[A-Z]{2,6}-\d{2,}[\w.-]*"
+        r"|[A-Z][0-9]{3,8}[A-Z0-9\-]*"
+        r"|MIL-STD-\d+[\w.-]*"
+        r"|DO-\d+[\w.-]*"
+        r"|ISO\s?\d{4,}[\w.-]*"
+        r"|IEEE\s?\d{3,}[\w.-]*"
+        r"|v\d+\.\d+[\w.-]*"
+        r"|Rev\s?[A-Z0-9]+"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    _RE_NOUN_PHRASE = re.compile(
+        r"\b([A-Za-z0-9_\-]+(?:\s+[A-Za-z0-9_\-]+){1,3})\b"
+    )
+
+    _RE_CALENDAR_DATE = re.compile(
+        r"\b(?:"
+        r"\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}"  # 01/02/2024, 1-2-24
+        r"|\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}"    # 2024-01-02
+        r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\s+\d{1,2}(?:,?\s+\d{4})?"              # January 15, 2024
+        r"|\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"(?:\s+\d{4})?"                            # 15 January 2024
+        r"|Q[1-4]\s*\d{4}"                          # Q1 2024
+        r")\b",
+        re.IGNORECASE,
+    )
+    _RE_PROJECT_NAME = re.compile(
+        r"\b("
+        r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\s+(?:Project|Program|Initiative|System|Platform|Module|Engine)"
+        r"|(?:Project|Program)\s+[A-Z][a-zA-Z0-9_\-]+"
+        r")\b"
+    )
+    _RE_ORG_ENTITY = re.compile(
+        r"\b("
+        r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+(?:Inc|LLC|Corp(?:oration)?|Ltd|GmbH|AG|SA|PLC|Co\.?|Group|Team|Department|Division|Committee|Board)"
+        r"|(?:Dr|Mr|Mrs|Ms|Prof)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?"
+        r")\b"
+    )
+    _RE_IMPORTANT_NUMBER = re.compile(
+        r"\b("
+        r"\d+(?:\.\d+)?%"                           # percentages
+        r"|\$[\d,]+(?:\.\d{1,2})?"                   # currency
+        r"|[€£¥]\s*[\d,]+(?:\.\d{1,2})?"            # other currency
+        r"|\d+(?:\.\d+)?\s*(?:MHz|GHz|kHz|Hz|MB|GB|TB|KB|ms|μs|ns|sec|seconds?|minutes?|hours?|days?|weeks?|months?|years?)"  # units
+        r"|\d+(?:\.\d+)?\s*(?:mm|cm|m|km|in|ft|lbs?|kg|mg|°[CF])"  # measurements
+        r"|v\d+(?:\.\d+)+"                            # version numbers
+        r"|#\d{3,}"                                   # issue/ticket numbers
+        r")\b",
+        re.IGNORECASE,
+    )
+
     def __init__(self, filename: str = "", doc_scope: str = "global_context",
                  meeting_id: Optional[str] = None, doc_name: Optional[str] = None,
                  doc_type: Optional[str] = None):
@@ -781,6 +1055,7 @@ class _MetadataEnricher:
         self._doc_name  = doc_name or filename
         self._scope     = doc_scope
         self._meeting_id = meeting_id
+        self._tech_extractor = _TechnicalTerminologyExtractor()
 
     def enrich(self, chunk: StructureChunk) -> Dict[str, Any]:
         text = chunk.text
@@ -791,29 +1066,116 @@ class _MetadataEnricher:
         d["document_type"] = self._doc_type
         d["scope"]         = self._scope
         d["meeting_id"]    = self._meeting_id
+        d["context_type"]  = "global" if self._scope == "global_context" else "meeting"
 
-        # ── Acronyms ──────────────────────────────────────────────────────────
-        acronyms = sorted(set(_RE_ACRONYM.findall(text)))
-        # Filter out single-letter and obvious noise
-        acronyms = [a for a in acronyms if len(a) >= 2 and a not in _STOPWORDS]
-        d["acronyms"] = acronyms[:20]
+        # Heading context
+        heading_ctx = f"{d.get('heading') or ''} {d.get('section') or ''} {d.get('chapter') or ''}".strip()
 
-        # ── Technical entities ────────────────────────────────────────────────
-        tech_entities = sorted(set(m.group(0) for m in _RE_TECH_ENTITY.finditer(text)))
-        d["technical_entities"] = tech_entities[:30]
+        # ── 1. Multi-signal Technical Terminology Extraction ───────────────────
+        tech_extracted = self._tech_extractor.extract(text, heading_context=heading_ctx)
+        d["technical_terms"] = tech_extracted["technical_terms"]
+        d["acronym_mappings"] = tech_extracted["acronym_mappings"]
+        d["identifiers"] = tech_extracted["identifiers"]
 
-        # ── Keywords (title-case noun phrases, deduplicated, stopword-filtered) ─
-        kw_candidates = _RE_KEYWORD_PHRASE.findall(text)
-        seen: set[str] = set()
+        # ── 2. Acronyms & Expanded Terms (Uncapped) ───────────────────────────
+        acronyms_raw = sorted(set(_RE_ACRONYM.findall(text)))
+        acronyms = [a for a in acronyms_raw if len(a) >= 2 and a not in _STOPWORDS]
+        expanded_acronyms = list(acronyms)
+        for a in acronyms:
+            if a in d["acronym_mappings"]:
+                expanded_acronyms.append(d["acronym_mappings"][a])
+
+        d["acronyms"] = sorted(set(expanded_acronyms))
+
+        # ── 3. Technical Entities ─────────────────────────────────────────────
+        tech_entities = sorted(set(m.group(0) for m in _RE_TECH_ENTITY.finditer(text)) | set(d["identifiers"]) | set(d["technical_terms"]))
+        d["technical_entities"] = tech_entities
+
+        # ── 4. Keywords (Title Case + Noun Phrases, Uncapped) ─────────────────
+        kw_title = _RE_KEYWORD_PHRASE.findall(text)
+        kw_noun = [p for p in self._RE_NOUN_PHRASE.findall(text) if len(p.split()) >= 2]
+
+        seen_kw: set[str] = set()
         keywords: List[str] = []
-        for kw in kw_candidates:
-            kw_lower = kw.lower()
-            if kw_lower not in _STOPWORDS and kw_lower not in seen and len(kw) > 3:
-                seen.add(kw_lower)
-                keywords.append(kw)
-            if len(keywords) >= 20:
-                break
+        for kw in kw_title + kw_noun:
+            kw_clean = kw.strip()
+            kw_lower = kw_clean.lower()
+            if (
+                kw_lower not in _STOPWORDS
+                and kw_lower not in seen_kw
+                and len(kw_clean) > 3
+                and not any(w in _STOPWORDS for w in kw_lower.split())
+            ):
+                seen_kw.add(kw_lower)
+                keywords.append(kw_clean)
+
         d["keywords"] = keywords
+
+        # ── 5. Dates, Projects, Entities, Numbers (Uncapped) ───────────────────
+        dates = sorted(set(m.group(0).strip() for m in self._RE_CALENDAR_DATE.finditer(text)))
+        d["dates"] = dates
+
+        project_names = sorted(set(m.group(0).strip() for m in self._RE_PROJECT_NAME.finditer(text)))
+        d["project_names"] = project_names
+
+        org_entities = sorted(set(m.group(0).strip() for m in self._RE_ORG_ENTITY.finditer(text)))
+        d["entities"] = org_entities
+
+        numbers = sorted(set(m.group(0).strip() for m in self._RE_IMPORTANT_NUMBER.finditer(text)))
+        d["numbers"] = numbers
+
+        # ── 6. Consolidated Search Terms ──────────────────────────────────────
+        search_terms_set: set[str] = set()
+
+        def _add_term(t: str):
+            if not t:
+                return
+            cleaned = str(t).strip()
+            if cleaned and len(cleaned) >= 2:
+                search_terms_set.add(cleaned.lower())
+                # Add un-hyphenated / normalized version
+                unhyphenated = re.sub(r'[\-_.]+', ' ', cleaned.lower()).strip()
+                if unhyphenated != cleaned.lower():
+                    search_terms_set.add(unhyphenated)
+                # Add collapsed version (no spaces/hyphens)
+                collapsed = re.sub(r'[\-_. ]+', '', cleaned.lower()).strip()
+                if len(collapsed) >= 3:
+                    search_terms_set.add(collapsed)
+
+        for k in d["keywords"]: _add_term(k)
+        for t in d["technical_entities"]: _add_term(t)
+        for a in d["acronyms"]: _add_term(a)
+        for p in d["project_names"]: _add_term(p)
+        for e in d["entities"]: _add_term(e)
+        for num in d["numbers"]: _add_term(num)
+        for ident in d["identifiers"]: _add_term(ident)
+        for k_mapping, v_mapping in d["acronym_mappings"].items():
+            _add_term(k_mapping)
+            _add_term(v_mapping)
+
+        # Headings hierarchy
+        for h_field in ("chapter", "section", "subsection", "heading"):
+            h_val = d.get(h_field)
+            if h_val:
+                _add_term(str(h_val))
+
+        d["search_terms"] = sorted(search_terms_set)
+        d["important_terms"] = d["search_terms"]  # Alias for backward compatibility
+
+        # ── 7. Contextual Chunk Embedding String ──────────────────────────────
+        hierarchy_parts = []
+        if self._doc_name:
+            hierarchy_parts.append(f"Document: {self._doc_name}")
+        for h_f in ("chapter", "section", "subsection", "heading"):
+            val = d.get(h_f)
+            if val:
+                hierarchy_parts.append(str(val))
+
+        hierarchy_str = " > ".join(hierarchy_parts)
+        if hierarchy_str:
+            d["embedding_context"] = f"[{hierarchy_str}]\n{text}"
+        else:
+            d["embedding_context"] = text
 
         return d
 
@@ -859,9 +1221,12 @@ def chunk_document(
     List of dicts, each containing:
       text, chunk_index, block_type, heading_level,
       chapter, section, subsection, heading,
-      document_name, document_type, scope, meeting_id,
+      document_name, document_type, scope, meeting_id, context_type,
       page_number, keywords, technical_entities, acronyms,
-      chunk_size_words
+      dates, project_names, entities, numbers, important_terms,
+      search_terms, identifiers, acronym_mappings, embedding_context,
+      previous_chunk_index, next_chunk_index,
+      chunk_size_words, total_chunks
     """
     if not text or not text.strip():
         return []
@@ -886,6 +1251,15 @@ def chunk_document(
     for chunk in chunks:
         enriched = enricher.enrich(chunk)
         result.append(enriched)
+
+    # Post-enrichment: set total_chunks and neighbor indices on every chunk
+    total = len(result)
+    for idx, d in enumerate(result):
+        d["total_chunks"] = total
+        d["previous_chunk_index"] = result[idx - 1]["chunk_index"] if idx > 0 else None
+        d["next_chunk_index"] = result[idx + 1]["chunk_index"] if idx < total - 1 else None
+        d["previous_chunk_id"] = f"{d.get('document_name', filename)}_chunk_{idx-1}" if idx > 0 else None
+        d["next_chunk_id"] = f"{d.get('document_name', filename)}_chunk_{idx+1}" if idx < total - 1 else None
 
     return result
 

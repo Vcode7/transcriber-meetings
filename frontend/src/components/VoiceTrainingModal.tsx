@@ -1,5 +1,5 @@
-﻿import { useState, useEffect, useRef, useCallback } from "react";
-import { X, Mic2, Trash2, Play, Pause, Loader, CheckCircle, AlertCircle, User } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { X, Mic2, Trash2, Play, Pause, Loader, CheckCircle, AlertCircle, User, PlusCircle } from "lucide-react";
 import api from "../api/client";
 import type { Segment } from "./TranscriptViewer";
 
@@ -114,6 +114,98 @@ function SampleRow({ sample, index, onDelete }: { sample: Sample; index: number;
   );
 }
 
+// ── Confirmation popup for existing voice profile ─────────────────────────────
+function AppendConfirmPopup({
+  existingName,
+  onCancel,
+  onConfirm,
+}: {
+  existingName: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1100,
+        background: "rgba(0,0,0,.65)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "1rem", backdropFilter: "blur(6px)",
+      }}
+    >
+      <div style={{
+        background: "hsl(var(--card))",
+        border: "1px solid hsl(var(--ink) / .15)",
+        borderRadius: "14px",
+        width: "100%", maxWidth: "420px",
+        padding: "1.6rem 1.6rem 1.3rem",
+        boxShadow: "0 24px 64px rgba(0,0,0,.5)",
+        display: "flex", flexDirection: "column", gap: "1rem",
+      }}>
+        {/* Icon + Title */}
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: "10px", flexShrink: 0,
+            background: "hsl(35,90%,50% / .12)", border: "1.5px solid hsl(35,90%,50% / .3)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <PlusCircle size={17} style={{ color: "hsl(35,90%,50%)" }} />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: ".97rem", color: "hsl(var(--ink))", fontFamily: "Inter, sans-serif", marginBottom: ".25rem" }}>
+              Voice Sample Already Exists
+            </div>
+            <div style={{ fontSize: ".82rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", lineHeight: 1.5 }}>
+              A voice profile named <strong style={{ color: "hsl(var(--ink))" }}>"{existingName}"</strong> already exists.
+              Do you want to add this sample to the existing voice profile?
+            </div>
+          </div>
+        </div>
+
+        {/* Info box */}
+        <div style={{
+          padding: ".65rem .85rem",
+          borderRadius: "8px",
+          background: "hsl(205,90%,55% / .08)",
+          border: "1px solid hsl(205,90%,55% / .2)",
+          fontSize: ".76rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", lineHeight: 1.5,
+        }}>
+          The new embedding will be <strong>appended</strong> to the existing profile — no data will be overwritten or duplicated.
+        </div>
+
+        {/* Buttons */}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: ".2rem" }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding: ".45rem 1rem", borderRadius: "8px",
+              border: "1px solid hsl(var(--ink) / .15)",
+              background: "hsl(var(--muted) / .5)", color: "hsl(var(--pencil))",
+              fontSize: ".83rem", fontWeight: 600, fontFamily: "Inter, sans-serif", cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            id="voice-append-confirm-btn"
+            onClick={onConfirm}
+            style={{
+              display: "flex", alignItems: "center", gap: "6px",
+              padding: ".45rem 1.1rem", borderRadius: "8px", border: "none",
+              background: "hsl(35,90%,50%)", color: "#fff",
+              fontSize: ".83rem", fontWeight: 700, fontFamily: "Inter, sans-serif", cursor: "pointer",
+            }}
+          >
+            <PlusCircle size={13} /> Yes, Add Sample
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Modal ─────────────────────────────────────────────────────────────────
 export default function VoiceTrainingModal({ recordingId, segments, onClose, onTrainingComplete }: Props) {
   const speakers = Array.from(new Set(segments.map((s) => s.speaker_label))).filter(Boolean);
 
@@ -121,6 +213,10 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
   const [nameInput, setNameInput] = useState(speakers[0] || "");
   const [nameError, setNameError] = useState("");
   const [nameChecking, setNameChecking] = useState(false);
+
+  // Existing profile state (for the append flow)
+  const [existingProfileId, setExistingProfileId] = useState<string | null>(null);
+  const [showAppendConfirm, setShowAppendConfirm] = useState(false);
 
   const [samples, setSamples] = useState<Sample[]>([]);
   const [loadingSamples, setLoadingSamples] = useState(false);
@@ -137,6 +233,7 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
     if (!selectedSpeaker) return;
     setNameInput(selectedSpeaker);
     setNameError("");
+    setExistingProfileId(null);
     setTrained(null);
     setTrainError("");
     fetchSamples(selectedSpeaker);
@@ -164,6 +261,7 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
   const handleNameChange = useCallback((val: string) => {
     setNameInput(val);
     setNameError("");
+    setExistingProfileId(null);
     if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
     if (!val.trim() || val.trim() === selectedSpeaker) {
       nameValidRef.current = true;
@@ -174,9 +272,11 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
       try {
         const res = await api.get("/voice/check-label", { params: { label: val.trim() } });
         if (res.data.exists) {
-          setNameError(`"${val.trim()}" is already used by another profile.`);
-          nameValidRef.current = false;
+          // Don't error — store the existing profile_id for the append confirm flow
+          setExistingProfileId(res.data.profile_id || null);
+          nameValidRef.current = true; // still valid — user can choose to append
         } else {
+          setExistingProfileId(null);
           nameValidRef.current = true;
         }
       } catch { nameValidRef.current = true; }
@@ -186,7 +286,8 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
 
   const handleDeleteSample = (idx: number) => setSamples((prev) => prev.filter((_, i) => i !== idx));
 
-  const handleTrain = async () => {
+  // Core training logic (used for both new profile and append)
+  const doTrain = async (profileIdOverride?: string) => {
     const label = nameInput.trim();
     if (!label) { setNameError("Name cannot be empty."); return; }
     if (nameError) return;
@@ -195,18 +296,31 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
     setTraining(true);
     setTrainError("");
     try {
-      const res = await api.post("/voice/train-from-transcript", {
+      const payload: Record<string, unknown> = {
         recording_id: recordingId,
         speaker_label: selectedSpeaker,
         new_label: label,
         sample_paths: samples.map((s) => s.file_path),
-      });
+      };
+      if (profileIdOverride) {
+        payload.profile_id = profileIdOverride;
+      }
+
+      const res = await api.post("/voice/train-from-transcript", payload);
       const { new_label, updated_segment_count } = res.data;
+
       const updated = segments.map((seg) =>
         seg.speaker_label === selectedSpeaker ? { ...seg, speaker_label: new_label } : seg
       );
-      setTrained(`"${selectedSpeaker}" → "${new_label}" · ${updated_segment_count} segments updated`);
+
+      const isAppend = !!profileIdOverride;
+      setTrained(
+        isAppend
+          ? `✓ Sample added to "${new_label}" · ${updated_segment_count} segment${updated_segment_count !== 1 ? "s" : ""} updated`
+          : `"${selectedSpeaker}" → "${new_label}" · ${updated_segment_count} segment${updated_segment_count !== 1 ? "s" : ""} updated`
+      );
       setSamples([]);
+      setExistingProfileId(null);
       onTrainingComplete(selectedSpeaker, new_label, updated);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "Training failed.";
@@ -216,187 +330,228 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
     }
   };
 
+  const handleTrain = () => {
+    if (existingProfileId) {
+      // Name exists → show confirmation popup
+      setShowAppendConfirm(true);
+    } else {
+      doTrain();
+    }
+  };
+
   const speakerColor = (sp: string) => SPEAKER_COLORS[speakers.indexOf(sp) % SPEAKER_COLORS.length];
+  // canTrain: no spinner running, no hard errors, has samples. Existing profile is fine (will trigger confirm popup).
   const canTrain = !training && !nameError && samples.length > 0 && !loadingSamples;
 
   return (
-    <div
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      style={{
-        position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(0,0,0,.55)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: "1rem", backdropFilter: "blur(4px)",
-      }}
-    >
-      <div style={{
-        background: "hsl(var(--card))",
-        border: "1px solid hsl(var(--ink) / .12)",
-        borderRadius: "16px",
-        width: "100%", maxWidth: "580px", maxHeight: "90vh",
-        display: "flex", flexDirection: "column",
-        boxShadow: "0 24px 64px rgba(0,0,0,.45)",
-        overflow: "hidden",
-      }}>
+    <>
+      {showAppendConfirm && existingProfileId && (
+        <AppendConfirmPopup
+          existingName={nameInput.trim()}
+          onCancel={() => setShowAppendConfirm(false)}
+          onConfirm={() => {
+            setShowAppendConfirm(false);
+            doTrain(existingProfileId);
+          }}
+        />
+      )}
 
-        {/* Header */}
+      <div
+        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        style={{
+          position: "fixed", inset: 0, zIndex: 1000,
+          background: "rgba(0,0,0,.55)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: "1rem", backdropFilter: "blur(4px)",
+        }}
+      >
         <div style={{
-          display: "flex", alignItems: "center", gap: "10px",
-          padding: "1.1rem 1.4rem", borderBottom: "1px solid hsl(var(--ink) / .08)", flexShrink: 0,
+          background: "hsl(var(--card))",
+          border: "1px solid hsl(var(--ink) / .12)",
+          borderRadius: "16px",
+          width: "100%", maxWidth: "580px", maxHeight: "90vh",
+          display: "flex", flexDirection: "column",
+          boxShadow: "0 24px 64px rgba(0,0,0,.45)",
+          overflow: "hidden",
         }}>
+
+          {/* Header */}
           <div style={{
-            width: 32, height: 32, borderRadius: "8px",
-            background: "hsl(var(--accent) / .12)", border: "1.5px solid hsl(var(--accent) / .3)",
-            display: "flex", alignItems: "center", justifyContent: "center",
+            display: "flex", alignItems: "center", gap: "10px",
+            padding: "1.1rem 1.4rem", borderBottom: "1px solid hsl(var(--ink) / .08)", flexShrink: 0,
           }}>
-            <Mic2 size={15} style={{ color: "hsl(var(--accent))" }} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: ".95rem", color: "hsl(var(--ink))", fontFamily: "Inter, sans-serif" }}>Train Voice Samples</div>
-            <div style={{ fontSize: ".72rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>Assign names and build voice profiles from this recording</div>
-          </div>
-          <button onClick={onClose} style={{ width: 28, height: 28, borderRadius: "6px", border: "none", background: "hsl(var(--muted))", color: "hsl(var(--pencil))", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-            <X size={14} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "1.2rem 1.4rem", display: "flex", flexDirection: "column", gap: "1.1rem" }}>
-
-          {/* Speaker chips */}
-          <div>
-            <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", marginBottom: ".55rem" }}>
-              Detected Speakers
+            <div style={{
+              width: 32, height: 32, borderRadius: "8px",
+              background: "hsl(var(--accent) / .12)", border: "1.5px solid hsl(var(--accent) / .3)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <Mic2 size={15} style={{ color: "hsl(var(--accent))" }} />
             </div>
-            <div style={{ display: "flex", gap: "8px", overflowX: "auto", paddingBottom: "4px" }}>
-              {speakers.map((sp) => {
-                const col = speakerColor(sp);
-                const active = sp === selectedSpeaker;
-                return (
-                  <button
-                    key={sp}
-                    onClick={() => setSelectedSpeaker(sp)}
-                    style={{
-                      display: "flex", alignItems: "center", gap: "6px",
-                      padding: ".35rem .85rem", borderRadius: "999px",
-                      border: `1.5px solid ${active ? col : "hsl(var(--ink) / .12)"}`,
-                      background: active ? `${col}22` : "hsl(var(--muted) / .5)",
-                      color: active ? col : "hsl(var(--pencil))",
-                      fontFamily: "Inter, sans-serif", fontSize: ".78rem", fontWeight: 600,
-                      cursor: "pointer", flexShrink: 0, transition: "all .15s",
-                    }}
-                  >
-                    <User size={11} /> {sp}
-                  </button>
-                );
-              })}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: ".95rem", color: "hsl(var(--ink))", fontFamily: "Inter, sans-serif" }}>Train Voice Samples</div>
+              <div style={{ fontSize: ".72rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>Assign names and build voice profiles from this recording</div>
             </div>
+            <button onClick={onClose} style={{ width: 28, height: 28, borderRadius: "6px", border: "none", background: "hsl(var(--muted))", color: "hsl(var(--pencil))", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              <X size={14} />
+            </button>
           </div>
 
-          {/* Name input */}
-          <div>
-            <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", marginBottom: ".45rem" }}>
-              Assign Name to "{selectedSpeaker}"
+          {/* Body */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "1.2rem 1.4rem", display: "flex", flexDirection: "column", gap: "1.1rem" }}>
+
+            {/* Speaker chips */}
+            <div>
+              <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", marginBottom: ".55rem" }}>
+                Detected Speakers
+              </div>
+              <div style={{ display: "flex", gap: "8px", overflowX: "auto", paddingBottom: "4px" }}>
+                {speakers.map((sp) => {
+                  const col = speakerColor(sp);
+                  const active = sp === selectedSpeaker;
+                  return (
+                    <button
+                      key={sp}
+                      onClick={() => setSelectedSpeaker(sp)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "6px",
+                        padding: ".35rem .85rem", borderRadius: "999px",
+                        border: `1.5px solid ${active ? col : "hsl(var(--ink) / .12)"}`,
+                        background: active ? `${col}22` : "hsl(var(--muted) / .5)",
+                        color: active ? col : "hsl(var(--pencil))",
+                        fontFamily: "Inter, sans-serif", fontSize: ".78rem", fontWeight: 600,
+                        cursor: "pointer", flexShrink: 0, transition: "all .15s",
+                      }}
+                    >
+                      <User size={11} /> {sp}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div style={{ position: "relative" }}>
-              <input
-                id="voice-train-name-input"
-                type="text"
-                value={nameInput}
-                onChange={(e) => handleNameChange(e.target.value)}
-                placeholder="Enter a name for this speaker…"
-                style={{
-                  width: "100%", boxSizing: "border-box",
-                  padding: ".55rem .85rem", paddingRight: "2.2rem",
-                  borderRadius: "8px",
-                  border: `1.5px solid ${nameError ? "hsl(var(--destructive))" : "hsl(var(--ink) / .15)"}`,
-                  background: "hsl(var(--muted) / .5)", color: "hsl(var(--ink))",
-                  fontSize: ".88rem", fontFamily: "Inter, sans-serif", outline: "none",
-                }}
-              />
-              {nameChecking && <Loader size={13} className="spin" style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "hsl(var(--pencil))" }} />}
+
+            {/* Name input */}
+            <div>
+              <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif", marginBottom: ".45rem" }}>
+                Assign Name to "{selectedSpeaker}"
+              </div>
+              <div style={{ position: "relative" }}>
+                <input
+                  id="voice-train-name-input"
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => handleNameChange(e.target.value)}
+                  placeholder="Enter a name for this speaker…"
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    padding: ".55rem .85rem", paddingRight: "2.2rem",
+                    borderRadius: "8px",
+                    border: `1.5px solid ${nameError ? "hsl(var(--destructive))" : existingProfileId ? "hsl(35,90%,50% / .55)" : "hsl(var(--ink) / .15)"}`,
+                    background: "hsl(var(--muted) / .5)", color: "hsl(var(--ink))",
+                    fontSize: ".88rem", fontFamily: "Inter, sans-serif", outline: "none",
+                  }}
+                />
+                {nameChecking && <Loader size={13} className="spin" style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "hsl(var(--pencil))" }} />}
+              </div>
+              {nameError && (
+                <div style={{ display: "flex", alignItems: "center", gap: "5px", marginTop: "5px", fontSize: ".75rem", color: "hsl(var(--destructive))", fontFamily: "Inter, sans-serif" }}>
+                  <AlertCircle size={11} /> {nameError}
+                </div>
+              )}
+              {/* Existing profile info banner */}
+              {existingProfileId && !nameError && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "7px",
+                  marginTop: "7px", padding: ".5rem .75rem", borderRadius: "8px",
+                  background: "hsl(35,90%,50% / .08)", border: "1px solid hsl(35,90%,50% / .25)",
+                  fontSize: ".76rem", color: "hsl(35,90%,45%)", fontFamily: "Inter, sans-serif",
+                }}>
+                  <PlusCircle size={12} />
+                  A profile named <strong style={{ marginLeft: 3, marginRight: 3 }}>"{nameInput.trim()}"</strong> already exists.
+                  Clicking <strong style={{ marginLeft: 3 }}>Train</strong> will add samples to it.
+                </div>
+              )}
             </div>
-            {nameError && (
-              <div style={{ display: "flex", alignItems: "center", gap: "5px", marginTop: "5px", fontSize: ".75rem", color: "hsl(var(--destructive))", fontFamily: "Inter, sans-serif" }}>
-                <AlertCircle size={11} /> {nameError}
+
+            {/* Samples */}
+            <div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: ".55rem" }}>
+                <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>
+                  Voice Samples
+                </div>
+                {samples.length > 0 && <span style={{ fontSize: ".72rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>{samples.length} sample{samples.length !== 1 ? "s" : ""} · click ▶ to preview</span>}
+              </div>
+
+              {loadingSamples && (
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "1rem", color: "hsl(var(--pencil))", fontSize: ".84rem", fontFamily: "Inter, sans-serif" }}>
+                  <Loader size={14} className="spin" style={{ color: "hsl(var(--accent))" }} /> Extracting best quality samples…
+                </div>
+              )}
+
+              {samplesError && !loadingSamples && (
+                <div style={{ display: "flex", alignItems: "center", gap: "7px", padding: ".75rem 1rem", borderRadius: "8px", background: "hsl(var(--destructive) / .08)", border: "1px solid hsl(var(--destructive) / .2)", color: "hsl(var(--destructive))", fontSize: ".8rem", fontFamily: "Inter, sans-serif" }}>
+                  <AlertCircle size={13} /> {samplesError}
+                </div>
+              )}
+
+              {!loadingSamples && samples.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {samples.map((s, i) => (
+                    <SampleRow key={s.file_path} sample={s} index={i} onDelete={() => handleDeleteSample(i)} />
+                  ))}
+                </div>
+              )}
+
+              {!loadingSamples && !samplesError && samples.length === 0 && (
+                <div style={{ padding: ".75rem 1rem", borderRadius: "8px", background: "hsl(var(--muted) / .4)", color: "hsl(var(--pencil))", fontSize: ".82rem", fontFamily: "Inter, sans-serif", textAlign: "center" }}>
+                  No samples available.
+                </div>
+              )}
+            </div>
+
+            {/* Success/error banners */}
+            {trained && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: ".75rem 1rem", borderRadius: "10px", background: "hsl(var(--success) / .1)", border: "1px solid hsl(var(--success) / .3)", color: "hsl(var(--success))", fontSize: ".82rem", fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
+                <CheckCircle size={14} /> {trained}
+              </div>
+            )}
+            {trainError && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: ".75rem 1rem", borderRadius: "10px", background: "hsl(var(--destructive) / .08)", border: "1px solid hsl(var(--destructive) / .25)", color: "hsl(var(--destructive))", fontSize: ".82rem", fontFamily: "Inter, sans-serif" }}>
+                <AlertCircle size={13} /> {trainError}
               </div>
             )}
           </div>
 
-          {/* Samples */}
-          <div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: ".55rem" }}>
-              <div style={{ fontSize: ".68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>
-                Voice Samples
-              </div>
-              {samples.length > 0 && <span style={{ fontSize: ".72rem", color: "hsl(var(--pencil))", fontFamily: "Inter, sans-serif" }}>{samples.length} sample{samples.length !== 1 ? "s" : ""} · click ▶ to preview</span>}
-            </div>
-
-            {loadingSamples && (
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "1rem", color: "hsl(var(--pencil))", fontSize: ".84rem", fontFamily: "Inter, sans-serif" }}>
-                <Loader size={14} className="spin" style={{ color: "hsl(var(--accent))" }} /> Extracting best quality samples…
-              </div>
-            )}
-
-            {samplesError && !loadingSamples && (
-              <div style={{ display: "flex", alignItems: "center", gap: "7px", padding: ".75rem 1rem", borderRadius: "8px", background: "hsl(var(--destructive) / .08)", border: "1px solid hsl(var(--destructive) / .2)", color: "hsl(var(--destructive))", fontSize: ".8rem", fontFamily: "Inter, sans-serif" }}>
-                <AlertCircle size={13} /> {samplesError}
-              </div>
-            )}
-
-            {!loadingSamples && samples.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                {samples.map((s, i) => (
-                  <SampleRow key={s.file_path} sample={s} index={i} onDelete={() => handleDeleteSample(i)} />
-                ))}
-              </div>
-            )}
-
-            {!loadingSamples && !samplesError && samples.length === 0 && (
-              <div style={{ padding: ".75rem 1rem", borderRadius: "8px", background: "hsl(var(--muted) / .4)", color: "hsl(var(--pencil))", fontSize: ".82rem", fontFamily: "Inter, sans-serif", textAlign: "center" }}>
-                No samples available.
-              </div>
-            )}
+          {/* Footer */}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", padding: "1rem 1.4rem", borderTop: "1px solid hsl(var(--ink) / .08)", flexShrink: 0 }}>
+            <button
+              onClick={onClose}
+              style={{ padding: ".5rem 1.1rem", borderRadius: "8px", border: "1px solid hsl(var(--ink) / .15)", background: "hsl(var(--muted) / .5)", color: "hsl(var(--pencil))", fontSize: ".84rem", fontWeight: 600, fontFamily: "Inter, sans-serif", cursor: "pointer" }}
+            >
+              {trained ? "Close" : "Cancel"}
+            </button>
+            <button
+              id="voice-train-done-btn"
+              onClick={handleTrain}
+              disabled={!canTrain}
+              style={{
+                display: "flex", alignItems: "center", gap: "7px",
+                padding: ".5rem 1.25rem", borderRadius: "8px", border: "none",
+                background: canTrain ? (existingProfileId ? "hsl(35,90%,50%)" : "hsl(var(--accent))") : "hsl(var(--muted))",
+                color: canTrain ? (existingProfileId ? "#fff" : "hsl(var(--accent-foreground))") : "hsl(var(--pencil))",
+                fontSize: ".84rem", fontWeight: 700, fontFamily: "Inter, sans-serif",
+                cursor: canTrain ? "pointer" : "not-allowed", transition: "all .15s",
+              }}
+            >
+              {training
+                ? <><Loader size={13} className="spin" /> Training…</>
+                : existingProfileId
+                  ? <><PlusCircle size={13} /> Add to Profile</>
+                  : <><Mic2 size={13} /> Done — Train</>
+              }
+            </button>
           </div>
-
-          {/* Success/error banners */}
-          {trained && (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: ".75rem 1rem", borderRadius: "10px", background: "hsl(var(--success) / .1)", border: "1px solid hsl(var(--success) / .3)", color: "hsl(var(--success))", fontSize: ".82rem", fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
-              <CheckCircle size={14} /> {trained}
-            </div>
-          )}
-          {trainError && (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: ".75rem 1rem", borderRadius: "10px", background: "hsl(var(--destructive) / .08)", border: "1px solid hsl(var(--destructive) / .25)", color: "hsl(var(--destructive))", fontSize: ".82rem", fontFamily: "Inter, sans-serif" }}>
-              <AlertCircle size={13} /> {trainError}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", padding: "1rem 1.4rem", borderTop: "1px solid hsl(var(--ink) / .08)", flexShrink: 0 }}>
-          <button
-            onClick={onClose}
-            style={{ padding: ".5rem 1.1rem", borderRadius: "8px", border: "1px solid hsl(var(--ink) / .15)", background: "hsl(var(--muted) / .5)", color: "hsl(var(--pencil))", fontSize: ".84rem", fontWeight: 600, fontFamily: "Inter, sans-serif", cursor: "pointer" }}
-          >
-            {trained ? "Close" : "Cancel"}
-          </button>
-          <button
-            id="voice-train-done-btn"
-            onClick={handleTrain}
-            disabled={!canTrain}
-            style={{
-              display: "flex", alignItems: "center", gap: "7px",
-              padding: ".5rem 1.25rem", borderRadius: "8px", border: "none",
-              background: canTrain ? "hsl(var(--accent))" : "hsl(var(--muted))",
-              color: canTrain ? "hsl(var(--accent-foreground))" : "hsl(var(--pencil))",
-              fontSize: ".84rem", fontWeight: 700, fontFamily: "Inter, sans-serif",
-              cursor: canTrain ? "pointer" : "not-allowed", transition: "all .15s",
-            }}
-          >
-            {training ? <><Loader size={13} className="spin" /> Training…</> : <><Mic2 size={13} /> Done — Train</>}
-          </button>
         </div>
       </div>
-    </div>
+    </>
   );
 }

@@ -60,6 +60,8 @@ class UserSettings(BaseModel):
 
     # Whisper & Parallel Pipeline Settings
     whisper_batch_size: int = Field(default=8, ge=1, le=32)
+    whisper_parallel_processing: int = Field(default=1, ge=1, le=8)
+    whisper_parallel_chunk_minutes: int = Field(default=10, ge=1, le=60)
 
     # ROM Pipeline Settings
     rom_transcript_window: float = Field(default=2.0, ge=0.5, le=10.0)
@@ -68,6 +70,10 @@ class UserSettings(BaseModel):
     rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
     rom_parallel_window_processing: int = Field(default=2, ge=1, le=5)
     rom_separate_action_extraction: bool = False
+    rom_stage2_process_all_together: bool = False
+    rom_min_similarity_threshold: float | None = Field(default=0.80, ge=0.0, le=1.0)
+    # "base" = always use default prompts; "dspy" = use trained DSPy variants when available
+    rom_pipeline_mode: str = "base"
 
     max_tokens_rom_discussion: int = Field(default=4096, ge=1)
     max_tokens_rom_discussion_no_actions: int = Field(default=4096, ge=1)
@@ -110,6 +116,9 @@ class UserSettings(BaseModel):
     enable_audio_validation: bool = True
     min_audio_duration_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
     min_audio_rms_threshold: float = Field(default=0.003, ge=0.0001, le=0.1)
+
+    # Missing Transcription Recovery
+    missing_transcript_recovery_enabled: bool = False
 
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -172,6 +181,9 @@ class UserSettingsUpdate(BaseModel):
 
     # Whisper & Parallel Pipeline Settings
     whisper_batch_size: int | None = Field(default=None, ge=1, le=32)
+    whisper_parallel_processing: int | None = Field(default=None, ge=1, le=8)
+    whisper_parallel_chunk_minutes: int | None = Field(default=None, ge=1, le=60)
+
 
     # ROM Pipeline Settings
     rom_transcript_window: float | None = Field(default=None, ge=0.5, le=10.0)
@@ -180,6 +192,9 @@ class UserSettingsUpdate(BaseModel):
     rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
     rom_parallel_window_processing: int | None = Field(default=None, ge=1, le=5)
     rom_separate_action_extraction: bool | None = None
+    rom_stage2_process_all_together: bool | None = None
+    rom_min_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    rom_pipeline_mode: str | None = None
 
     max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
     max_tokens_rom_discussion_no_actions: int | None = Field(default=None, ge=1)
@@ -222,6 +237,9 @@ class UserSettingsUpdate(BaseModel):
     enable_audio_validation: bool | None = None
     min_audio_duration_seconds: float | None = Field(default=None, ge=0.1, le=30.0)
     min_audio_rms_threshold: float | None = Field(default=None, ge=0.0001, le=0.1)
+
+    # Missing Transcription Recovery
+    missing_transcript_recovery_enabled: bool | None = None
 
 
 

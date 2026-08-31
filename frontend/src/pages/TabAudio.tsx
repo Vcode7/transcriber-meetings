@@ -832,6 +832,8 @@ export default function TabAudioPage() {
           isOpen={chatOpen}
           onToggle={() => setChatOpen((o) => !o)}
           isGenerating={isGeneratingAI}
+          onScrollToSegment={() => {}}
+          onTranscriptChanged={() => {}}
         />
       </div>
     </div>

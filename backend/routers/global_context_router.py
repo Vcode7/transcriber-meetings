@@ -432,3 +432,335 @@ async def global_context_status(
         "total_chunks": row["total_chunks"] or 0,
         "vector_store_dir": settings.VECTOR_STORE_DIR,
     }
+
+
+# ── Document Detail Inspection ────────────────────────────────────────────────
+
+@router.get("/doc/{doc_id}")
+async def get_global_context_doc_detail(
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return comprehensive inspection details for a single global context document,
+    including file metadata, extracted raw text, chunks, context summary,
+    keywords, and technical entities.
+    """
+    user_id = current_user["id"]
+
+    async with get_db_context() as db:
+        r = await db.execute(
+            text(
+                "SELECT * FROM global_context_documents "
+                "WHERE id = :id AND user_id = :uid"
+            ),
+            {"id": doc_id, "uid": user_id},
+        )
+        row = r.mappings().fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_dict = _row_to_dict(row)
+    file_path = row["file_path"]
+    filename = row["filename"]
+
+    # File size
+    file_size = 0
+    file_exists = False
+    if os.path.exists(file_path):
+        file_exists = True
+        file_size = os.path.getsize(file_path)
+
+    # 1. Text extraction is deferred to on-demand request (click 'Extract Full Text')
+    extracted_text_clean = ""
+    extracted_preview = ""
+
+    # 2. Retrieve stored chunks & metadata directly from ChromaDB vector store
+    chunks_list = []
+    unique_keywords = set()
+    unique_entities = set()
+    unique_acronyms = set()
+    block_stats = {"paragraphs": 0, "headings": 0, "tables": 0, "lists": 0}
+
+    try:
+        from services.vector_store import get_global_context_store
+        store = get_global_context_store(user_id)
+
+        all_metas = getattr(store, "_meta", [])
+        for m in all_metas:
+            m_doc_id = m.get("doc_id")
+            m_fn = m.get("filename")
+            if m_doc_id == doc_id or (m_fn and m_fn == filename):
+                txt = m.get("_text") or m.get("text") or ""
+                b_type = m.get("block_type", "paragraph")
+                if b_type in block_stats:
+                    block_stats[b_type] += 1
+                else:
+                    block_stats["paragraphs"] += 1
+
+                kw_list = m.get("keywords", [])
+                if isinstance(kw_list, list):
+                    for k in kw_list:
+                        if k and str(k).strip():
+                            unique_keywords.add(str(k).strip())
+
+                ent_list = m.get("technical_entities", [])
+                if isinstance(ent_list, list):
+                    for e in ent_list:
+                        if e and str(e).strip():
+                            unique_entities.add(str(e).strip())
+
+                acr_list = m.get("acronyms", [])
+                if isinstance(acr_list, list):
+                    for a in acr_list:
+                        if a and str(a).strip():
+                            unique_acronyms.add(str(a).strip())
+
+                chunks_list.append({
+                    "chunk_index": m.get("chunk_index", len(chunks_list)),
+                    "total_chunks": m.get("total_chunks", 0),
+                    "text": txt[:600],
+                    "block_type": b_type,
+                    "heading": m.get("heading"),
+                    "section": m.get("section"),
+                    "chapter": m.get("chapter"),
+                    "page_number": m.get("page_number"),
+                    "keywords": kw_list[:10] if isinstance(kw_list, list) else [],
+                    "technical_entities": ent_list[:10] if isinstance(ent_list, list) else [],
+                    "acronyms": acr_list[:10] if isinstance(acr_list, list) else [],
+                    "dates": m.get("dates", [])[:5] if isinstance(m.get("dates"), list) else [],
+                    "project_names": m.get("project_names", [])[:5] if isinstance(m.get("project_names"), list) else [],
+                    "entities": m.get("entities", [])[:5] if isinstance(m.get("entities"), list) else [],
+                    "numbers": m.get("numbers", [])[:5] if isinstance(m.get("numbers"), list) else [],
+                    "important_terms": m.get("important_terms", [])[:10] if isinstance(m.get("important_terms"), list) else [],
+                })
+    except Exception as e:
+        logger.warning(f"[GlobalCtx] Failed to load vector store chunks for {filename}: {e}")
+
+    # Build context summary from first 3 stored ChromaDB chunks
+    context_summary = ""
+    if chunks_list:
+        chunk_texts = [c["text"].strip() for c in chunks_list[:3] if c.get("text")]
+        context_summary = "\n\n".join(chunk_texts)
+        if len(context_summary) > 800:
+            context_summary = context_summary[:800] + "..."
+
+    return {
+        "document": doc_dict,
+        "file_exists": file_exists,
+        "file_size": file_size,
+        "extracted_text": extracted_text_clean,
+        "extracted_preview": extracted_preview,
+        "context_summary": context_summary,
+        "keywords": sorted(list(unique_keywords)),
+        "technical_entities": sorted(list(unique_entities)),
+        "acronyms": sorted(list(unique_acronyms)),
+        "structure_stats": block_stats,
+        "chunk_count": len(chunks_list) or doc_dict.get("chunk_count", 0),
+        "chunks": chunks_list,
+        "pipeline_steps": [
+            {"step": "1. Upload & Storage", "status": "completed" if file_exists else "failed", "detail": f"Saved at {row['relative_path'] or filename}"},
+            {"step": "2. Text Extraction", "status": "completed" if doc_dict.get("embedded") else "on-demand", "detail": "Available on demand (click 'Extract Full Text')"},
+            {"step": "3. Structure-Aware Chunking", "status": "completed" if (chunks_list or doc_dict.get("chunk_count", 0) > 0) else "pending", "detail": f"{len(chunks_list) or doc_dict.get('chunk_count', 0)} chunks stored in ChromaDB"},
+            {"step": "4. Vector Store Embedding", "status": "completed" if doc_dict.get("embedded") else "pending", "detail": "Indexed into ChromaDB collection"},
+        ]
+    }
+
+
+@router.post("/doc/{doc_id}/extract-text")
+async def extract_global_context_doc_text(
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Perform on-demand text extraction for a global context document.
+    Executed ONLY when the user explicitly clicks 'Extract Full Text'.
+    """
+    user_id = current_user["id"]
+
+    async with get_db_context() as db:
+        r = await db.execute(
+            text(
+                "SELECT * FROM global_context_documents "
+                "WHERE id = :id AND user_id = :uid"
+            ),
+            {"id": doc_id, "uid": user_id},
+        )
+        row = r.mappings().fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = row["file_path"]
+    filename = row["filename"]
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File no longer exists on disk")
+
+    import asyncio
+    _loop = asyncio.get_running_loop()
+
+    def _do_extract():
+        from services.doc_extractor import extract_text_from_file
+        from services.ocr_engine import unload_ocr_engine
+        txt = extract_text_from_file(file_path, filename) or ""
+        try:
+            unload_ocr_engine()
+        except Exception:
+            pass
+        return txt
+
+    extracted_text = await _loop.run_in_executor(None, _do_extract)
+    clean_text = extracted_text.strip()
+
+    return {
+        "doc_id": doc_id,
+        "extracted_text": clean_text,
+        "extracted_preview": clean_text[:1200],
+        "character_count": len(clean_text),
+    }
+
+
+# ── Meeting Context Hierarchy ─────────────────────────────────────────────────
+
+@router.get("/meeting-context")
+async def list_meeting_context_hierarchy(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return all meetings that have uploaded context files/attachments,
+    structured in an expandable hierarchy:
+    Meeting -> Files -> Context -> Keywords / Structured Data
+    """
+    user_id = current_user["id"]
+
+    async with get_db_context() as db:
+        # Fetch recordings that have attachments
+        r_recs = await db.execute(
+            text(
+                "SELECT DISTINCT r.id, r.filename, r.created_at "
+                "FROM recordings r "
+                "JOIN recording_attachments a ON r.id = a.recording_id "
+                "WHERE r.user_id = :uid "
+                "ORDER BY r.created_at DESC"
+            ),
+            {"uid": user_id},
+        )
+        rec_rows = r_recs.mappings().fetchall()
+
+        # Fetch all attachments for this user
+        r_atts = await db.execute(
+            text(
+                "SELECT * FROM recording_attachments "
+                "WHERE user_id = :uid ORDER BY created_at ASC"
+            ),
+            {"uid": user_id},
+        )
+        att_rows = r_atts.mappings().fetchall()
+
+    # Group attachments by recording_id
+    atts_by_recording: dict = {}
+    for att in att_rows:
+        rid = att["recording_id"]
+        if rid not in atts_by_recording:
+            atts_by_recording[rid] = []
+        atts_by_recording[rid].append(att)
+
+    from services.doc_extractor import extract_text_from_file
+
+    meetings_list = []
+    for rec in rec_rows:
+        rid = rec["id"]
+        rec_title = rec.get("title") or rec.get("filename") or f"Meeting {rid[:8]}"
+        attachments = atts_by_recording.get(rid, [])
+
+        files_data = []
+        for att in attachments:
+            file_id = att["id"]
+            filename = att["filename"]
+            file_path = att["file_path"]
+            att_type = att["type"]
+
+            file_exists = os.path.exists(file_path) if file_path else False
+            file_size = os.path.getsize(file_path) if file_exists else 0
+
+            # On-demand text extraction deferred to explicit request
+            extracted_text = ""
+            extracted_clean = ""
+            summary = ""
+
+            # Retrieve stored meeting vector chunks & metadata directly from ChromaDB
+            chunks_list = []
+            keywords_set = set()
+            entities_set = set()
+            acronyms_set = set()
+            block_stats = {"paragraphs": 0, "headings": 0, "tables": 0, "lists": 0}
+
+            try:
+                from services.vector_store import get_meeting_context_store
+                m_store = get_meeting_context_store(rid)
+
+                for m in getattr(m_store, "_meta", []):
+                    m_fn = m.get("filename") or m.get("document_name")
+                    if not m_fn or m_fn == filename:
+                        txt = m.get("_text") or m.get("text") or ""
+                        b_type = m.get("block_type", "paragraph")
+                        if b_type in block_stats:
+                            block_stats[b_type] += 1
+                        else:
+                            block_stats["paragraphs"] += 1
+
+                        for k in m.get("keywords", []):
+                            if k and str(k).strip(): keywords_set.add(str(k).strip())
+                        for e in m.get("technical_entities", []):
+                            if e and str(e).strip(): entities_set.add(str(e).strip())
+                        for a in m.get("acronyms", []):
+                            if a and str(a).strip(): acronyms_set.add(str(a).strip())
+
+                        chunks_list.append({
+                            "chunk_index": m.get("chunk_index", len(chunks_list)),
+                            "total_chunks": m.get("total_chunks", 0),
+                            "text": txt[:400],
+                            "block_type": b_type,
+                            "heading": m.get("heading"),
+                            "section": m.get("section"),
+                            "keywords": m.get("keywords", [])[:5] if isinstance(m.get("keywords"), list) else [],
+                            "technical_entities": m.get("technical_entities", [])[:5] if isinstance(m.get("technical_entities"), list) else [],
+                            "acronyms": m.get("acronyms", [])[:5] if isinstance(m.get("acronyms"), list) else [],
+                            "dates": m.get("dates", [])[:5] if isinstance(m.get("dates"), list) else [],
+                            "project_names": m.get("project_names", [])[:5] if isinstance(m.get("project_names"), list) else [],
+                        })
+            except Exception:
+                pass
+
+            if not chunks_list and extracted_clean:
+                paras = [p for p in extracted_clean.split("\n\n") if p.strip()]
+                block_stats["paragraphs"] = len(paras)
+
+            files_data.append({
+                "id": file_id,
+                "filename": filename,
+                "type": att_type,
+                "file_size": file_size,
+                "file_exists": file_exists,
+                "created_at": att["created_at"],
+                "extracted_text_preview": extracted_clean[:800],
+                "extracted_text_full": extracted_clean,
+                "summary": summary,
+                "keywords": sorted(list(keywords_set)),
+                "technical_entities": sorted(list(entities_set)),
+                "acronyms": sorted(list(acronyms_set)),
+                "structure_stats": block_stats,
+                "chunk_count": len(chunks_list),
+                "chunks": chunks_list,
+            })
+
+        meetings_list.append({
+            "recording_id": rid,
+            "recording_title": rec_title,
+            "source_type": rec.get("source_type") or "audio",
+            "created_at": rec["created_at"],
+            "file_count": len(files_data),
+            "files": files_data,
+        })
+
+    return {"meetings": meetings_list}

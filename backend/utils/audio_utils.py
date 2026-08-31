@@ -189,6 +189,67 @@ def convert_to_wav(input_path: str, output_path: str, sr: int = 16000) -> str:
         return output_path
 
 
+def trim_audio(wav_path: str, start_sec: float, end_sec: float) -> str:
+    """
+    Trim a WAV file to the specified [start_sec, end_sec] range using ffmpeg.
+
+    Memory-efficient: ffmpeg streams the operation without loading the audio into RAM.
+    Returns the path to the trimmed WAV file (sibling of the original, with _trimmed suffix).
+    Original file is NOT deleted — the caller is responsible for cleanup.
+
+    Parameters
+    ----------
+    wav_path  : Path to the source 16kHz mono WAV file.
+    start_sec : Trim start time in seconds (≥ 0).
+    end_sec   : Trim end time in seconds (> start_sec).
+
+    Returns
+    -------
+    Path to the trimmed WAV file.
+
+    Raises
+    ------
+    ValueError  : If start_sec >= end_sec or values are out of range.
+    RuntimeError: If ffmpeg fails.
+    """
+    if start_sec < 0:
+        start_sec = 0.0
+    if end_sec <= start_sec:
+        raise ValueError(f"trim_audio: end_sec ({end_sec:.3f}) must be > start_sec ({start_sec:.3f})")
+
+    duration = end_sec - start_sec
+    base, ext = os.path.splitext(wav_path)
+    trimmed_path = f"{base}_trimmed{ext}"
+
+    run_kwargs: dict = {
+        "capture_output": True,
+        "timeout": 7200,
+    }
+    if os.name == "nt":
+        run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),    # seek BEFORE input for fast seek
+            "-i", wav_path,
+            "-t", str(duration),       # trim duration
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            "-acodec", "pcm_s16le",
+            trimmed_path,
+        ],
+        **run_kwargs
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace")[-500:]
+        raise RuntimeError(f"trim_audio ffmpeg failed (code {result.returncode}): {stderr}")
+
+    return trimmed_path
+
+
 def compute_rms(audio: np.ndarray) -> float:
     return float(np.sqrt(np.mean(audio ** 2)))
 

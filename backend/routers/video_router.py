@@ -25,7 +25,7 @@ from sqlalchemy import text
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file, get_user_dir
-from utils.audio_utils import validate_audio, convert_to_wav, get_duration
+from utils.audio_utils import validate_audio, convert_to_wav, get_duration, trim_audio
 from tasks.pipeline import run_pipeline, register_task
 from tasks.upload_chunk_pipeline import run_upload_chunk_pipeline, UPLOAD_CHUNK_THRESHOLD_SEC
 from services.video_processing_service import (
@@ -313,6 +313,8 @@ async def upload_video(
     participant_voice_ids: Optional[str] = Form(default="[]"),
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    trim_start_sec: Optional[float] = Form(default=None),
+    trim_end_sec: Optional[float] = Form(default=None),
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -323,9 +325,10 @@ async def upload_video(
       1. Save the video file to disk.
       2. Validate the video format.
       3. Extract audio track to WAV using ffmpeg.
-      4. Validate the extracted audio.
-      5. Create a recording row (source_type='video').
-      6. Schedule synchronized audio transcription & parallel OCR pipeline.
+      4. Optionally trim audio track if requested.
+      5. Validate the extracted audio.
+      6. Create a recording row (source_type='video').
+      7. Schedule synchronized audio transcription & parallel OCR pipeline.
     """
     user_id = current_user["id"]
     logger.info(f"[Video] Upload request from user={user_id}, filename={file.filename}")
@@ -357,6 +360,22 @@ async def upload_video(
         delete_file(video_path)
         logger.error(f"[Video] Audio extraction failed: {e}")
         raise HTTPException(status_code=422, detail=f"Audio extraction from video failed: {e}")
+
+    # ── Optional trim ─────────────────────────────────────────────────────
+    if trim_start_sec is not None and trim_end_sec is not None:
+        try:
+            file_dur = get_duration(wav_path)
+            t_start = max(0.0, float(trim_start_sec))
+            t_end = min(float(trim_end_sec), file_dur)
+            if t_end > t_start:
+                trimmed_path = trim_audio(wav_path, t_start, t_end)
+                delete_file(wav_path)
+                wav_path = trimmed_path
+                logger.info(f"[Video] Trimmed extracted audio to [{t_start:.2f}s – {t_end:.2f}s] → {wav_path}")
+            else:
+                logger.warning(f"[Video] Trim params out of range ({trim_start_sec}–{trim_end_sec}); skipping trim.")
+        except Exception as trim_err:
+            logger.warning(f"[Video] Trim failed (non-fatal): {trim_err}; using untrimmed audio.")
 
     # ── 3. Validate extracted audio ───────────────────────────────────────────
     valid, reason = await _validate_audio_for_user(wav_path, user_id, db)

@@ -69,8 +69,11 @@ class Settings(BaseSettings):
             return str(dev_path)
         return str(RUNTIME_DIR / "embeddings" / self.EMBEDDING_MODEL)
 
-    # FAISS vector store base directory
+    # FAISS vector store base directory (legacy — kept for migration detection)
     VECTOR_STORE_DIR: str = str(RUNTIME_DIR / "vector_store")
+
+    # ChromaDB persistent storage directory (new vector store backend)
+    CHROMADB_DIR: str = str(RUNTIME_DIR / "chromadb")
 
     # RAG chunking parameters
     RAG_CHUNK_SIZE: int = 400        # target words per chunk
@@ -147,6 +150,20 @@ class Settings(BaseSettings):
     WHISPER_COMPUTE_TYPE: str = "int8"
     WHISPER_BATCH_SIZE: int = 8
 
+    # Parallel Whisper processing (server-level, .env only — not per-user).
+    # When 1 (default), the existing sequential transcription pipeline runs unchanged.
+    # When > 1, the source audio is split into WHISPER_PARALLEL_CHUNK_MINUTES-minute
+    # chunks and each chunk is transcribed in its own subprocess (ProcessPoolExecutor).
+    # Each worker loads its own Whisper model copy; all copies are explicitly unloaded
+    # and VRAM is released after processing.
+    # WARNING: VRAM usage scales linearly with worker count (e.g. 2 workers = 2× model VRAM).
+    WHISPER_PARALLEL_PROCESSING: int = 1
+
+    # Duration (minutes) of each audio chunk when parallel processing is enabled.
+    # Shorter chunks = more workers active simultaneously but more overhead per chunk.
+    WHISPER_PARALLEL_CHUNK_MINUTES: int = 10
+
+
     # ROM Parallel Window Processing
     ROM_PARALLEL_WINDOW_PROCESSING: int = 2
 
@@ -209,6 +226,7 @@ settings = Settings()
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")).parent, exist_ok=True)
 os.makedirs(settings.VECTOR_STORE_DIR, exist_ok=True)
+os.makedirs(settings.CHROMADB_DIR, exist_ok=True)
 
 # Print resolved paths to standard output
 print(f"[Config] Resolved MODELS_DIR to: {settings.MODELS_DIR}")

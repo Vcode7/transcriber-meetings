@@ -33,6 +33,7 @@ import logging
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from dataclasses import replace, is_dataclass
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -381,6 +382,277 @@ def _align_segments_chunked(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Parallel Whisper processing helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _split_audio_into_chunks(wav_path: str, chunk_minutes: int = 10) -> List[tuple]:
+    """
+    Split a WAV file into fixed-duration chunks for parallel transcription.
+
+    Returns a list of (temp_wav_path, start_sec) tuples, one per chunk.
+    Chunks are written as temporary PCM-16 WAV files (same sample rate as source).
+    The caller is responsible for deleting temp files after use.
+    """
+    import soundfile as sf
+    import numpy as np
+    import tempfile
+
+    audio, sr = sf.read(wav_path, dtype="float32", always_2d=False)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    chunk_samples = int(chunk_minutes * 60 * sr)
+    total_samples = len(audio)
+    num_chunks = max(1, (total_samples + chunk_samples - 1) // chunk_samples)
+
+    chunks = []
+    for i in range(num_chunks):
+        s = i * chunk_samples
+        e = min(s + chunk_samples, total_samples)
+        chunk_audio = audio[s:e]
+        start_sec = round(s / sr, 3)
+
+        fd, tmp_path = tempfile.mkstemp(suffix=f"_wchunk{i}.wav")
+        os.close(fd)
+        sf.write(tmp_path, chunk_audio, sr, subtype="PCM_16")
+        chunks.append((tmp_path, start_sec))
+
+    return chunks
+
+
+def _worker_transcribe(
+    wav_path: str,
+    initial_prompt: str,
+    language: Optional[str],
+    user_settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Top-level (module-level, picklable) worker function executed inside a
+    ProcessPoolExecutor subprocess.
+
+    Loads its own WhisperX model copy, runs transcribe(), then unloads
+    the model and clears CUDA cache before returning.
+
+    Returns the same dict schema as transcribe().
+    """
+    try:
+        result = transcribe(
+            wav_path,
+            initial_prompt=initial_prompt,
+            language=language,
+            user_settings=user_settings,
+        )
+        return result
+    finally:
+        # Always clean up this worker's model copy on exit.
+        try:
+            unload_whisperx_model()
+        except Exception:
+            pass
+        try:
+            unload_align_model()
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _offset_segment_timestamps_parallel(seg: Dict[str, Any], offset: float) -> Dict[str, Any]:
+    """Shift all timestamps in a transcription segment by *offset* seconds."""
+    out = dict(seg)
+    out["start"] = round(seg.get("start", 0.0) + offset, 3)
+    out["end"] = round(seg.get("end", 0.0) + offset, 3)
+    if "words" in seg and seg["words"]:
+        out["words"] = [
+            {**w,
+             "start": round(w.get("start", 0.0) + offset, 3),
+             "end": round(w.get("end", 0.0) + offset, 3)}
+            for w in seg["words"]
+        ]
+    return out
+
+
+def transcribe_parallel(
+    file_path: str,
+    initial_prompt: str = "",
+    language: str = None,
+    user_settings: Optional[Dict[str, Any]] = None,
+    workers: int = 2,
+    chunk_minutes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Parallel Whisper transcription: splits *file_path* into fixed-duration
+    chunks and processes them concurrently via ProcessPoolExecutor.
+
+    Each worker subprocess loads its own WhisperX model copy, transcribes its
+    chunk, unloads the model, and clears CUDA cache before returning.
+    After all futures complete, the main process also runs gc + cuda cache
+    cleanup to release any residual references.
+
+    Segment timestamps are offset by the chunk's start position so the merged
+    result uses global audio time, identical to a sequential transcribe() call.
+
+    Args:
+        file_path:      Path to the source WAV file.
+        initial_prompt: Whisper initial prompt (applied to every chunk).
+        language:       Force-detected language (None = auto-detect on chunk 0).
+        user_settings:  Per-user settings dict (passed through to transcribe()).
+        workers:        Number of parallel worker processes.
+        chunk_minutes:  Length of each audio chunk in minutes.
+
+    Returns:
+        {"segments": [...], "language": str, "raw_text": str, "aligned_result": {...}}
+    """
+    import concurrent.futures
+    import gc
+    import time
+
+    if chunk_minutes is None:
+        chunk_minutes = int((user_settings or {}).get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
+    chunk_minutes = max(1, int(chunk_minutes))
+    workers = max(1, workers)
+
+
+    logger.info(
+        f"[Whisper/Parallel] 🚀 Starting parallel transcription: "
+        f"splitting '{os.path.basename(file_path)}' into ~{chunk_minutes}-min chunks "
+        f"with {workers} worker(s)"
+    )
+
+    # ── Split audio into chunks ──────────────────────────────────────────
+    try:
+        chunks = _split_audio_into_chunks(file_path, chunk_minutes=chunk_minutes)
+    except Exception as e:
+        logger.error(f"[Whisper/Parallel] Audio splitting failed ({e}); falling back to sequential transcription.")
+        return transcribe(file_path, initial_prompt=initial_prompt, language=language, user_settings=user_settings)
+
+    total = len(chunks)
+    logger.info(
+        f"[Whisper/Parallel] Split into {total} chunk(s) — "
+        f"submitting to {min(workers, total)} worker(s)"
+    )
+
+    # ── Submit all chunks to ProcessPoolExecutor ─────────────────────────
+    # We use a bounded pool (min(workers, total) so we don't spawn idle processes).
+    effective_workers = min(workers, total)
+    futures_map: Dict[concurrent.futures.Future, int] = {}  # future → chunk index
+    chunk_paths = [c[0] for c in chunks]
+    offsets = [c[1] for c in chunks]
+
+    completed = 0
+    chunk_results: List[Optional[Dict[str, Any]]] = [None] * total
+
+    t_submit_start = time.monotonic()
+
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            for idx, (tmp_wav, start_sec) in enumerate(chunks):
+                future = executor.submit(
+                    _worker_transcribe,
+                    tmp_wav,
+                    initial_prompt,
+                    language,
+                    user_settings,
+                )
+                futures_map[future] = idx
+                logger.info(
+                    f"[Whisper/Parallel] Chunk {idx + 1}/{total} → submitted "
+                    f"[{start_sec:.1f}s – {start_sec + chunk_minutes * 60:.1f}s]"
+                )
+
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(futures_map):
+                idx = futures_map[future]
+                start_sec = offsets[idx]
+                try:
+                    result = future.result()
+                    chunk_results[idx] = result
+                    n_segs = len(result.get("segments", []))
+                    elapsed = round(time.monotonic() - t_submit_start, 1)
+                    completed += 1
+                    pct = int(completed / total * 100)
+                    logger.info(
+                        f"[Whisper/Parallel] Chunk {idx + 1}/{total} ✓ DONE "
+                        f"({elapsed}s elapsed, {pct}% overall) — {n_segs} segments"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[Whisper/Parallel] Chunk {idx + 1}/{total} ✗ FAILED "
+                        f"(offset={start_sec:.1f}s): {e}",
+                        exc_info=True,
+                    )
+                    chunk_results[idx] = None
+
+    finally:
+        # Delete all temp chunk WAV files regardless of outcome
+        for tmp_wav, _ in chunks:
+            try:
+                if os.path.exists(tmp_wav):
+                    os.unlink(tmp_wav)
+            except OSError:
+                pass
+
+    # ── Main-process VRAM cleanup ────────────────────────────────────────
+    logger.info("[Whisper/Parallel] All workers finished. Running main-process VRAM cleanup...")
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("[Whisper/Parallel] CUDA cache cleared ✓")
+    except Exception:
+        pass
+
+    # ── Merge results in chunk order ─────────────────────────────────────
+    merged_segments: List[Dict[str, Any]] = []
+    merged_aligned_segs: List[Dict[str, Any]] = []
+    merged_raw_parts: List[str] = []
+    detected_language: str = language or "en"
+
+    for idx, result in enumerate(chunk_results):
+        if result is None:
+            logger.warning(f"[Whisper/Parallel] Chunk {idx + 1}/{total} had no result — skipping.")
+            continue
+
+        offset = offsets[idx]
+        lang = result.get("language", "en")
+        if idx == 0 or not language:
+            detected_language = lang
+
+        for seg in result.get("segments", []):
+            merged_segments.append(_offset_segment_timestamps_parallel(seg, offset))
+
+        aligned = result.get("aligned_result", {})
+        for seg in aligned.get("segments", result.get("segments", [])):
+            merged_aligned_segs.append(_offset_segment_timestamps_parallel(seg, offset))
+
+        if result.get("raw_text"):
+            merged_raw_parts.append(result["raw_text"])
+
+    total_merged = len(merged_segments)
+    logger.info(
+        f"[Whisper/Parallel] ✅ Merge complete: {total_merged} segments from {total} chunk(s). "
+        f"Language={detected_language}. VRAM cleanup complete."
+    )
+
+    return {
+        "segments": merged_segments,
+        "language": detected_language,
+        "raw_text": " ".join(merged_raw_parts),
+        "aligned_result": {"segments": merged_aligned_segs},
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -468,19 +740,48 @@ def transcribe(
     else:
         logger.info(f"[Transcription] Primary Whisper Pass (Transcription VAD Disabled): Sending complete audio {transcribe_target_path} directly to Whisper on device={device} (batch_size={whisper_batch_size}) ...")
 
+    prompt_str = initial_prompt.strip() if initial_prompt else None
+
+    # WhisperX FasterWhisperPipeline uses a dataclass `model.options` (TranscriptionOptions)
+    # where initial_prompt must be configured, rather than being passed as a kwarg to model.transcribe().
+    if hasattr(model, "options") and is_dataclass(model.options):
+        model.options = replace(model.options, initial_prompt=prompt_str)
+        if prompt_str:
+            logger.info(
+                f"[Whisper] 🚀 INITIAL PROMPT ACTIVE: Set {len(prompt_str)} chars on WhisperX pipeline options | "
+                f"Prompt Preview: {repr(prompt_str[:160])}"
+            )
+        else:
+            logger.info("[Whisper] ℹ️ INITIAL PROMPT INACTIVE: No initial_prompt provided. Pipeline prompt cleared.")
+    else:
+        if prompt_str:
+            logger.info(
+                f"[Whisper] 🚀 INITIAL PROMPT ACTIVE: Sending {len(prompt_str)} chars to Whisper | "
+                f"Prompt Preview: {repr(prompt_str[:160])}"
+            )
+        else:
+            logger.info("[Whisper] ℹ️ INITIAL PROMPT INACTIVE: No initial_prompt provided. Transcribing standard audio.")
+
     transcribe_kwargs = {"batch_size": whisper_batch_size}
     if language:
         transcribe_kwargs["language"] = language
-    if initial_prompt:
-        transcribe_kwargs["initial_prompt"] = initial_prompt
+
+    # If the model is not a FasterWhisperPipeline (e.g. raw faster_whisper WhisperModel),
+    # pass initial_prompt directly via transcribe_kwargs.
+    if prompt_str and not hasattr(model, "options"):
+        transcribe_kwargs["initial_prompt"] = prompt_str
 
     try:
         raw_result = model.transcribe(transcribe_target_path, **transcribe_kwargs)
+        if prompt_str:
+            logger.info(f"[Whisper] ✓ Successfully executed Whisper transcribe() with initial_prompt ({len(prompt_str)} chars)")
     except TypeError as e:
-        logger.warning(f"Retrying without unsupported kwargs: {e}")
+        logger.warning(f"[Whisper] Retrying without unsupported kwargs: {e}")
         unsupported = str(e)
-        if "initial_prompt" in unsupported:
+        if "initial_prompt" in unsupported and "initial_prompt" in transcribe_kwargs:
             transcribe_kwargs.pop("initial_prompt", None)
+            if hasattr(model, "options") and is_dataclass(model.options):
+                model.options = replace(model.options, initial_prompt=prompt_str)
         if "language" in unsupported:
             transcribe_kwargs.pop("language", None)
         raw_result = model.transcribe(transcribe_target_path, **transcribe_kwargs)
@@ -574,15 +875,16 @@ def transcribe(
                             rec_kwargs = {
                                 "batch_size": 1,
                                 "language": detected_lang,
-                                "vad_filter": False,
                             }
-                            if initial_prompt:
-                                rec_kwargs["initial_prompt"] = initial_prompt
+                            if prompt_str and not hasattr(model, "options"):
+                                rec_kwargs["initial_prompt"] = prompt_str
 
                             try:
                                 rec_res = model.transcribe(tmp_rec, **rec_kwargs)
-                            except TypeError:
-                                rec_kwargs.pop("vad_filter", None)
+                            except TypeError as rec_te:
+                                logger.warning(f"[LowVolumeRecovery] Retrying transcribe without unsupported kwargs: {rec_te}")
+                                rec_kwargs.pop("language", None)
+                                rec_kwargs.pop("initial_prompt", None)
                                 rec_res = model.transcribe(tmp_rec, **rec_kwargs)
 
                             for r_seg in rec_res.get("segments", []):

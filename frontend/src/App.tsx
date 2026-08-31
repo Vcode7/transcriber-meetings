@@ -20,6 +20,7 @@ import Landing from "./pages/Landing";
 import LicenseExpired from "./pages/LicenseExpired";
 import GlobalContext from "./pages/GlobalContext";
 import RomPage from "./pages/RomPage";
+import Training from "./pages/Training";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -31,7 +32,7 @@ import { recordingService } from "./services/recordingService";
 const BASE_URL = "http://127.0.0.1:8000";
 
 // ── License expiry date (must match backend/license.py) ───────
-const LICENSE_EXPIRY = new Date("2026-08-12T23:59:59");
+const LICENSE_EXPIRY = new Date("2026-09-30T23:59:59");
 
 /**
  * AuthBootstrap — runs once on app mount.
@@ -168,7 +169,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
  * LicenseGate — wraps the entire app.
  *
  * Checks the license expiry date on the client before any API call.
- * If the local date is past August 12 2026, renders the LicenseExpired
+ * If the local date is past September 30 2026, renders the LicenseExpired
  * blocker immediately (no backend contact needed).
  *
  * Additionally, the AuthBootstrap may receive a 503 from the backend with
@@ -260,6 +261,7 @@ export default function App() {
               <Route path="dictionary" element={<Dictionary />} />
               <Route path="global-context" element={<GlobalContext />} />
               <Route path="history/:id/rom" element={<RomPage />} />
+              <Route path="training" element={<Training />} />
             </Route>
 
             {/* Catch-all → landing */}

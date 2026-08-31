@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle, Replace } from 'lucide-react'
 import { toast } from 'sonner'
 import TranscriptViewer from '../components/TranscriptViewer'
 import VideoTranscriptViewer from '../components/VideoTranscriptViewer'
@@ -66,7 +66,18 @@ export default function HistoryDetail() {
   const [reidentifyDone, setReidentifyDone] = useState(false)
   const [confirmRerunOpen, setConfirmRerunOpen] = useState(false)
   const [rerunning, setRerunning] = useState(false)
+  const [correctMistakeOpen, setCorrectMistakeOpen] = useState(false)
+  const [wrongText, setWrongText] = useState('')
+  const [correctText, setCorrectText] = useState('')
+  const [correctingMistake, setCorrectingMistake] = useState(false)
+  const [correctResult, setCorrectResult] = useState<{ count: number; done: boolean } | null>(null)
   const reidentifyPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // ── Speaker Tab: scroll-to-segment ──────────────────────────────────────────
+  const [highlightSegId, setHighlightSegId] = useState<string | undefined>(undefined)
+  const handleScrollToSegment = useCallback((segId: string, _startTime: number) => {
+    setHighlightSegId(undefined)  // reset first so useEffect always fires
+    requestAnimationFrame(() => setHighlightSegId(segId))
+  }, [])
   // â”€â”€ Resizable chat panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [chatWidth, setChatWidth] = useState<number>(() => {
     const saved = localStorage.getItem('ai-chat-panel-width')
@@ -179,6 +190,29 @@ export default function HistoryDetail() {
         console.warn('[ReidentifySpeakers] Poll failed (will retry):', pollErr)
       }
     }, 2500)
+  }
+
+  const handleCorrectMistake = async () => {
+    if (!id || !wrongText.trim() || correctingMistake) return
+    setCorrectingMistake(true)
+    setCorrectResult(null)
+    try {
+      const res = await api.post(`/history/${id}/correct-mistake`, {
+        wrong_text: wrongText.trim(),
+        correct_text: correctText,
+      })
+      const count: number = res.data.occurrences_replaced ?? 0
+      setCorrectResult({ count, done: true })
+      if (count > 0) {
+        // Reload the recording so the corrected transcript is shown immediately
+        reloadDetail()
+      }
+    } catch (err: unknown) {
+      console.error('[CorrectMistake] Failed:', err)
+      setCorrectResult({ count: -1, done: true })
+    } finally {
+      setCorrectingMistake(false)
+    }
   }
 
   const handleRerunPipeline = async () => {
@@ -510,6 +544,21 @@ export default function HistoryDetail() {
                     </button>
                   )}
 
+                  <button
+                    className="dropdown-item"
+                    onClick={() => {
+                      setCorrectMistakeOpen(true)
+                      setCorrectResult(null)
+                      setWrongText('')
+                      setCorrectText('')
+                      setMenuOpen(false)
+                    }}
+                    id="btn-correct-mistake"
+                  >
+                    <Replace size={14} style={{ color: 'hsl(45,90%,45%)' }} />
+                    Correct Mistake
+                  </button>
+
                   <div className="dropdown-item">
                     <PDFButton
                       recordingId={id}
@@ -544,7 +593,7 @@ export default function HistoryDetail() {
         {/* Transcript area */}
         <div className="transcript-scroll" style={{
           flex: 1, overflowY: 'auto',
-          padding: '1.25rem 1.5rem',
+          padding: '0rem 1.5rem',
           background: 'hsl(var(--paper) / .4)',
           minHeight: 0
         }}>
@@ -673,6 +722,7 @@ export default function HistoryDetail() {
                 showConfidence={showConfidence}
                 audioUrl={audioUrl || undefined}
                 recordingId={id}
+                highlightSegId={highlightSegId}
                 onSegmentsChange={(updated) => {
                   if (rec) {
                     setRec({ ...rec, transcript: updated });
@@ -724,8 +774,128 @@ export default function HistoryDetail() {
           onToggle={() => setChatOpen((o) => !o)}
           onGenerateInsights={handleGenerateInsights}
           isGeneratingInsights={isGeneratingInsights}
+          onScrollToSegment={handleScrollToSegment}
+          onTranscriptChanged={() => reloadDetail()}
         />
       </div>
+
+      {/* ── Correct Mistake Modal ── */}
+      {correctMistakeOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(3px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem'
+        }}>
+          <div style={{
+            background: 'hsl(var(--card))',
+            border: '2px solid hsl(var(--border))',
+            borderRadius: '16px',
+            padding: '1.5rem 1.75rem',
+            maxWidth: '460px',
+            width: '100%',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '1.1rem',
+          }} className="animate-scale-up">
+
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: 40, height: 40, borderRadius: '12px',
+                background: 'hsl(45,90%,50%/.12)',
+                border: '1.5px solid hsl(45,90%,50%/.3)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+              }}>
+                <Replace size={18} style={{ color: 'hsl(45,90%,45%)' }} />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: 'hsl(var(--ink))' }}>
+                  Correct Mistake
+                </h3>
+                <p style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', margin: '2px 0 0 0', fontFamily: 'Inter, sans-serif' }}>
+                  Find &amp; replace text across the entire meeting
+                </p>
+              </div>
+            </div>
+
+            {/* Inputs */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '.65rem' }}>
+              <div>
+                <label style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '.3rem' }}>
+                  Wrong text / word
+                </label>
+                <input
+                  className="input"
+                  id="correct-mistake-wrong"
+                  placeholder="e.g. Jhon"
+                  value={wrongText}
+                  autoFocus
+                  onChange={e => { setWrongText(e.target.value); setCorrectResult(null) }}
+                  onKeyDown={e => { if (e.key === 'Enter' && wrongText.trim()) handleCorrectMistake() }}
+                  style={{ fontSize: '.88rem', height: '40px', fontFamily: 'Inter, sans-serif' }}
+                />
+              </div>
+              <div>
+                <label style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', display: 'block', marginBottom: '.3rem' }}>
+                  Correct text / word
+                </label>
+                <input
+                  className="input"
+                  id="correct-mistake-correct"
+                  placeholder="e.g. John"
+                  value={correctText}
+                  onChange={e => { setCorrectText(e.target.value); setCorrectResult(null) }}
+                  onKeyDown={e => { if (e.key === 'Enter' && wrongText.trim()) handleCorrectMistake() }}
+                  style={{ fontSize: '.88rem', height: '40px', fontFamily: 'Inter, sans-serif' }}
+                />
+              </div>
+            </div>
+
+            {/* Result banner */}
+            {correctResult && correctResult.done && (
+              <div style={{
+                padding: '.65rem 1rem',
+                borderRadius: '10px',
+                fontSize: '.82rem',
+                fontFamily: 'Inter, sans-serif',
+                fontWeight: 600,
+                ...(correctResult.count < 0
+                  ? { background: 'hsl(0,80%,96%)', border: '1px solid hsl(0,75%,80%)', color: 'hsl(0,65%,40%)' }
+                  : correctResult.count === 0
+                  ? { background: 'hsl(var(--muted))', border: '1px solid hsl(var(--border))', color: 'hsl(var(--pencil))' }
+                  : { background: 'hsl(130,55%,95%)', border: '1px solid hsl(130,55%,75%)', color: 'hsl(130,55%,30%)' })
+              }}>
+                {correctResult.count < 0
+                  ? '✕ An error occurred. Please try again.'
+                  : correctResult.count === 0
+                  ? '⚠ No matches found. Nothing was changed.'
+                  : `✓ Correction applied — ${correctResult.count} occurrence${correctResult.count === 1 ? '' : 's'} replaced.`}
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '.1rem' }}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => { setCorrectMistakeOpen(false); setCorrectResult(null) }}
+                style={{ fontSize: '.85rem', padding: '.45rem 1rem' }}
+              >
+                Close
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleCorrectMistake}
+                disabled={!wrongText.trim() || correctingMistake}
+                id="btn-correct-mistake-apply"
+                style={{ fontSize: '.85rem', padding: '.45rem 1.2rem', background: 'hsl(45,90%,45%)', borderColor: 'hsl(45,90%,45%)' }}
+              >
+                {correctingMistake ? <><Loader size={13} className="spin" /> Applying…</> : <><Replace size={13} /> Apply</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Modal for Re-Run Pipeline */}
       {confirmRerunOpen && (

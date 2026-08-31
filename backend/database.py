@@ -91,6 +91,7 @@ async def connect_db():
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 filename TEXT NOT NULL,
+                title TEXT DEFAULT NULL,
                 file_path TEXT NOT NULL,
                 duration REAL NOT NULL DEFAULT 0.0,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -183,8 +184,12 @@ async def connect_db():
                 enable_low_volume_recovery INTEGER NOT NULL DEFAULT 1,
                 recovery_energy_threshold REAL NOT NULL DEFAULT -45.0,
                 recovery_min_duration_ms INTEGER NOT NULL DEFAULT 300,
+                whisper_parallel_processing INTEGER NOT NULL DEFAULT 1,
+                whisper_parallel_chunk_minutes INTEGER NOT NULL DEFAULT 10,
+                rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
                 updated_at TEXT NOT NULL
             )
+
         """))
 
         await conn.execute(text("""
@@ -279,6 +284,24 @@ async def connect_db():
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_shortcuts_user_id ON shortcut_dictionary(user_id)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_vocab_user_id ON technical_vocabulary(user_id)"))
 
+        # ── stage2_edit_history ──────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS stage2_edit_history (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                point_ids_affected TEXT NOT NULL DEFAULT '[]',
+                before_state TEXT NOT NULL DEFAULT '[]',
+                after_state TEXT NOT NULL DEFAULT '[]',
+                metadata TEXT DEFAULT '{}',
+                is_reverted INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                reverted_at TEXT
+            )
+        """))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stage2_edits_recording ON stage2_edit_history(recording_id)"))
+
         # ── recording_chunks — per-chunk transcription results ──────────────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS recording_chunks (
@@ -316,6 +339,7 @@ async def connect_db():
 
         # ── Migration: add advanced-options columns to recordings if missing ──
         for col_def in (
+            "title TEXT DEFAULT NULL",
             "meeting_prompt TEXT DEFAULT ''",
             "participant_voice_ids TEXT DEFAULT '[]'",
             "use_vocabulary INTEGER DEFAULT 0",
@@ -499,6 +523,37 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
+        # ── ROM Metadata table & migration (for standalone ROM queries) ───────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS rom_metadata (
+                id              TEXT PRIMARY KEY,
+                recording_id    TEXT NOT NULL UNIQUE,
+                user_id         TEXT NOT NULL,
+                rom_data        TEXT DEFAULT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_rom_metadata_recording_id ON rom_metadata(recording_id)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_rom_metadata_user_id ON rom_metadata(user_id)"
+        ))
+
+        # Backfill rom_metadata from existing recordings.rom_data for existing databases
+        try:
+            await conn.execute(text("""
+                INSERT OR IGNORE INTO rom_metadata (id, recording_id, user_id, rom_data, created_at, updated_at)
+                SELECT id, id, user_id, rom_data, created_at, created_at
+                FROM recordings
+                WHERE rom_data IS NOT NULL AND rom_data != '' AND rom_data != '{}'
+            """))
+        except Exception as bf_err:
+            logger.warning(f"[DB] rom_metadata backfill check (non-fatal): {bf_err}")
+
         # ── Migration: Add Video support columns ──────────────────────────────
         # video_transcript — JSON array of merged OCR blocks: [{start, end, text}]
         #                    populated asynchronously after video upload; NULL for audio-only recordings.
@@ -521,6 +576,9 @@ async def connect_db():
             ("rom_windows_per_batch", "INTEGER NOT NULL DEFAULT 5"),
             ("rom_parallel_window_processing", "INTEGER NOT NULL DEFAULT 2"),
             ("rom_separate_action_extraction", "INTEGER NOT NULL DEFAULT 0"),
+            ("rom_stage2_process_all_together", "INTEGER NOT NULL DEFAULT 0"),
+            ("rom_min_similarity_threshold", "REAL DEFAULT 0.80"),
+            ("rom_pipeline_mode", "TEXT NOT NULL DEFAULT 'base'"),
             ("whisper_batch_size", "INTEGER NOT NULL DEFAULT 8"),
             ("max_tokens_rom_discussion", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_discussion_no_actions", "INTEGER NOT NULL DEFAULT 4096"),
@@ -539,6 +597,7 @@ async def connect_db():
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
             except Exception:
                 pass  # column already exists
+
 
         # ── Migration: Add Low-Volume Speech Transcription columns to user_settings ─
         for col_name, col_type in [
@@ -563,11 +622,32 @@ async def connect_db():
             ("enable_audio_validation", "INTEGER NOT NULL DEFAULT 1"),
             ("min_audio_duration_seconds", "REAL NOT NULL DEFAULT 2.0"),
             ("min_audio_rms_threshold", "REAL NOT NULL DEFAULT 0.003"),
+            ("whisper_parallel_processing", "INTEGER NOT NULL DEFAULT 1"),
+            ("whisper_parallel_chunk_minutes", "INTEGER NOT NULL DEFAULT 10"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
             except Exception:
                 pass  # column already exists
+
+
+        # ── Migration: Missing Transcription Recovery ────────────────────────────
+        # raw_transcript — stores JSON of aligned transcript segments after whisperx,
+        #                  before diarization; used for the optional pipeline-pause
+        #                  Missing Transcription Recovery feature.
+        try:
+            await conn.execute(text("ALTER TABLE recordings ADD COLUMN raw_transcript TEXT DEFAULT NULL"))
+        except Exception:
+            pass  # column already exists
+
+        # missing_transcript_recovery_enabled — user toggle to pause pipeline after transcription
+        try:
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN missing_transcript_recovery_enabled "
+                "INTEGER NOT NULL DEFAULT 0"
+            ))
+        except Exception:
+            pass  # column already exists
 
 
         # ── Prompt Templates — system-wide, shared by all users ─────────────────
@@ -635,6 +715,49 @@ async def connect_db():
         ))
 
 
+        # ── Training & Optimization Tables ────────────────────────────────────────
+        # These tables support the Training & Optimization feature module.
+        # The existing pipeline tables are NOT modified by this feature.
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS training_jobs (
+                job_id          TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                description     TEXT,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                stage_configs   TEXT NOT NULL DEFAULT '[]',
+                dataset_id      TEXT,
+                created_at      TEXT NOT NULL,
+                started_at      TEXT,
+                completed_at    TEXT,
+                error           TEXT,
+                logs            TEXT NOT NULL DEFAULT '[]',
+                progress        TEXT,
+                artifacts       TEXT NOT NULL DEFAULT '[]',
+                eval_results    TEXT NOT NULL DEFAULT '{}'
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_training_jobs_user ON training_jobs(user_id)"
+        ))
+
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS training_datasets (
+                dataset_id          TEXT PRIMARY KEY,
+                user_id             TEXT NOT NULL,
+                stages              TEXT NOT NULL DEFAULT '[]',
+                source_type         TEXT NOT NULL DEFAULT 'meeting',
+                source_meeting_id   TEXT,
+                total_samples       INTEGER NOT NULL DEFAULT 0,
+                samples_by_stage    TEXT NOT NULL DEFAULT '{}',
+                manual_mom          TEXT,
+                created_at          TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_training_datasets_user ON training_datasets(user_id)"
+        ))
+
+
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.
         try:
@@ -646,6 +769,14 @@ async def connect_db():
         except Exception as ext_err:
             logger.warning(f"[DB] Could not extend sessions (non-fatal): {ext_err}")
 
+        # ── Verification: ensure core and newly added tables exist ─────────
+        verification = await conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('recordings', 'rom_metadata', 'user_settings', 'minutes_of_meeting')"
+        ))
+        verified_tables = {row[0] for row in verification.fetchall()}
+        logger.info(f"[DB] Verified core tables present: {verified_tables}")
+        if 'rom_metadata' not in verified_tables:
+            logger.error("[DB] CRITICAL: rom_metadata table was not found after initialization!")
 
     logger.info(f"[DB] SQLite database ready: {settings.DATABASE_URL}")
 
@@ -692,13 +823,15 @@ def to_json(value: Any) -> str:
 
 
 def from_json(value: str | None, default=None):
-    """Deserialize a JSON string from DB. Returns default if None/empty."""
-    if value is None:
+    """Deserialize a JSON string from DB. Returns default if None/empty or parsed value is None."""
+    if value is None or not str(value).strip():
         return default
     try:
-        return json.loads(value)
+        res = json.loads(value)
+        return default if res is None else res
     except (json.JSONDecodeError, TypeError):
         return default
+
 
 
 def dt_to_str(dt: datetime | None) -> str | None:

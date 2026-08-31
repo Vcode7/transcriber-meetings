@@ -809,3 +809,249 @@ async def rerun_recording_pipeline(
         "message": "Pipeline rerun initiated. Poll /audio/jobs/{recording_id} for progress.",
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Correct Mistake — case-insensitive find & replace across all meeting data
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _replace_in_str(s: str, pattern, replacement: str) -> tuple[str, int]:
+    """Replace all case-insensitive occurrences of ``pattern`` in ``s``.
+    Returns (new_string, count_of_replacements)."""
+    count = 0
+
+    def _repl(m):
+        nonlocal count
+        count += 1
+        return replacement
+
+    new_s = pattern.sub(_repl, s)
+    return new_s, count
+
+
+def _replace_in_value(val, pattern, replacement: str) -> tuple[object, int]:
+    """Recursively walk a JSON-deserialized value (dict/list/str) and
+    replace all occurrences of ``pattern`` in every string leaf."""
+    total = 0
+    if isinstance(val, str):
+        new_val, n = _replace_in_str(val, pattern, replacement)
+        return new_val, n
+    elif isinstance(val, list):
+        new_list = []
+        for item in val:
+            new_item, n = _replace_in_value(item, pattern, replacement)
+            total += n
+            new_list.append(new_item)
+        return new_list, total
+    elif isinstance(val, dict):
+        new_dict = {}
+        for k, v in val.items():
+            new_v, n = _replace_in_value(v, pattern, replacement)
+            total += n
+            new_dict[k] = new_v
+        return new_dict, total
+    else:
+        return val, 0
+
+
+@router.post("/{recording_id}/correct-mistake")
+async def correct_mistake(
+    recording_id: str,
+    body: dict = Body(default={}),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Perform a case-insensitive find-and-replace across ALL persisted text
+    belonging to this meeting:
+      - transcript (segment text + individual word tokens)
+      - raw_text, summary, short_summary, detailed_summary
+      - key_points (JSON list of strings)
+      - action_items (JSON list of objects)
+      - rom_data (JSON blob — all string leaves)
+      - minutes_of_meeting row (title, introduction, points_discussed,
+        action_items, conclusion, decisions, next_steps, discussion_summary)
+
+    Does NOT re-run any AI pipeline. This is a direct data correction.
+
+    Body: { "wrong_text": "...", "correct_text": "..." }
+    Returns: { "status": "done", "occurrences_replaced": N }
+    """
+    import re as _re
+
+    wrong_text: str = (body.get("wrong_text") or "").strip()
+    correct_text: str = body.get("correct_text") or ""
+
+    if not wrong_text:
+        raise HTTPException(status_code=422, detail="wrong_text cannot be empty.")
+
+    user_id = current_user["id"]
+
+    # Build the compiled case-insensitive regex once
+    pattern = _re.compile(_re.escape(wrong_text), _re.IGNORECASE)
+
+    total_replaced = 0
+
+    # ── 1. Fetch the recordings row ──────────────────────────────────────────
+    async with get_db_context() as db:
+        r = await db.execute(
+            text(
+                "SELECT transcript, raw_text, summary, short_summary, detailed_summary, "
+                "key_points, action_items, rom_data "
+                "FROM recordings WHERE id = :id AND user_id = :uid"
+            ),
+            {"id": recording_id, "uid": user_id},
+        )
+        row = r.mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+
+    # ── 2. Replace in plain-text columns ────────────────────────────────────
+    def _do_str(raw):
+        if not raw:
+            return raw, 0
+        new, n = _replace_in_str(str(raw), pattern, correct_text)
+        return new, n
+
+    new_raw_text, n = _do_str(row.get("raw_text"))
+    total_replaced += n
+    new_summary, n = _do_str(row.get("summary"))
+    total_replaced += n
+    new_short_summary, n = _do_str(row.get("short_summary"))
+    total_replaced += n
+    new_detailed_summary, n = _do_str(row.get("detailed_summary"))
+    total_replaced += n
+
+    # ── 3. Replace in transcript (JSON) — text field + word tokens ───────────
+    raw_transcript = from_json(row.get("transcript"), [])
+    new_transcript, n = _replace_in_value(raw_transcript, pattern, correct_text)
+    total_replaced += n
+
+    # ── 4. Replace in key_points (JSON list of strings) ─────────────────────
+    raw_kp = from_json(row.get("key_points"), [])
+    new_kp, n = _replace_in_value(raw_kp, pattern, correct_text)
+    total_replaced += n
+
+    # ── 5. Replace in action_items (JSON list of objects) ───────────────────
+    raw_ai = from_json(row.get("action_items"), [])
+    new_ai, n = _replace_in_value(raw_ai, pattern, correct_text)
+    total_replaced += n
+
+    # ── 6. Replace in rom_data (nested JSON blob) ────────────────────────────
+    raw_rom = from_json(row.get("rom_data"), {}) if row.get("rom_data") else {}
+    new_rom, n = _replace_in_value(raw_rom, pattern, correct_text)
+    total_replaced += n
+
+    # ── 7. Persist changes to recordings table ───────────────────────────────
+    async with get_db_context() as db:
+        await db.execute(
+            text(
+                "UPDATE recordings SET "
+                "raw_text = :raw_text, "
+                "summary = :summary, "
+                "short_summary = :short_summary, "
+                "detailed_summary = :detailed_summary, "
+                "transcript = :transcript, "
+                "key_points = :key_points, "
+                "action_items = :action_items, "
+                "rom_data = :rom_data "
+                "WHERE id = :id AND user_id = :uid"
+            ),
+            {
+                "raw_text": new_raw_text,
+                "summary": new_summary,
+                "short_summary": new_short_summary,
+                "detailed_summary": new_detailed_summary,
+                "transcript": to_json(new_transcript),
+                "key_points": to_json(new_kp),
+                "action_items": to_json(new_ai),
+                "rom_data": to_json(new_rom) if new_rom else None,
+                "id": recording_id,
+                "uid": user_id,
+            },
+        )
+        await db.commit()
+
+    # ── 8. Replace in minutes_of_meeting row (if exists) ────────────────────
+    try:
+        async with get_db_context() as db:
+            r2 = await db.execute(
+                text(
+                    "SELECT id, title, introduction, points_discussed, action_items, "
+                    "conclusion, decisions, next_steps, discussion_summary "
+                    "FROM minutes_of_meeting WHERE recording_id = :rid"
+                ),
+                {"rid": recording_id},
+            )
+            mom_rows = r2.mappings().fetchall()
+
+        for mom in mom_rows:
+            mom_id = mom["id"]
+
+            mom_title, n = _do_str(mom.get("title"))
+            total_replaced += n
+            mom_intro, n = _do_str(mom.get("introduction"))
+            total_replaced += n
+            mom_conclusion, n = _do_str(mom.get("conclusion"))
+            total_replaced += n
+            mom_disc_summary, n = _do_str(mom.get("discussion_summary"))
+            total_replaced += n
+
+            mom_points, n = _replace_in_value(
+                from_json(mom.get("points_discussed"), []), pattern, correct_text
+            )
+            total_replaced += n
+            mom_action, n = _replace_in_value(
+                from_json(mom.get("action_items"), []), pattern, correct_text
+            )
+            total_replaced += n
+            mom_decisions, n = _replace_in_value(
+                from_json(mom.get("decisions"), []), pattern, correct_text
+            )
+            total_replaced += n
+            mom_next_steps, n = _replace_in_value(
+                from_json(mom.get("next_steps"), []), pattern, correct_text
+            )
+            total_replaced += n
+
+            async with get_db_context() as db:
+                await db.execute(
+                    text(
+                        "UPDATE minutes_of_meeting SET "
+                        "title = :title, "
+                        "introduction = :intro, "
+                        "points_discussed = :points_discussed, "
+                        "action_items = :action_items, "
+                        "conclusion = :conclusion, "
+                        "decisions = :decisions, "
+                        "next_steps = :next_steps, "
+                        "discussion_summary = :discussion_summary "
+                        "WHERE id = :id"
+                    ),
+                    {
+                        "title": mom_title,
+                        "intro": mom_intro,
+                        "points_discussed": to_json(mom_points),
+                        "action_items": to_json(mom_action),
+                        "conclusion": mom_conclusion,
+                        "decisions": to_json(mom_decisions),
+                        "next_steps": to_json(mom_next_steps),
+                        "discussion_summary": mom_disc_summary,
+                        "id": mom_id,
+                    },
+                )
+                await db.commit()
+    except Exception as mom_err:
+        logger.warning(
+            f"[CorrectMistake] MoM update failed (non-fatal): {mom_err}"
+        )
+
+    logger.info(
+        f"[CorrectMistake] {recording_id} — replaced {total_replaced} occurrence(s) "
+        f"of {wrong_text!r} → {correct_text!r}"
+    )
+
+    return {
+        "status": "done",
+        "recording_id": recording_id,
+        "occurrences_replaced": total_replaced,
+    }

@@ -17,7 +17,10 @@ import { getApiErrorDetail } from '../lib/errors'
 import { isActiveJobStatus } from '../lib/jobState'
 import type { ProcessingResult } from '../types/recording'
 
-type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'done' | 'error'
+import AudioTrimmer from '../components/AudioTrimmer'
+import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+
+type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'pending_transcript_review' | 'done' | 'error'
 
 const PROGRESS: Record<string, string> = {
   queued: 'Queued…',
@@ -151,6 +154,9 @@ export default function RecordPage() {
         setResult(currentJob.result as ProcessingResult)
       }
       clearProcessing()
+    } else if (currentJob.status === 'pending_transcript_review') {
+      setStage('pending_transcript_review')
+      clearProcessing()
     } else {
       setStage('processing')
       setProcessing('record', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
@@ -255,18 +261,9 @@ export default function RecordPage() {
   const handleStop = () => {
     recorder.stop()
     setStage('stopped')
-    // Auto-submit immediately after stopping — no manual step required
   }
 
-  // Auto-submit whenever stage transitions to 'stopped'
-  useEffect(() => {
-    if (stage === 'stopped' && recorder.audioBlob) {
-      handleSubmit()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, recorder.audioBlob])
-
-  const handleSubmit = async () => {
+  const handleSubmit = async (trimStartSec?: number, trimEndSec?: number) => {
     if (!recorder.audioBlob) return
     setStage('uploading')
     setUploadError(null)
@@ -278,6 +275,10 @@ export default function RecordPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
+      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
+        form.append('trim_start_sec', String(trimStartSec))
+        form.append('trim_end_sec', String(trimEndSec))
+      }
 
       const hasChunks = recorder.chunkIdsRef.current.length > 0
       let rId = ''
@@ -678,7 +679,17 @@ export default function RecordPage() {
                 </button>
               </div>
             )}
-            {/* 'stopped' stage is now handled automatically — no manual Analyse button */}
+            {/* AudioTrimmer on stopped stage */}
+            {stage === 'stopped' && recorder.audioBlob && (
+              <div style={{ width: '100%', maxWidth: '640px', marginTop: '1rem' }}>
+                <AudioTrimmer
+                  file={recorder.audioBlob}
+                  fileName={`Recording (${recorder.formattedDuration})`}
+                  onConfirm={(start, end) => handleSubmit(start, end)}
+                  onSkip={() => handleSubmit()}
+                />
+              </div>
+            )}
             {processing && (
               <button className="record-btn idle" disabled style={{ opacity: .5, cursor: 'not-allowed' }}>
                 <Loader size={32} color="hsl(var(--accent-foreground))" className="spin" />
@@ -693,6 +704,17 @@ export default function RecordPage() {
 
           {/* Audio preview */}
         </div>)}
+
+        {(stage === 'pending_transcript_review' || currentJob?.status === 'pending_transcript_review') && recordingId && (
+          <TranscriptReviewPanel
+            recordingId={recordingId}
+            onResumed={() => {
+              setStage('processing')
+              updateProcStage('diarizing')
+              setProcessing('record', 'diarizing')
+            }}
+          />
+        )}
 
 
 
@@ -822,6 +844,8 @@ export default function RecordPage() {
         isGeneratingMom={isGeneratingMom}
         onGenerateInsights={handleGenerateInsights}
         isGeneratingInsights={isGeneratingInsights}
+        onScrollToSegment={() => {}}
+        onTranscriptChanged={() => {}}
       />
       </div>
     </div>

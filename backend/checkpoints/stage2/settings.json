@@ -1,0 +1,12 @@
+{
+  "model_name": "hf.co/prithivMLmods/gemma-4-E4B-it-qat-GGUF:Q3_K_S",
+  "optimizer": "MIPROv2",
+  "num_trials": 10,
+  "eval_split": 0.2,
+  "bootstrap_examples": 8,
+  "max_demonstrations": 4,
+  "temperature": 0,
+  "max_tokens": 5632,
+  "points_per_group": 5,
+  "context_retrieval": true
+}

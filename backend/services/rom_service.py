@@ -4,12 +4,98 @@ import json
 import uuid
 import re
 import gc
+import time
+import threading
 from typing import List, Dict, Optional, Any
 import numpy as np
 
 import math
 
 logger = logging.getLogger(__name__)
+
+# ── Stage 1 In-Memory Progress Tracker ─────────────────────────────────────
+# Key: f"{user_id}:{recording_id}"
+# Thread-safe updates via _stage1_progress_lock
+_stage1_progress: Dict[str, dict] = {}
+_stage1_progress_lock = threading.Lock()
+
+
+def _progress_key(user_id: str, recording_id: str) -> str:
+    return f"{user_id}:{recording_id}"
+
+
+def init_stage1_progress(user_id: str, recording_id: str, total_windows: int, concurrency: int) -> None:
+    """Initialize Stage 1 progress tracking before extraction starts."""
+    key = _progress_key(user_id, recording_id)
+    with _stage1_progress_lock:
+        _stage1_progress[key] = {
+            "status": "processing",
+            "windows_completed": 0,
+            "windows_total": total_windows,
+            "concurrency": concurrency,
+            "window_elapsed_times": [],  # elapsed seconds per completed window
+            "started_at": time.monotonic(),
+        }
+
+
+def update_stage1_progress(user_id: str, recording_id: str, window_elapsed: float) -> None:
+    """Record a completed window's elapsed time and update progress."""
+    key = _progress_key(user_id, recording_id)
+    with _stage1_progress_lock:
+        rec = _stage1_progress.get(key)
+        if rec is None:
+            return
+        rec["window_elapsed_times"].append(window_elapsed)
+        rec["windows_completed"] = len(rec["window_elapsed_times"])
+
+
+def finish_stage1_progress(user_id: str, recording_id: str) -> None:
+    """Mark Stage 1 progress as done."""
+    key = _progress_key(user_id, recording_id)
+    with _stage1_progress_lock:
+        rec = _stage1_progress.get(key)
+        if rec:
+            rec["status"] = "done"
+
+
+def get_stage1_progress(user_id: str, recording_id: str) -> dict:
+    """Return current Stage 1 progress snapshot with computed ETA."""
+    key = _progress_key(user_id, recording_id)
+    with _stage1_progress_lock:
+        rec = _stage1_progress.get(key)
+        if rec is None:
+            return {"status": "idle", "windows_completed": 0, "windows_total": 0,
+                    "concurrency": 1, "eta_seconds": None, "elapsed_seconds": 0.0}
+
+        elapsed = time.monotonic() - rec.get("started_at", time.monotonic())
+        completed = rec["windows_completed"]
+        total = rec["windows_total"]
+        concurrency = rec["concurrency"]
+        times = rec["window_elapsed_times"]
+
+        eta = None
+        if times and completed < total:
+            avg_window_time = sum(times) / len(times)
+            remaining_windows = total - completed
+            # With parallel processing, divide by concurrency
+            eta = (avg_window_time * remaining_windows) / max(1, concurrency)
+
+        return {
+            "status": rec["status"],
+            "windows_completed": completed,
+            "windows_total": total,
+            "concurrency": concurrency,
+            "elapsed_seconds": round(elapsed, 1),
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
+
+
+def clear_stage1_progress(user_id: str, recording_id: str) -> None:
+    """Remove Stage 1 progress record from memory."""
+    key = _progress_key(user_id, recording_id)
+    with _stage1_progress_lock:
+        _stage1_progress.pop(key, None)
+
 
 def clean_calendar_dates(dates_list) -> list[str]:
     """
@@ -55,12 +141,12 @@ def clean_calendar_dates(dates_list) -> list[str]:
 def _extract_chunk_text(res: Any) -> str:
     if isinstance(res, dict):
         txt = (
-            res.get("text") or res.get("content") or res.get("chunk") or
+            res.get("_text") or res.get("text") or res.get("content") or res.get("chunk") or
             res.get("page_content") or res.get("snippet") or res.get("raw_text") or ""
         )
     else:
         txt = (
-            getattr(res, "text", None) or getattr(res, "content", None) or
+            getattr(res, "_text", None) or getattr(res, "text", None) or getattr(res, "content", None) or
             getattr(res, "chunk", None) or getattr(res, "page_content", None) or ""
         )
     return str(txt).strip()
@@ -104,20 +190,33 @@ def normalize_action_item(item: Any) -> Dict[str, Any]:
             "assigner": _clean(assigner),
             "assignee": _clean(assignee),
             "task": raw_task,
-            "deadline": _clean(deadline),
+            "deadline": _clean(deadline)
         }
     elif isinstance(item, str) and item.strip():
         return {
             "assigner": None,
             "assignee": None,
             "task": item.strip(),
-            "deadline": None,
+            "deadline": None
         }
     return {
         "assigner": None,
         "assignee": None,
         "task": "",
-        "deadline": None,
+        "deadline": None
+    }
+
+
+def normalize_stage2_action_item(item: Any) -> Dict[str, Any]:
+    """
+    Normalizes a Stage 2 action item to:
+    {"task": str, "assignee": str|None, "deadline": str|None}
+    """
+    norm = normalize_action_item(item)
+    return {
+        "task": norm["task"],
+        "assignee": norm["assignee"],
+        "deadline": norm["deadline"],
     }
 
 def format_action_point_display_text(item: Dict[str, Any]) -> str:
@@ -223,7 +322,15 @@ def _merge_action_items_into_points(discussion_points: List[Dict], action_extrac
                     matched_point["action_items"].append(norm)
             if owner:
                 matched_point["action_owner"] = owner
+            elif not matched_point.get("action_owner"):
+                assignees = [
+                    a.get("assignee") for a in matched_point.get("action_items", [])
+                    if isinstance(a, dict) and a.get("assignee") and str(a.get("assignee")).lower() not in ("none", "n/a", "null", "unassigned", "")
+                ]
+                if assignees:
+                    matched_point["action_owner"] = ", ".join(dict.fromkeys(assignees))
     return pts
+
 
 
 class RomService:
@@ -232,6 +339,7 @@ class RomService:
         transcript: List[Dict],
         window_minutes: float = 2.0,
         user_id: str = None,
+        recording_id: str = None,
         video_transcript: Optional[List[Dict]] = None,
         source_type: str = "audio",
         parallel_window_processing: Optional[int] = None,
@@ -295,6 +403,7 @@ class RomService:
 
         def _process_single_window(i_and_win):
             i, window = i_and_win
+            _win_start_time = time.monotonic()
             w_start = round(window[0].get('start', 0.0), 2) if window else 0.0
             w_end = round(window[-1].get('end', 0.0), 2) if window else 0.0
             
@@ -339,17 +448,50 @@ class RomService:
                 # ── Split-call path: run both LLM calls in parallel ──────────────────────
                 # Call 1: Discussion points (no action_items) via no-actions prompt variant.
                 # Call 2: Action items only via dedicated action extraction prompt.
-                # Both calls operate on the same transcript window text and video context.
+                #         Action extraction uses a 2× window (current + next) for broader context.
                 from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+                # Build 2× action-point window text (current window + next window)
+                double_window_text = window_text
+                if i + 1 < len(windows):
+                    next_win = windows[i + 1]
+                    for n_seg in next_win:
+                        n_spk = n_seg.get('speaker_label') or n_seg.get('speaker') or 'Unknown'
+                        n_start = n_seg.get('start', 0.0)
+                        n_end = n_seg.get('end', 0.0)
+                        n_txt = n_seg.get('text', '').strip()
+                        double_window_text += f"[{n_start:.1f}-{n_end:.1f}] {n_spk}: {n_txt}\n"
+                    logger.info(
+                        f"[ROM Service] Window {i+1} action extraction using 2× window "
+                        f"(current + window {i+2})"
+                    )
+
+                # Build 2× video context for action extraction
+                double_video_context = video_context
+                if has_video_ocr and i + 1 < len(windows):
+                    next_win = windows[i + 1]
+                    nw_start = round(next_win[0].get('start', 0.0), 2) if next_win else 0.0
+                    nw_end = round(next_win[-1].get('end', 0.0), 2) if next_win else 0.0
+                    next_blocks = get_overlapping_ocr_blocks(video_transcript, nw_start, nw_end)
+                    if next_blocks:
+                        next_lines = []
+                        for b in next_blocks:
+                            ts = f"{_format_time_hhmm(b['start'])} -> {_format_time_hhmm(b['end'])}"
+                            next_lines.append(f"[{ts}]\n{b['text']}")
+                        if double_video_context:
+                            double_video_context += "\n\n" + "\n\n".join(next_lines)
+                        else:
+                            double_video_context = "\n\n".join(next_lines)
 
                 def _call_discussion():
                     return provider.extract_rom_discussion_points(
-                        window_text, prev_window_text or None, video_context=video_context, skip_action_items=True
+                        window_text, prev_window_text or None, video_context=video_context,
+                        skip_action_items=True, separate_action_extraction=True
                     )
 
                 def _call_actions():
                     return provider.extract_rom_action_points(
-                        window_text, prev_window_text or None, video_context=video_context
+                        double_window_text, prev_window_text or None, video_context=double_video_context
                     )
 
                 with _TPE(max_workers=2) as _inner_exec:
@@ -381,31 +523,47 @@ class RomService:
                 # Attach action items to first discussion point; clear from all others
                 for p in points:
                     p["action_items"] = []
-                    p["action_owner"] = None
+                    p.setdefault("action_owner", None)
 
                 if points and normalized_actions:
                     points[0]["action_items"] = normalized_actions
-                    points[0]["action_owner"] = normalized_actions[0].get("assignee") or None
+                    # Derive action_owner from normalized_actions assignees
+                    assignees = [
+                        a.get("assignee") for a in normalized_actions
+                        if isinstance(a, dict) and a.get("assignee") and str(a.get("assignee")).lower() not in ("none", "n/a", "null", "unassigned", "")
+                    ]
+                    if assignees:
+                        points[0]["action_owner"] = ", ".join(dict.fromkeys(assignees))
 
                 logger.info(
-                    f"[ROM Service] Window {i+1} separate action extraction: "
+                    f"[ROM Service] Window {i+1} separate action extraction (2× window): "
                     f"{len(normalized_actions)} action item(s) attached to first of {len(points)} discussion point(s)."
                 )
 
             else:
-                # ── Standard single-call path — no changes ───────────────────────────────
+                # ── Default embedded-action path (separate_action_extraction=False) ─────────
+                # Uses ROM_DISCUSSION_EMBEDDED_PROMPT: actions are woven into discussion_point text.
+                # action_owner is populated by LLM; action_items list is NOT produced.
                 result = provider.extract_rom_discussion_points(
-                    window_text, prev_window_text or None, video_context=video_context
+                    window_text, prev_window_text or None, video_context=video_context,
+                    separate_action_extraction=False
                 )
                 points = result.get("discussion_points", [])
                 parse_error = bool(result.get("parse_error"))
                 error_reason = result.get("error_reason", "")
 
                 for p in points:
-                    raw_acts = p.get("action_items") or []
-                    if not isinstance(raw_acts, list):
-                        raw_acts = [raw_acts]
-                    p["action_items"] = [normalize_action_item(a) for a in raw_acts if normalize_action_item(a)["task"]]
+                    # Normalize action_owner: strip whitespace; reject vague/empty values.
+                    raw_owner = p.get("action_owner")
+                    if raw_owner and isinstance(raw_owner, str):
+                        owner_clean = raw_owner.strip()
+                        if owner_clean.lower() in ("none", "n/a", "null", "unassigned", ""):
+                            owner_clean = None
+                    else:
+                        owner_clean = None
+                    p["action_owner"] = owner_clean
+                    # Guard: set action_items=[] so downstream code using p.get("action_items", []) is safe.
+                    p["action_items"] = []
 
             # Stamp every point with window metadata (both paths)
             for p in points:
@@ -423,21 +581,33 @@ class RomService:
                 "parse_error": parse_error,
                 "error_reason": error_reason,
             }
-            return i, points, meta
+            window_elapsed_secs = time.monotonic() - _win_start_time
+            return i, points, meta, window_elapsed_secs
 
         window_results: Dict[int, List[Dict]] = {}
         window_errors: Dict[int, str] = {}
         window_meta: Dict[int, Dict] = {}
 
+        # ── Init progress tracking (user_id may be None in tests) ──────────────
+        _progress_user = user_id or "__anonymous__"
+        _recording_id_str = str(recording_id) if recording_id else "__unknown__"
+        if user_id:
+            init_stage1_progress(_progress_user, _recording_id_str, total_windows, concurrency)
+
         try:
             if concurrency == 1 or total_windows <= 1:
                 for i, window in enumerate(windows):
                     try:
-                        idx, pts, meta = _process_single_window((i, window))
+                        _win_start = time.monotonic()
+                        idx, pts, meta, win_elapsed = _process_single_window((i, window))
+                        if user_id:
+                            update_stage1_progress(_progress_user, _recording_id_str, win_elapsed)
                         window_results[idx] = pts
                         window_meta[idx] = meta
                     except Exception as w_err:
                         logger.error(f"[ROM Service] Stage 1 Window {i+1} failed ({w_err}). Continuing with remaining tasks...", exc_info=True)
+                        if user_id:
+                            update_stage1_progress(_progress_user, _recording_id_str, time.monotonic() - _win_start)
                         window_errors[i] = str(w_err)
                         window_meta[i] = {
                             "t_range": f"Window {i+1}",
@@ -453,11 +623,15 @@ class RomService:
                     for future in as_completed(future_to_idx):
                         win_idx = future_to_idx[future]
                         try:
-                            idx, pts, meta = future.result()
+                            idx, pts, meta, win_elapsed = future.result()
+                            if user_id:
+                                update_stage1_progress(_progress_user, _recording_id_str, win_elapsed)
                             window_results[idx] = pts
                             window_meta[idx] = meta
                         except Exception as w_err:
                             logger.error(f"[ROM Service] Stage 1 Window {win_idx+1} failed ({w_err}). Continuing with remaining tasks...", exc_info=True)
+                            if user_id:
+                                update_stage1_progress(_progress_user, _recording_id_str, 0.0)
                             window_errors[win_idx] = str(w_err)
                             window_meta[win_idx] = {
                                 "t_range": f"Window {win_idx+1}",
@@ -467,6 +641,8 @@ class RomService:
         finally:
             provider.unload_model()
             gc.collect()
+            if user_id:
+                finish_stage1_progress(_progress_user, _recording_id_str)
 
         all_points = []
         for i in range(total_windows):
@@ -513,6 +689,281 @@ class RomService:
             "windows_processed": len(windows)
         }
 
+    def rerun_single_stage1_window(
+        self,
+        transcript: List[Dict],
+        window_index: int,
+        user_feedback: str,
+        window_minutes: float = 2.0,
+        video_transcript: Optional[List[Dict]] = None,
+        existing_points: Optional[List[Dict]] = None,
+    ) -> Dict:
+        """
+        Stage 1 Re-run Window: Re-extracts discussion points for a single window
+        using the window's transcript, previous output, and user correction feedback.
+        """
+        from services.ai_provider import get_provider
+        from services.video_processing_service import get_overlapping_ocr_blocks
+
+        if not transcript:
+            return {"discussion_points": [], "window_index": window_index, "transcript_text": ""}
+
+        provider = get_provider()
+
+        windows = []
+        current_window = []
+        current_start_time = transcript[0].get('start', 0.0)
+        window_seconds = window_minutes * 60.0
+
+        for segment in transcript:
+            seg_start = segment.get('start', 0.0)
+            if current_window and (seg_start - current_start_time) >= window_seconds:
+                windows.append(current_window)
+                current_window = [segment]
+                current_start_time = seg_start
+            else:
+                current_window.append(segment)
+
+        if current_window:
+            windows.append(current_window)
+
+        # Target index is 1-based (window_index), map to 0-based
+        target_idx = max(0, min(len(windows) - 1, window_index - 1))
+        target_window = windows[target_idx] if windows else []
+
+        w_start = round(target_window[0].get('start', 0.0), 2) if target_window else 0.0
+        w_end = round(target_window[-1].get('end', 0.0), 2) if target_window else 0.0
+
+        window_text = ""
+        for seg in target_window:
+            speaker = seg.get('speaker_label') or seg.get('speaker') or 'Unknown'
+            start = seg.get('start', 0.0)
+            end = seg.get('end', 0.0)
+            text = seg.get('text', '').strip()
+            window_text += f"[{start:.1f}-{end:.1f}] {speaker}: {text}\n"
+
+        video_context = ""
+        if video_transcript:
+            relevant_blocks = get_overlapping_ocr_blocks(video_transcript, w_start, w_end)
+            if relevant_blocks:
+                lines = []
+                for b in relevant_blocks:
+                    ts = f"{_format_time_hhmm(b['start'])} -> {_format_time_hhmm(b['end'])}"
+                    lines.append(f"[{ts}]\n{b['text']}")
+                video_context = "\n\n".join(lines)
+
+        prev_window_text = ""
+        if target_idx > 0 and target_idx - 1 < len(windows):
+            prev_win = windows[target_idx - 1]
+            p_lines = []
+            for p_seg in prev_win:
+                p_spk = p_seg.get('speaker_label') or p_seg.get('speaker') or 'Unknown'
+                p_start = p_seg.get('start', 0.0)
+                p_end = p_seg.get('end', 0.0)
+                p_txt = p_seg.get('text', '').strip()
+                p_lines.append(f"[{p_start:.1f}-{p_end:.1f}] {p_spk}: {p_txt}")
+            prev_window_text = "PREVIOUS TRANSCRIPT WINDOW:\n" + "\n".join(p_lines)
+
+        existing_json = json.dumps(existing_points, ensure_ascii=False) if existing_points else ""
+
+        res = provider.extract_rom_discussion_points_with_feedback(
+            window_text=window_text,
+            existing_points_json=existing_json,
+            user_feedback=user_feedback,
+            previous_points_json=prev_window_text or None,
+            video_context=video_context,
+        )
+
+        raw_points = res.get("discussion_points", [])
+        regenerated_points = []
+        for pt in raw_points:
+            pt_id = str(uuid.uuid4())
+            pt["id"] = pt_id
+            pt["window_index"] = window_index
+            pt["timeline_start"] = w_start
+            pt["timeline_end"] = w_end
+            pt["raw_transcript_text"] = window_text
+            if video_context:
+                pt["video_transcript_context"] = video_context
+            regenerated_points.append(pt)
+
+        return {
+            "window_index": window_index,
+            "timeline_start": w_start,
+            "timeline_end": w_end,
+            "transcript_text": window_text,
+            "video_context": video_context,
+            "original_points": existing_points or [],
+            "regenerated_points": regenerated_points,
+        }
+
+    def index_stage2_points_in_chromadb(
+        self,
+        recording_id: str,
+        user_id: str,
+        points: List[Dict],
+        meeting_name: str = "",
+        meeting_date: str = "",
+    ) -> int:
+        """
+        Store generated Stage 2 points in ChromaDB collection `stage2_points_<user_id>`
+        with relevant metadata (meeting_id, meeting_name, date, stage2_identifier, etc.).
+        """
+        from services.vector_store import get_stage2_points_store
+        from services.text_embedding_service import get_text_embedder
+
+        if not points or not user_id or not recording_id:
+            return 0
+
+        user_id = _validate_user_id(user_id)
+        embedder = get_text_embedder()
+        embedder.load()
+        dim = getattr(embedder, "_dim", 1024)
+        store = get_stage2_points_store(user_id, dim)
+
+        # 1. Remove any previous entries for this meeting to prevent duplicates
+        try:
+            store.delete_by_filter("meeting_id", recording_id)
+        except Exception as e:
+            logger.warning(f"[ROM Service] Failed to delete previous Stage 2 vectors for {recording_id}: {e}")
+
+        # 2. Extract texts and build rich metadata for each Stage 2 point
+        texts: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+
+        for idx, p in enumerate(points):
+            pt_text = (p.get("polished_text") or p.get("discussion_point") or "").strip()
+            if not pt_text:
+                continue
+
+            point_id = str(p.get("id") or uuid.uuid4())
+            spk_val = p.get("speakers")
+            if isinstance(spk_val, list):
+                spk_str = ", ".join(str(s) for s in spk_val if s)
+            else:
+                spk_str = str(spk_val or "")
+
+            meta = {
+                "user_id": user_id,
+                "meeting_id": recording_id,
+                "recording_id": recording_id,
+                "doc_id": recording_id,
+                "chunk_index": idx,
+                "meeting_name": meeting_name or "Meeting",
+                "date": meeting_date or "",
+                "point_id": point_id,
+                "stage": "stage2",
+                "stage2_identifier": f"stage2_{recording_id}_{point_id}",
+                "speakers": spk_str,
+                "action_owner": p.get("action_owner") or "",
+                "source": "stage2_point",
+            }
+            texts.append(pt_text)
+            metadatas.append(meta)
+
+        if not texts:
+            return 0
+
+        try:
+            vecs = embedder.encode_batch(texts)
+            added_count = store.add(texts=texts, metadatas=metadatas, embeddings=vecs)
+            logger.info(
+                f"[ROM Service] Indexed {added_count} Stage 2 points for meeting '{meeting_name}' "
+                f"({recording_id}) in ChromaDB collection '{store._collection_name}'"
+            )
+            return added_count
+        except Exception as e:
+            logger.error(f"[ROM Service] Failed to index Stage 2 points in ChromaDB: {e}", exc_info=True)
+            return 0
+
+    def retrieve_previous_stage2_context(
+        self,
+        query: str,
+        query_vec: np.ndarray,
+        user_id: str,
+        current_recording_id: str,
+        previous_meeting_id: Optional[str] = None,
+        top_k: int = 3,
+        min_similarity_threshold: Optional[float] = 0.60,
+    ) -> List[Dict]:
+        """
+        Retrieve previous Stage 2 points using ChromaDB embeddings + metadata filtering.
+        - If previous_meeting_id is provided: retrieve only Stage 2 points from that meeting.
+        - If previous_meeting_id is None (Auto Retrieve): retrieve top-K most similar Stage 2 points
+          across all other meetings (meeting_id != current_recording_id).
+        Ensure ONLY Stage 2 content is retrieved.
+        """
+        from services.vector_store import get_stage2_points_store
+        from services.text_embedding_service import get_text_embedder
+
+        if top_k <= 0 or not user_id:
+            return []
+
+        user_id = _validate_user_id(user_id)
+        embedder = get_text_embedder()
+        embedder.load()
+        dim = getattr(embedder, "_dim", 1024)
+        store = get_stage2_points_store(user_id, dim)
+
+        fetch_k = max(top_k * 3, 10)
+        score_thresh = min_similarity_threshold if (min_similarity_threshold is not None and min_similarity_threshold > 0.0) else 0.0
+
+        try:
+            if previous_meeting_id and previous_meeting_id.strip():
+                # Specific meeting filter
+                target_mid = previous_meeting_id.strip()
+                where_filter = {"meeting_id": target_mid}
+                raw_results = store.search(query_vec, k=fetch_k, score_threshold=score_thresh, where=where_filter)
+                logger.info(
+                    f"[ROM Service] Previous Stage 2 Context (Select Meeting '{target_mid}'): "
+                    f"retrieved {len(raw_results)} points (score_thresh={score_thresh})"
+                )
+            else:
+                # Auto-retrieve across all other meetings
+                where_filter = {"stage": "stage2"}
+                raw_results = store.search(query_vec, k=fetch_k, score_threshold=score_thresh, where=where_filter)
+                # Exclude current meeting points
+                raw_results = [r for r in raw_results if r.get("meeting_id") != current_recording_id]
+                logger.info(
+                    f"[ROM Service] Previous Stage 2 Context (Auto Retrieve): "
+                    f"retrieved {len(raw_results)} candidates across previous meetings"
+                )
+
+            # Ensure only stage2 content is returned
+            stage2_only = [
+                r for r in raw_results
+                if r.get("stage") == "stage2" or r.get("source") == "stage2_point" or "stage2" in str(r.get("stage2_identifier", ""))
+            ]
+
+            final_results = stage2_only[:top_k]
+            return final_results
+        except Exception as e:
+            logger.warning(f"[ROM Service] retrieve_previous_stage2_context failed: {e}", exc_info=True)
+            return []
+
+    def _format_previous_stage2_context(self, results: List[Dict]) -> str:
+        """
+        Format retrieved previous Stage 2 points into clear, structured context.
+        """
+        if not results:
+            return ""
+        blocks = []
+        for r in results:
+            m_name = r.get("meeting_name") or r.get("filename") or "Previous Meeting"
+            m_date = r.get("date") or "Previous Date"
+            txt = (r.get("_text") or r.get("text") or "").strip()
+            if not txt:
+                continue
+            speakers = r.get("speakers")
+            action_owner = r.get("action_owner")
+            extra_info = []
+            if speakers:
+                extra_info.append(f"Speakers: {speakers}")
+            if action_owner:
+                extra_info.append(f"Action: {action_owner}")
+            meta_suffix = f" ({', '.join(extra_info)})" if extra_info else ""
+            blocks.append(f"[Previous Meeting: {m_name} | Date: {m_date}]\n- Stage 2 Point: {txt}{meta_suffix}")
+        return "\n\n".join(blocks)
 
     def enhance_discussion_points(
         self,
@@ -523,10 +974,22 @@ class RomService:
         global_top_k: int = 3,
         discussion_window_size: int = 5,
         parallel_window_processing: Optional[int] = None,
+        min_similarity_threshold: Optional[float] = 0.80,
+        transcript: Optional[List[Dict]] = None,
+        process_all_together: bool = False,
+        separate_action_extraction: bool = False,
+        reference_example_points: Optional[List[str]] = None,
+        previous_meeting_mode: str = "auto",
+        previous_meeting_id: Optional[str] = None,
+        previous_meeting_top_k: int = 3,
+        meeting_name: str = "",
+        meeting_date: str = "",
+        use_dspy_mode: bool = False,
     ) -> List[Dict]:
         """
         Stage 2: Enhance discussion points using hybrid retrieval (Semantic + BM25 + Metadata)
-        with Reciprocal Rank Fusion and independent Meeting / Global context sources.
+        with Reciprocal Rank Fusion, independent Meeting / Global context sources, and
+        Previous Meeting Stage 2 Context (Dual-mode: Auto Retrieve or Select Meeting).
         """
         from services.ai_provider import get_provider
         from services.text_embedding_service import get_text_embedder, unload_text_embedder
@@ -623,28 +1086,51 @@ class RomService:
                         deduped.append(r)
                 return deduped
 
-        # â”€â”€ Retrieval helper for one store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Retrieval helper for one store ─────────────────────────────────
         def _hybrid_retrieve(
             query: str,
             query_vec: np.ndarray,
             store,
             bm25_idx: Optional[BM25Index],
             top_k: int,
+            min_score: Optional[float] = None,
+            store_name: str = "Context Store",
         ) -> List[Dict]:
             fetch_k = max(top_k * 3, 15)
+            store_dir = str(getattr(store, "_dir", "unknown"))
+            total_vecs = getattr(getattr(store, "_index", None), "ntotal", 0)
+
+            logger.info(
+                f"[ROM Service Retrieval] {store_name}: Searching store at '{store_dir}' "
+                f"(total_vectors_in_store={total_vecs}, top_k={top_k}, min_similarity_threshold={min_score})"
+            )
+
+            if total_vecs == 0:
+                logger.warning(
+                    f"[ROM Service Retrieval] {store_name} returned 0 chunks → REASON: "
+                    f"Vector store is EMPTY (0 vectors loaded on disk at '{store_dir}'). "
+                    f"No documents have been ingested into this vector store repository for user_id='{user_id}'."
+                )
+                return []
 
             semantic_results = []
             try:
-                semantic_results = store.search(query_vec, k=fetch_k)
+                score_thresh = min_score if (min_score is not None and min_score > 0.0) else 0.0
+                if hasattr(store, "search_hybrid"):
+                    semantic_results = store.search_hybrid(query_vec, query_text=query, k=fetch_k, score_threshold=score_thresh, expand_neighbors=True)
+                else:
+                    semantic_results = store.search(query_vec, k=fetch_k, score_threshold=score_thresh)
+                for r in semantic_results:
+                    r["_similarity_score"] = float(r.get("score", 0.0))
             except Exception as e:
-                logger.warning(f"[ROM Service] Semantic search failed: {e}")
+                logger.warning(f"[ROM Service] Semantic search failed for {store_name}: {e}")
 
             keyword_results: List[Dict] = []
             if bm25_idx is not None:
                 try:
                     keyword_results = bm25_idx.search(query, k=fetch_k)
                 except Exception as e:
-                    logger.warning(f"[ROM Service] BM25 search failed: {e}")
+                    logger.warning(f"[ROM Service] BM25 search failed for {store_name}: {e}")
 
             metadata_results: List[Dict] = []
             try:
@@ -652,266 +1138,682 @@ class RomService:
                 all_metas = store._meta if hasattr(store, "_meta") else []
                 metadata_results = BM25Index.metadata_search(query_tokens, all_metas, k=fetch_k)
             except Exception as e:
-                logger.warning(f"[ROM Service] Metadata search failed: {e}")
+                logger.warning(f"[ROM Service] Metadata search failed for {store_name}: {e}")
 
             fused = _rrf_merge([semantic_results, keyword_results, metadata_results])
+
+            # Apply metadata relevance boosting to fused candidates
+            query_toks_set = set(_tokenize(query))
+            for r in fused:
+                boost = 0.0
+
+                # 1. Project name match (+0.10)
+                proj_names = r.get("project_names") or r.get("project_name") or []
+                if isinstance(proj_names, str):
+                    proj_names = [p.strip() for p in proj_names.split(",") if p.strip()]
+                if any(p.lower() in query.lower() for p in proj_names if p):
+                    boost += 0.10
+
+                # 2. Technical terms / entities overlap (+0.05 per match, max +0.15)
+                tech_terms = r.get("technical_terms") or r.get("technical_entities") or []
+                if isinstance(tech_terms, str):
+                    tech_terms = [t.strip() for t in tech_terms.split(",") if t.strip()]
+                matches = sum(1 for t in tech_terms if t and t.lower() in query_toks_set)
+                boost += min(0.15, matches * 0.05)
+
+                # 3. Topic / section / heading overlap (+0.08)
+                heading_text = " ".join(filter(None, [
+                    str(r.get("chapter") or r.get("main_topic") or ""),
+                    str(r.get("section") or r.get("sub_topic") or ""),
+                    str(r.get("heading") or r.get("topic") or ""),
+                ])).lower()
+                if heading_text:
+                    h_toks = set(_tokenize(heading_text))
+                    if h_toks.intersection(query_toks_set):
+                        boost += 0.08
+
+                # 4. Document name match (+0.10)
+                doc_name = str(r.get("document_name") or r.get("filename") or "").lower()
+                if doc_name and doc_name in query.lower():
+                    boost += 0.10
+
+                # 5. Date match (+0.05)
+                dates = r.get("dates") or r.get("date") or []
+                if isinstance(dates, str):
+                    dates = [d.strip() for d in dates.split(",") if d.strip()]
+                if any(d.lower() in query.lower() for d in dates if d):
+                    boost += 0.05
+
+                r["_boost"] = boost
+                if "_similarity_score" in r and r["_similarity_score"] is not None:
+                    r["_similarity_score"] = float(r["_similarity_score"]) + boost
+
+            fused = sorted(fused, key=lambda e: e.get("score", 0.0) + e.get("_boost", 0.0), reverse=True)
             diverse = _diversity_dedup(fused)
-            return diverse[:top_k]
 
-        total_points = len(discussion_points)
-        total_windows = math.ceil(total_points / discussion_window_size) if total_points > 0 else 0
+            # Apply minimum similarity threshold filtering if configured (min_score is not None)
+            selected_chunks = diverse
+            if min_score is not None and min_score > 0.0:
+                filtered = []
+                for r in diverse:
+                    sim_score = r.get("_similarity_score")
+                    if sim_score is None:
+                        txt = _extract_chunk_text(r)
+                        if txt:
+                            try:
+                                c_vec = embedder.encode([txt])[0]
+                                c_norm = np.linalg.norm(c_vec)
+                                if c_norm > 1e-9:
+                                    c_vec = c_vec / c_norm
+                                sim_score = float(np.dot(query_vec, c_vec)) + r.get("_boost", 0.0)
+                            except Exception:
+                                sim_score = 0.0
+                        else:
+                            sim_score = 0.0
+                        r["_similarity_score"] = sim_score
+                        r["score"] = sim_score
 
-        # Determine parallel concurrency limit (default: 2, min: 1, max: 5)
-        concurrency = parallel_window_processing
-        if concurrency is None:
-            concurrency = getattr(settings, "ROM_PARALLEL_WINDOW_PROCESSING", 2)
-        try:
-            concurrency = max(1, min(5, int(concurrency)))
-        except (ValueError, TypeError):
-            concurrency = 2
+                    if sim_score >= min_score:
+                        filtered.append(r)
+                selected_chunks = filtered
 
-        logger.info(
-            f"[ROM Service] Stage 2 starting: {total_points} point(s) across "
-            f"{total_windows} window(s) of size {discussion_window_size}"
-            f" | parallel_concurrency={concurrency}"
-        )
+            final_results = selected_chunks[:top_k]
 
-        def _process_single_enhance_window(win_idx_and_window):
-            win_idx, window = win_idx_and_window
-            win_num = win_idx + 1
-            logger.info(
-                f"[ROM Service] Processing Stage 2 Window {win_num}/{total_windows} "
-                f"({len(window)} points) [Parallel limit={concurrency}]"
-            )
+            # Diagnostic summary logging
+            cand_scores = [round(r.get("_similarity_score", r.get("score", 0.0)), 4) for r in diverse]
+            selected_scores = [round(r.get("_similarity_score", r.get("score", 0.0)), 4) for r in final_results]
 
-            # 1. Combine window â†’ single query
-            combined_query_parts = []
-            for p in window:
-                pt_text = p.get("discussion_point", "")
-                if p.get("required_information"):
-                    pt_text += " " + " ".join(p["required_information"])
-                if p.get("technical_terms"):
-                    pt_text += " " + " ".join(p["technical_terms"])
-                combined_query_parts.append(pt_text)
-
-            combined_query = " ".join(combined_query_parts).strip()
-
-            query_vecs = embedder.encode_batch([combined_query])
-            norms = np.linalg.norm(query_vecs, axis=1, keepdims=True)
-            norms = np.where(norms < 1e-9, 1.0, norms)
-            query_vec = (query_vecs / norms)[0]
-
-            # 2 & 3. Independent hybrid retrieval
-            meeting_results: List[Dict] = []
-            global_results: List[Dict] = []
-
-            if meeting_top_k > 0:
-                meeting_results = _hybrid_retrieve(
-                    combined_query, query_vec, meeting_store, meeting_bm25, meeting_top_k
-                )
-
-            if global_top_k > 0:
-                global_results = _hybrid_retrieve(
-                    combined_query, query_vec, global_store, global_bm25, global_top_k
-                )
-
-            # 4. Build context strings
-            meeting_context_parts: List[str] = []
-            meeting_filenames: List[str] = []
-            for res in meeting_results:
-                txt = _extract_chunk_text(res)
-                fn = res.get("filename") or res.get("document_name") or "Meeting Document"
-                if txt:
-                    meeting_context_parts.append(f"[{fn}]\n{txt}")
-                    if fn not in meeting_filenames:
-                        meeting_filenames.append(fn)
-
-            global_context_parts: List[str] = []
-            global_filenames: List[str] = []
-            for res in global_results:
-                txt = _extract_chunk_text(res)
-                fn = res.get("filename") or res.get("document_name") or "Global Document"
-                if txt:
-                    global_context_parts.append(f"[{fn}]\n{txt}")
-                    if fn not in global_filenames:
-                        global_filenames.append(fn)
-
-            meeting_context_str = "\n\n".join(meeting_context_parts)
-            global_context_str = "\n\n".join(global_context_parts)
-
-            # 5. Prepare window JSON for LLM
-            window_for_llm = json.dumps(
-                [
-                    {
-                        "id": p.get("id"),
-                        "discussion_point": p.get("discussion_point"),
-                        "timeline_start": p.get("timeline_start", 0.0),
-                        "timeline_end": p.get("timeline_end", 0.0),
-                        "speakers": p.get("speakers", []),
-                        "technical_terms": p.get("technical_terms", []),
-                        "decisions": p.get("decisions", []),
-                        "action_items": [
-                            normalize_action_item(a)
-                            for a in p.get("action_items", [])
-                            if normalize_action_item(a)["task"]
-                        ],
-                    }
-                    for p in window
-                ],
-                ensure_ascii=False,
-            )
-
-            # 6. LLM call
-            result = provider.enhance_rom_discussion_window(
-                window_json=window_for_llm,
-                meeting_context=meeting_context_str,
-                global_context=global_context_str,
-            )
-            enhanced_batch = result.get("enhanced_points", [])
-
-            # 7. Post-process enhanced batch
-            batch_by_id = {p.get("id"): p for p in window}
-            window_polished: List[Dict] = []
-
-            for ep in enhanced_batch:
-                ep["id"] = str(uuid.uuid4())
-
-                orig_ids = ep.get("original_point_ids")
-                if isinstance(orig_ids, str):
-                    orig_ids = [orig_ids]
-                elif not isinstance(orig_ids, list):
-                    orig_ids = []
-                if not orig_ids:
-                    orig_ids = [p.get("id") for p in window if p.get("id")]
-
-                matched_points = [batch_by_id[oid] for oid in orig_ids if oid in batch_by_id]
-                if not matched_points:
-                    matched_points = window
-                    orig_ids = [p.get("id") for p in window if p.get("id")]
-
-                t_start = min(m.get("timeline_start", 0.0) for m in matched_points)
-                t_end = max(m.get("timeline_end", 0.0) for m in matched_points)
-                speakers = list(
-                    dict.fromkeys(
-                        spk for m in matched_points for spk in m.get("speakers", []) if spk
+            if not final_results:
+                if not diverse:
+                    logger.warning(
+                        f"[ROM Service Retrieval] {store_name} returned 0 chunks → REASON: "
+                        f"ChromaDB and BM25 found 0 matching candidates for query (store has {total_vecs} vectors at '{store_dir}')."
                     )
+                else:
+                    max_sc = max(cand_scores) if cand_scores else 0.0
+                    logger.warning(
+                        f"[ROM Service Retrieval] {store_name} returned 0 chunks → REASON: "
+                        f"{len(diverse)} candidate chunk(s) found with scores {cand_scores}, but ALL were filtered out "
+                        f"because they were below min_similarity_threshold={min_score} (highest score was {max_sc}). "
+                        f"Try lowering min_similarity_threshold in settings."
+                    )
+            else:
+                logger.info(
+                    f"[ROM Service Retrieval] {store_name} returned {len(final_results)} chunk(s) "
+                    f"out of {len(diverse)} candidate(s). Scores: {selected_scores}"
                 )
 
-                ep["original_point_ids"] = orig_ids
-                ep["original_point_id"] = orig_ids[0] if orig_ids else "N/A"
-                ep["timeline_start"] = t_start
-                ep["timeline_end"] = t_end
-                ep["speakers"] = speakers
-
-                if "enhanced_text" in ep and "polished_text" not in ep:
-                    ep["polished_text"] = ep.pop("enhanced_text")
-
-                ep.setdefault("action_owner", None)
-                ep.setdefault("decisions", [])
-                ep.setdefault("technical_terms", [])
-                ep["dates"] = clean_calendar_dates(ep.get("dates", []))
-                ep.setdefault("numbers", [])
-                ep.setdefault("references", [])
-                raw_acts = ep.get("action_items", [])
-                if not isinstance(raw_acts, list):
-                    raw_acts = [raw_acts] if raw_acts else []
-                ep["action_items"] = [
-                    normalize_action_item(a) for a in raw_acts if normalize_action_item(a)["task"]
-                ]
-
-                cur = ep.get("context_usage_report")
-                if not isinstance(cur, dict):
-                    cur = {}
-                ep["context_usage_report"] = {
-                    "verified": bool(cur.get("verified", False)),
-                    "technical_details_added": bool(cur.get("technical_details_added", False)),
-                    "abbreviations_expanded": bool(cur.get("abbreviations_expanded", False)),
-                    "references_added": bool(cur.get("references_added", False)),
-                    "terminology_clarified": bool(cur.get("terminology_clarified", False)),
-                    "no_useful_context": bool(
-                        cur.get("no_useful_context", not meeting_context_str and not global_context_str)
-                    ),
-                    "meeting_context_docs": (
-                        cur.get("meeting_context_docs")
-                        if isinstance(cur.get("meeting_context_docs"), list)
-                        else meeting_filenames
-                    ),
-                    "global_context_docs": (
-                        cur.get("global_context_docs")
-                        if isinstance(cur.get("global_context_docs"), list)
-                        else global_filenames
-                    ),
-                }
-
-                ep["retrieved_context"] = {
-                    "meeting_chunks": [
-                        {
-                            "text": _extract_chunk_text(r),
-                            "score": float(r.get("score", 0.0)),
-                            "filename": r.get("filename") or r.get("document_name") or "Meeting Document",
-                        }
-                        for r in meeting_results
-                    ],
-                    "global_chunks": [
-                        {
-                            "text": _extract_chunk_text(r),
-                            "score": float(r.get("score", 0.0)),
-                            "filename": r.get("filename") or r.get("document_name") or "Global Document",
-                        }
-                        for r in global_results
-                    ],
-                    "context_usage_report": ep["context_usage_report"],
-                }
-
-                window_polished.append(ep)
-
-            return win_idx, window_polished
-
-        window_batches = []
-        for win_start in range(0, total_points, discussion_window_size):
-            win_idx = len(window_batches)
-            window = discussion_points[win_start: win_start + discussion_window_size]
-            window_batches.append((win_idx, window))
-
-        window_results_map: Dict[int, List[Dict]] = {}
+            return final_results
 
         try:
-            if concurrency == 1 or total_windows <= 1:
-                for item in window_batches:
-                    win_idx = item[0]
-                    try:
-                        idx, pts = _process_single_enhance_window(item)
-                        window_results_map[idx] = pts
-                    except Exception as w_err:
-                        logger.error(f"[ROM Service] Stage 2 Window {win_idx+1} failed ({w_err}). Continuing remaining windows...", exc_info=True)
-                        # Fallback to original window points unenhanced
-                        window_results_map[win_idx] = [
-                            {
-                                "id": str(uuid.uuid4()),
-                                "polished_text": p.get("discussion_point", ""),
-                                "timeline_start": p.get("timeline_start", 0.0),
-                                "timeline_end": p.get("timeline_end", 0.0),
-                                "speakers": p.get("speakers", []),
-                                "technical_terms": p.get("technical_terms", []),
-                                "decisions": p.get("decisions", []),
-                                "action_items": p.get("action_items", []),
-                                "dates": [],
-                            }
-                            for p in item[1]
-                        ]
-            else:
-                with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                    future_to_win = {
-                        executor.submit(_process_single_enhance_window, item): item[0]
-                        for item in window_batches
+            total_points = len(discussion_points)
+
+            # ── "Process All Together" path ──────────────────────────────────────────
+            if process_all_together:
+                logger.info(
+                    f"[ROM Service] Stage 2 'Process All Together' mode: {total_points} point(s) "
+                    f"in a single LLM call"
+                    f" | meeting_store_vecs={getattr(getattr(meeting_store, '_index', None), 'ntotal', 0)}"
+                    f" | global_store_vecs={getattr(getattr(global_store, '_index', None), 'ntotal', 0)}"
+                )
+
+                # 1. Build combined query from ALL points
+                all_query_parts = []
+                for p in discussion_points:
+                    pt_text = str(p.get("discussion_point") or "")
+                    tech_terms = p.get("technical_terms")
+                    if isinstance(tech_terms, list):
+                        clean_terms = [str(t).strip() for t in tech_terms if t is not None and str(t).strip()]
+                        if clean_terms:
+                            pt_text += " " + " ".join(clean_terms)
+                    all_query_parts.append(pt_text)
+                combined_query = " ".join(all_query_parts).strip()
+
+                query_vecs = embedder.encode_batch([combined_query])
+                norms = np.linalg.norm(query_vecs, axis=1, keepdims=True)
+                norms = np.where(norms < 1e-9, 1.0, norms)
+                query_vec = (query_vecs / norms)[0]
+
+                # 2. Single retrieval pass
+                meeting_results: List[Dict] = []
+                global_results: List[Dict] = []
+                previous_meeting_results: List[Dict] = []
+
+                if meeting_top_k > 0:
+                    meeting_results = _hybrid_retrieve(
+                        combined_query, query_vec, meeting_store, meeting_bm25, meeting_top_k,
+                        min_score=min_similarity_threshold, store_name="Meeting Context (All Together)"
+                    )
+                if global_top_k > 0:
+                    global_results = _hybrid_retrieve(
+                        combined_query, query_vec, global_store, global_bm25, global_top_k,
+                        min_score=min_similarity_threshold, store_name="Global Context (All Together)"
+                    )
+                if previous_meeting_mode != "off" and previous_meeting_top_k > 0:
+                    previous_meeting_results = self.retrieve_previous_stage2_context(
+                        query=combined_query,
+                        query_vec=query_vec,
+                        user_id=user_id,
+                        current_recording_id=recording_id,
+                        previous_meeting_id=previous_meeting_id if previous_meeting_mode == "select" else None,
+                        top_k=previous_meeting_top_k,
+                        min_similarity_threshold=min_similarity_threshold,
+                    )
+
+                logger.info(
+                    f"[ROM Service] Stage 2 'All Together' context retrieval: "
+                    f"meeting_chunks={len(meeting_results)}, global_chunks={len(global_results)}, "
+                    f"previous_meeting_chunks={len(previous_meeting_results)}"
+                )
+
+                # 3. Build context strings
+                meeting_context_parts: List[str] = []
+                for res in meeting_results:
+                    txt = _extract_chunk_text(res)
+                    fn = res.get("filename") or res.get("document_name") or "Meeting Document"
+                    if txt:
+                        meeting_context_parts.append(f"[{fn}]\n{txt}")
+                global_context_parts: List[str] = []
+                for res in global_results:
+                    txt = _extract_chunk_text(res)
+                    fn = res.get("filename") or res.get("document_name") or "Global Document"
+                    if txt:
+                        global_context_parts.append(f"[{fn}]\n{txt}")
+                meeting_context_str = "\n\n".join(meeting_context_parts)
+                global_context_str = "\n\n".join(global_context_parts)
+                previous_meeting_context_str = self._format_previous_stage2_context(previous_meeting_results)
+
+                # 4. Prepare all points JSON (streamlined: only id, discussion_point, speakers, action_owner)
+                points_for_llm = json.dumps(
+                    [
+                        {
+                            "id": p.get("id"),
+                            "discussion_point": p.get("discussion_point"),
+                            "speakers": p.get("speakers", []),
+                            "action_owner": p.get("action_owner") or None,
+                        }
+                        for p in discussion_points
+                    ],
+                    ensure_ascii=False,
+                )
+                logger.info(
+                    f"[Stage1\u2192Stage2] 'All Together': sending {total_points} point(s) to LLM "
+                    f"(fields: id, discussion_point, speakers, action_owner)"
+                )
+
+                # 5. Single LLM call
+                result = provider.enhance_rom_all_points_together(
+                    points_json=points_for_llm,
+                    meeting_context=meeting_context_str,
+                    global_context=global_context_str,
+                    previous_meeting_context=previous_meeting_context_str,
+                    reference_example_points=reference_example_points,
+                )
+                enhanced_batch = result.get("enhanced_points", [])
+                logger.info(
+                    f"[Stage2→Schema] 'All Together': LLM returned {len(enhanced_batch)} point(s) "
+                    f"from {total_points} input (fields: {list(enhanced_batch[0].keys()) if enhanced_batch else 'none'})"
+                )
+
+                # 6. Post-process: set polished_text from LLM's discussion_point, map metadata from Stage 1
+                batch_by_id = {p.get("id"): p for p in discussion_points}
+                polished_points: List[Dict] = []
+
+                for ep in enhanced_batch:
+                    ep["id"] = str(uuid.uuid4())
+
+                    orig_ids = ep.get("original_point_ids")
+                    if isinstance(orig_ids, str):
+                        orig_ids = [orig_ids]
+                    elif not isinstance(orig_ids, list):
+                        orig_ids = []
+                    if not orig_ids:
+                        orig_ids = [p.get("id") for p in discussion_points if p.get("id")]
+
+                    matched_points = [batch_by_id[oid] for oid in orig_ids if oid in batch_by_id]
+                    if not matched_points:
+                        matched_points = discussion_points
+                        orig_ids = [p.get("id") for p in discussion_points if p.get("id")]
+
+                    t_start = min(m.get("timeline_start", 0.0) for m in matched_points)
+                    t_end = max(m.get("timeline_end", 0.0) for m in matched_points)
+                    speakers = ep.get("speakers") or list(
+                        dict.fromkeys(
+                            spk for m in matched_points for spk in (m.get("speakers") or []) if spk
+                        )
+                    )
+
+                    ep["original_point_ids"] = orig_ids
+                    ep["original_point_id"] = orig_ids[0] if orig_ids else "N/A"
+                    ep["timeline_start"] = t_start
+                    ep["timeline_end"] = t_end
+                    ep["speakers"] = speakers
+
+                    # ── Normalise text field: LLM now returns discussion_point; fall back for compat ──
+                    ep_text = (
+                        ep.get("discussion_point")
+                        or ep.get("polished_text")
+                        or ep.get("enhanced_text")
+                        or ""
+                    )
+                    ep["polished_text"] = ep_text          # downstream field used by Stage 3
+                    ep["discussion_point"] = ep_text        # keep alias for consistency
+                    ep.pop("enhanced_text", None)           # remove old alias if present
+
+                    # ── Reconstruct metadata from matched Stage 1 points (never from LLM) ──
+                    ep.setdefault("technical_terms", list(dict.fromkeys(
+                        t for m in matched_points for t in (m.get("technical_terms") or []) if t
+                    )))
+                    ep["dates"] = clean_calendar_dates(list(dict.fromkeys(
+                        d for m in matched_points for d in (m.get("dates") or []) if d
+                    )))
+                    ep.setdefault("numbers", list(dict.fromkeys(
+                        n for m in matched_points for n in (m.get("numbers") or []) if n
+                    )))
+                    ep.setdefault("references", list(dict.fromkeys(
+                        r for m in matched_points for r in (m.get("references") or []) if r
+                    )))
+
+                    # Carry over action items / action_owner depending on mode
+                    if separate_action_extraction:
+                        inherited_actions = []
+                        for m in matched_points:
+                            for a in (m.get("action_items") or []):
+                                norm = normalize_stage2_action_item(a)
+                                if norm["task"]:
+                                    inherited_actions.append(norm)
+                        ep.setdefault("action_items", inherited_actions)
+                        ep.setdefault("action_owner", None)
+                    else:
+                        # Default (embedded) mode: no action_items list; carry action_owner forward.
+                        ep["action_items"] = []
+                        # Prefer action_owner from LLM output, then from the best matched Stage 1 point.
+                        if not ep.get("action_owner"):
+                            for m in matched_points:
+                                if m.get("action_owner"):
+                                    ep["action_owner"] = m["action_owner"]
+                                    break
+                        if not ep.get("action_owner"):
+                            ep["action_owner"] = None
+
+                    ep["context_usage_report"] = {
+                        "meeting_context_used": bool(meeting_context_str),
+                        "global_context_used": bool(global_context_str),
+                        "previous_meeting_context_used": bool(previous_meeting_context_str),
+                        "context_added": bool(meeting_context_str or global_context_str or previous_meeting_context_str),
+                        "documents": [],
                     }
-                    for future in as_completed(future_to_win):
-                        win_idx = future_to_win[future]
+                    ep["retrieved_context"] = {
+                        "meeting_chunks": [
+                            {
+                                "text": _extract_chunk_text(r),
+                                "score": float(r.get("score", 0.0)),
+                                "filename": r.get("filename") or "Meeting Document",
+                            }
+                            for r in meeting_results
+                        ],
+                        "global_chunks": [
+                            {
+                                "text": _extract_chunk_text(r),
+                                "score": float(r.get("score", 0.0)),
+                                "filename": r.get("filename") or "Global Document",
+                            }
+                            for r in global_results
+                        ],
+                        "previous_meeting_chunks": [
+                            {
+                                "text": (r.get("_text") or r.get("text") or "").strip(),
+                                "score": float(r.get("score", 0.0)),
+                                "meeting_id": r.get("meeting_id") or "",
+                                "meeting_name": r.get("meeting_name") or "Previous Meeting",
+                                "date": r.get("date") or "",
+                                "speakers": r.get("speakers") or "",
+                                "action_owner": r.get("action_owner") or "",
+                            }
+                            for r in previous_meeting_results
+                        ],
+                        "context_usage_report": ep["context_usage_report"],
+                    }
+
+                    polished_points.append(ep)
+
+                # ── Separate action-point processing for "All Together" mode ──────────
+                if separate_action_extraction and polished_points:
+                    polished_points = self._enhance_action_points_separately(
+                        polished_points=polished_points,
+                        discussion_points=discussion_points,
+                        discussion_window_size=discussion_window_size,
+                        provider=provider,
+                        embedder=embedder,
+                        meeting_store=meeting_store,
+                        global_store=global_store,
+                        meeting_bm25=meeting_bm25,
+                        global_bm25=global_bm25,
+                        meeting_top_k=meeting_top_k,
+                        global_top_k=global_top_k,
+                        min_similarity_threshold=min_similarity_threshold,
+                        _hybrid_retrieve=_hybrid_retrieve,
+                    )
+
+            # Continue to validation and deduplication (same as windowed path)
+            # — handled below after the windowed path block
+
+            # ── Existing windowed path ───────────────────────────────────────────────
+            else:
+                total_windows = math.ceil(total_points / discussion_window_size) if total_points > 0 else 0
+
+                # Determine parallel concurrency limit (default: 2, min: 1, max: 5)
+                concurrency = parallel_window_processing
+                if concurrency is None:
+                    concurrency = getattr(settings, "ROM_PARALLEL_WINDOW_PROCESSING", 2)
+                try:
+                    concurrency = max(1, min(5, int(concurrency)))
+                except (ValueError, TypeError):
+                    concurrency = 2
+
+                logger.info(
+                    f"[ROM Service] Stage 2 starting: {total_points} point(s) across "
+                    f"{total_windows} window(s) of size {discussion_window_size}"
+                    f" | parallel_concurrency={concurrency}"
+                    f" | meeting_store_vecs={getattr(getattr(meeting_store, '_index', None), 'ntotal', 0)}"
+                    f" | global_store_vecs={getattr(getattr(global_store, '_index', None), 'ntotal', 0)}"
+                )
+
+                def _process_single_enhance_window(win_idx_and_window):
+                    win_idx, window = win_idx_and_window
+                    win_num = win_idx + 1
+                    logger.info(
+                        f"[ROM Service] Processing Stage 2 Window {win_num}/{total_windows} "
+                        f"({len(window)} points) [Parallel limit={concurrency}]"
+                    )
+
+                    # 1. Combine window → single query
+                    combined_query_parts = []
+                    for p in window:
+                        pt_text = str(p.get("discussion_point") or "")
+                        tech_terms = p.get("technical_terms")
+                        if isinstance(tech_terms, list):
+                            clean_terms = [str(t).strip() for t in tech_terms if t is not None and str(t).strip()]
+                            if clean_terms:
+                                pt_text += " " + " ".join(clean_terms)
+                        combined_query_parts.append(pt_text)
+
+                    combined_query = " ".join(combined_query_parts).strip()
+
+                    query_vecs = embedder.encode_batch([combined_query])
+                    norms = np.linalg.norm(query_vecs, axis=1, keepdims=True)
+                    norms = np.where(norms < 1e-9, 1.0, norms)
+                    query_vec = (query_vecs / norms)[0]
+
+                    # 2 & 3. Independent hybrid retrieval
+                    meeting_results: List[Dict] = []
+                    global_results: List[Dict] = []
+                    previous_meeting_results: List[Dict] = []
+
+                    if meeting_top_k > 0:
+                        meeting_results = _hybrid_retrieve(
+                            combined_query, query_vec, meeting_store, meeting_bm25, meeting_top_k,
+                            min_score=min_similarity_threshold, store_name="Meeting Context"
+                        )
+                    else:
+                        logger.info("[ROM Service Retrieval] Meeting Context: skipped (meeting_top_k=0)")
+
+                    if global_top_k > 0:
+                        global_results = _hybrid_retrieve(
+                            combined_query, query_vec, global_store, global_bm25, global_top_k,
+                            min_score=min_similarity_threshold, store_name="Global Context"
+                        )
+                    else:
+                        logger.info("[ROM Service Retrieval] Global Context: skipped (global_top_k=0)")
+
+                    if previous_meeting_mode != "off" and previous_meeting_top_k > 0:
+                        previous_meeting_results = self.retrieve_previous_stage2_context(
+                            query=combined_query,
+                            query_vec=query_vec,
+                            user_id=user_id,
+                            current_recording_id=recording_id,
+                            previous_meeting_id=previous_meeting_id if previous_meeting_mode == "select" else None,
+                            top_k=previous_meeting_top_k,
+                            min_similarity_threshold=min_similarity_threshold,
+                        )
+
+                    logger.info(
+                        f"[ROM Service] Stage 2 Window {win_num}/{total_windows} context retrieval: "
+                        f"meeting_chunks={len(meeting_results)}, global_chunks={len(global_results)}, "
+                        f"previous_meeting_chunks={len(previous_meeting_results)} "
+                        f"(meeting_top_k={meeting_top_k}, global_top_k={global_top_k}, "
+                        f"min_similarity={min_similarity_threshold})"
+                    )
+
+                    # 4. Build context strings
+                    meeting_context_parts: List[str] = []
+                    meeting_filenames: List[str] = []
+                    for res in meeting_results:
+                        txt = _extract_chunk_text(res)
+                        fn = res.get("filename") or res.get("document_name") or "Meeting Document"
+                        if txt:
+                            meeting_context_parts.append(f"[{fn}]\n{txt}")
+                            if fn not in meeting_filenames:
+                                meeting_filenames.append(fn)
+
+                    global_context_parts: List[str] = []
+                    global_filenames: List[str] = []
+                    for res in global_results:
+                        txt = _extract_chunk_text(res)
+                        fn = res.get("filename") or res.get("document_name") or "Global Document"
+                        if txt:
+                            global_context_parts.append(f"[{fn}]\n{txt}")
+                            if fn not in global_filenames:
+                                global_filenames.append(fn)
+
+                    meeting_context_str = "\n\n".join(meeting_context_parts)
+                    global_context_str = "\n\n".join(global_context_parts)
+                    previous_meeting_context_str = self._format_previous_stage2_context(previous_meeting_results)
+
+                    # 5. Prepare window JSON for LLM (streamlined: only id, discussion_point, speakers, action_owner)
+                    window_for_llm = json.dumps(
+                        [
+                            {
+                                "id": p.get("id"),
+                                "discussion_point": p.get("discussion_point"),
+                                "speakers": p.get("speakers", []),
+                                "action_owner": p.get("action_owner") or None,
+                            }
+                            for p in window
+                        ],
+                        ensure_ascii=False,
+                    )
+                    logger.info(
+                        f"[Stage1\u2192Stage2] Window {win_num}/{total_windows}: sending {len(window)} point(s) to LLM "
+                        f"(fields: id, discussion_point, speakers, action_owner)"
+                    )
+
+                    # 6. LLM call
+                    result = provider.enhance_rom_discussion_window(
+                        window_json=window_for_llm,
+                        meeting_context=meeting_context_str,
+                        global_context=global_context_str,
+                        previous_meeting_context=previous_meeting_context_str,
+                        separate_action_extraction=separate_action_extraction,
+                        reference_example_points=reference_example_points,
+                        use_dspy_mode=use_dspy_mode,
+                    )
+                    enhanced_batch = result.get("enhanced_points", [])
+                    logger.info(
+                        f"[Stage2\u2192Schema] Window {win_num}/{total_windows}: LLM returned {len(enhanced_batch)} point(s) "
+                        f"from {len(window)} input (fields: {list(enhanced_batch[0].keys()) if enhanced_batch else 'none'})"
+                    )
+                    if not enhanced_batch:
+                        logger.warning(
+                            f"[ROM Service] Stage 2 Window {win_num}/{total_windows} got 0 enhanced points! "
+                            f"Full result dict returned by provider: {result}"
+                        )
+
+                    # 7. Post-process enhanced batch: map metadata back from matched Stage 1 points
+                    batch_by_id = {p.get("id"): p for p in window}
+                    window_polished: List[Dict] = []
+
+                    for ep in enhanced_batch:
+                        ep["id"] = str(uuid.uuid4())
+
+                        orig_ids = ep.get("original_point_ids")
+                        if isinstance(orig_ids, str):
+                            orig_ids = [orig_ids]
+                        elif not isinstance(orig_ids, list):
+                            orig_ids = []
+                        if not orig_ids:
+                            orig_ids = [p.get("id") for p in window if p.get("id")]
+
+                        matched_points = [batch_by_id[oid] for oid in orig_ids if oid in batch_by_id]
+                        if not matched_points:
+                            matched_points = window
+                            orig_ids = [p.get("id") for p in window if p.get("id")]
+
+                        t_start = min(m.get("timeline_start", 0.0) for m in matched_points)
+                        t_end = max(m.get("timeline_end", 0.0) for m in matched_points)
+                        speakers = ep.get("speakers") or list(
+                            dict.fromkeys(
+                                spk for m in matched_points for spk in (m.get("speakers") or []) if spk
+                            )
+                        )
+
+                        ep["original_point_ids"] = orig_ids
+                        ep["original_point_id"] = orig_ids[0] if orig_ids else "N/A"
+                        ep["timeline_start"] = t_start
+                        ep["timeline_end"] = t_end
+                        ep["speakers"] = speakers
+
+                        # ── Normalise text field: LLM now returns discussion_point; fall back for compat ──
+                        ep_text = (
+                            ep.get("discussion_point")
+                            or ep.get("polished_text")
+                            or ep.get("enhanced_text")
+                            or ""
+                        )
+                        ep["polished_text"] = ep_text          # downstream field used by Stage 3
+                        ep["discussion_point"] = ep_text        # keep alias for consistency
+                        ep.pop("enhanced_text", None)           # remove old alias if present
+
+                        # ── Reconstruct metadata from matched Stage 1 points (never from LLM) ──
+                        ep["technical_terms"] = list(dict.fromkeys(
+                            t for m in matched_points for t in (m.get("technical_terms") or []) if t
+                        ))
+                        ep["dates"] = clean_calendar_dates(list(dict.fromkeys(
+                            d for m in matched_points for d in (m.get("dates") or []) if d
+                        )))
+                        ep["numbers"] = list(dict.fromkeys(
+                            n for m in matched_points for n in (m.get("numbers") or []) if n
+                        ))
+                        ep["references"] = list(dict.fromkeys(
+                            r for m in matched_points for r in (m.get("references") or []) if r
+                        ))
+
+                        if separate_action_extraction:
+                            # Separate mode: normalize action_items[] from LLM output, or inherit from matched points
+                            raw_acts = ep.get("action_items", [])
+                            if not isinstance(raw_acts, list):
+                                raw_acts = [raw_acts] if raw_acts else []
+                            acts = [
+                                normalize_stage2_action_item(a) for a in raw_acts if normalize_stage2_action_item(a)["task"]
+                            ]
+                            if not acts:
+                                for m in matched_points:
+                                    for a in (m.get("action_items") or []):
+                                        norm = normalize_stage2_action_item(a)
+                                        if norm["task"]:
+                                            acts.append(norm)
+                            ep["action_items"] = acts
+                            ep.setdefault("action_owner", None)
+                        else:
+                            # Default (embedded) mode: no action_items list; carry action_owner forward.
+                            ep["action_items"] = []
+                            # Prefer action_owner from LLM output, then from matched Stage 1 points.
+                            if not ep.get("action_owner"):
+                                for m in matched_points:
+                                    if m.get("action_owner"):
+                                        ep["action_owner"] = m["action_owner"]
+                                        break
+                            if not ep.get("action_owner"):
+                                ep["action_owner"] = None
+
+
+                        cur = ep.get("context_usage_report")
+                        if not isinstance(cur, dict):
+                            cur = {}
+
+                        m_used = bool(cur.get("meeting_context_used", bool(meeting_context_str)))
+                        g_used = bool(cur.get("global_context_used", bool(global_context_str)))
+                        p_used = bool(previous_meeting_context_str)
+                        c_added = bool(cur.get("context_added", cur.get("verified", False) or cur.get("technical_details_added", False) or cur.get("terminology_clarified", False))) or p_used
+
+                        docs = cur.get("documents")
+                        if not isinstance(docs, list):
+                            docs = cur.get("meeting_context_docs", []) + cur.get("global_context_docs", [])
+                            if not docs:
+                                docs = meeting_filenames + global_filenames
+                        docs = list(dict.fromkeys(str(d) for d in docs if d))
+
+                        ep["context_usage_report"] = {
+                            "meeting_context_used": m_used,
+                            "global_context_used": g_used,
+                            "previous_meeting_context_used": p_used,
+                            "context_added": c_added,
+                            "documents": docs,
+                        }
+
+                        ep["retrieved_context"] = {
+                            "meeting_chunks": [
+                                {
+                                    "text": _extract_chunk_text(r),
+                                    "score": float(r.get("score", 0.0)),
+                                    "filename": r.get("filename") or r.get("document_name") or "Meeting Document",
+                                }
+                                for r in meeting_results
+                            ],
+                            "global_chunks": [
+                                {
+                                    "text": _extract_chunk_text(r),
+                                    "score": float(r.get("score", 0.0)),
+                                    "filename": r.get("filename") or r.get("document_name") or "Global Document",
+                                }
+                                for r in global_results
+                            ],
+                            "previous_meeting_chunks": [
+                                {
+                                    "text": (r.get("_text") or r.get("text") or "").strip(),
+                                    "score": float(r.get("score", 0.0)),
+                                    "meeting_id": r.get("meeting_id") or "",
+                                    "meeting_name": r.get("meeting_name") or "Previous Meeting",
+                                    "date": r.get("date") or "",
+                                    "speakers": r.get("speakers") or "",
+                                    "action_owner": r.get("action_owner") or "",
+                                }
+                                for r in previous_meeting_results
+                            ],
+                            "context_usage_report": ep["context_usage_report"],
+                        }
+
+                        window_polished.append(ep)
+
+                    return win_idx, window_polished
+
+                window_batches = []
+                for win_start in range(0, total_points, discussion_window_size):
+                    win_idx = len(window_batches)
+                    window = discussion_points[win_start: win_start + discussion_window_size]
+                    window_batches.append((win_idx, window))
+
+                window_results_map: Dict[int, List[Dict]] = {}
+
+                if concurrency == 1 or total_windows <= 1:
+                    for item in window_batches:
+                        win_idx = item[0]
                         try:
-                            idx, pts = future.result()
+                            idx, pts = _process_single_enhance_window(item)
                             window_results_map[idx] = pts
                         except Exception as w_err:
                             logger.error(f"[ROM Service] Stage 2 Window {win_idx+1} failed ({w_err}). Continuing remaining windows...", exc_info=True)
+                            # Fallback to original window points unenhanced
                             window_results_map[win_idx] = [
                                 {
                                     "id": str(uuid.uuid4()),
@@ -920,18 +1822,219 @@ class RomService:
                                     "timeline_end": p.get("timeline_end", 0.0),
                                     "speakers": p.get("speakers", []),
                                     "technical_terms": p.get("technical_terms", []),
-                                    "decisions": p.get("decisions", []),
-                                    "action_items": p.get("action_items", []),
+                                    "action_items": p.get("action_items", []) if separate_action_extraction else [],
+                                    "action_owner": p.get("action_owner") if not separate_action_extraction else None,
                                     "dates": [],
                                 }
-                                for item in window_batches if item[0] == win_idx for p in item[1]
+                                for p in item[1]
                             ]
+                else:
+                    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                        future_to_win = {
+                            executor.submit(_process_single_enhance_window, item): item[0]
+                            for item in window_batches
+                        }
+                        for future in as_completed(future_to_win):
+                            win_idx = future_to_win[future]
+                            try:
+                                idx, pts = future.result()
+                                window_results_map[idx] = pts
+                            except Exception as w_err:
+                                logger.error(f"[ROM Service] Stage 2 Window {win_idx+1} failed ({w_err}). Continuing remaining windows...", exc_info=True)
+                                window_results_map[win_idx] = [
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "polished_text": p.get("discussion_point", ""),
+                                        "timeline_start": p.get("timeline_start", 0.0),
+                                        "timeline_end": p.get("timeline_end", 0.0),
+                                        "speakers": p.get("speakers", []),
+                                        "technical_terms": p.get("technical_terms", []),
+                                        "action_items": p.get("action_items", []) if separate_action_extraction else [],
+                                        "action_owner": p.get("action_owner") if not separate_action_extraction else None,
+                                        "dates": [],
+                                    }
+                                    for item in window_batches if item[0] == win_idx for p in item[1]
+                                ]
 
-            # Re-assemble polished points preserving original window chronological order
-            polished_points: List[Dict] = []
-            for win_idx in range(len(window_batches)):
-                pts = window_results_map.get(win_idx, [])
-                polished_points.extend(pts)
+                # Re-assemble polished points preserving original window chronological order
+                polished_points: List[Dict] = []
+                for win_idx in range(len(window_batches)):
+                    pts = window_results_map.get(win_idx, [])
+                    polished_points.extend(pts)
+
+                # ── Separate action-point processing for windowed path ─────────────────
+                if separate_action_extraction and polished_points:
+                    polished_points = self._enhance_action_points_separately(
+                        polished_points=polished_points,
+                        discussion_points=discussion_points,
+                        discussion_window_size=discussion_window_size,
+                        provider=provider,
+                        embedder=embedder,
+                        meeting_store=meeting_store,
+                        global_store=global_store,
+                        meeting_bm25=meeting_bm25,
+                        global_bm25=global_bm25,
+                        meeting_top_k=meeting_top_k,
+                        global_top_k=global_top_k,
+                        min_similarity_threshold=min_similarity_threshold,
+                        _hybrid_retrieve=_hybrid_retrieve,
+                    )
+
+            # ── Stage 2 Validation Pass ──────────────────────────────────────────
+            # Build a plain-text transcript for validation prompts (only if transcript was passed)
+            validation_transcript_text: Optional[str] = None
+            if transcript:
+                try:
+                    lines = []
+                    for seg in transcript:
+                        spk = seg.get("speaker_label") or seg.get("speaker") or "Speaker"
+                        txt = (seg.get("text") or "").strip()
+                        if txt:
+                            lines.append(f"[{spk}]: {txt}")
+                    validation_transcript_text = "\n".join(lines)
+                except Exception as _te:
+                    logger.warning(f"[ROM Service] Stage 2 Validation: failed to build transcript text: {_te}")
+
+            if validation_transcript_text and polished_points:
+                total_val_points = len(polished_points)
+                logger.info(
+                    f"[ROM Service] Stage 2 Validation Pass starting: {total_val_points} point(s) to validate"
+                )
+
+                valid_points: List[Dict] = []
+                invalid_points: List[Dict] = []
+                invalid_indices: List[int] = []  # original positions in polished_points
+
+                for val_idx, p in enumerate(polished_points):
+                    pt_text = p.get("polished_text") or p.get("enhanced_text") or ""
+                    if not pt_text.strip():
+                        # Empty text → treat as valid (keeps passthrough behaviour)
+                        valid_points.append(p)
+                        logger.info(
+                            f"[ROM Service] Stage 2 Validation [{val_idx + 1}/{total_val_points}]: "
+                            f"SKIP (empty text) → KEEP"
+                        )
+                        continue
+
+                    try:
+                        is_valid = provider.validate_stage2_point(pt_text, validation_transcript_text)
+                    except Exception as _ve:
+                        logger.warning(
+                            f"[ROM Service] Stage 2 Validation [{val_idx + 1}/{total_val_points}]: "
+                            f"LLM error ({_ve}) → defaulting to KEEP"
+                        )
+                        is_valid = True
+
+                    verdict = "VALID" if is_valid else "INVALID"
+                    logger.info(
+                        f"[ROM Service] Stage 2 Validation [{val_idx + 1}/{total_val_points}]: {verdict} — "
+                        f"{pt_text[:80]!r}{'...' if len(pt_text) > 80 else ''}"
+                    )
+
+                    if is_valid:
+                        valid_points.append(p)
+                    else:
+                        invalid_points.append(p)
+                        invalid_indices.append(val_idx)
+
+                valid_count = len(valid_points)
+                invalid_count = len(invalid_points)
+                val_pct = round(valid_count / total_val_points * 100, 1) if total_val_points > 0 else 0.0
+
+                logger.info(
+                    f"[ROM Service] Stage 2 Validation complete: "
+                    f"total={total_val_points} | validated={total_val_points} | "
+                    f"valid={valid_count} | invalid={invalid_count} | "
+                    f"validation_pct={val_pct}%"
+                )
+
+                if invalid_points:
+                    logger.info(
+                        f"[ROM Service] Stage 2 Correction Pass starting: "
+                        f"{invalid_count} invalid point(s) to correct"
+                    )
+                    # Build compact JSON of invalid points for the LLM
+                    invalid_for_llm = json.dumps(
+                        [
+                            {
+                                "id": p.get("id"),
+                                "polished_text": p.get("polished_text") or p.get("enhanced_text", ""),
+                                "speakers": p.get("speakers", []),
+                                "technical_terms": p.get("technical_terms", []),
+                                "action_items": p.get("action_items", []),
+                                "dates": p.get("dates", []),
+                            }
+                            for p in invalid_points
+                        ],
+                        ensure_ascii=False,
+                    )
+                    try:
+                        corrected_list = provider.correct_invalid_stage2_points(
+                            invalid_for_llm, validation_transcript_text
+                        )
+                    except Exception as _ce:
+                        logger.warning(
+                            f"[ROM Service] Stage 2 Correction Pass LLM error ({_ce}). "
+                            "Falling back to keeping original invalid points."
+                        )
+                        corrected_list = []
+
+                    correction_count = len(corrected_list)
+                    logger.info(
+                        f"[ROM Service] Stage 2 Correction Pass complete: "
+                        f"{correction_count} point(s) corrected"
+                    )
+
+                    # Build a quick lookup: id → corrected point
+                    corrected_by_id: Dict[str, Dict] = {}
+                    for cp in corrected_list:
+                        cid = cp.get("id")
+                        if cid:
+                            corrected_by_id[cid] = cp
+
+                    # Reconstruct polished_points preserving original order:
+                    # Replace each invalid point with its corrected version (or keep original if no correction)
+                    final_points: List[Dict] = []
+                    invalid_iter = iter(invalid_points)
+                    for orig_idx, p in enumerate(polished_points):
+                        if orig_idx in invalid_indices:
+                            inv_p = next(invalid_iter)
+                            pid = inv_p.get("id")
+                            if pid and pid in corrected_by_id:
+                                cp = corrected_by_id[pid]
+                                # Merge: keep all original metadata, update text fields from correction
+                                merged = dict(inv_p)
+                                merged["polished_text"] = cp.get("polished_text") or inv_p.get("polished_text", "")
+                                if cp.get("speakers"):
+                                    merged["speakers"] = cp["speakers"]
+                                if cp.get("technical_terms"):
+                                    merged["technical_terms"] = cp["technical_terms"]
+                                if cp.get("action_items"):
+                                    merged["action_items"] = cp["action_items"]
+                                if cp.get("dates"):
+                                    merged["dates"] = cp["dates"]
+                                final_points.append(merged)
+                            else:
+                                # No correction received for this point — keep original
+                                final_points.append(inv_p)
+                        else:
+                            final_points.append(p)
+
+                    polished_points = final_points
+                    logger.info(
+                        f"[ROM Service] Stage 2 Validation Pass fully complete: "
+                        f"{len(polished_points)} final point(s) after correction "
+                        f"(corrected={correction_count}, kept_as_is={invalid_count - correction_count})"
+                    )
+                else:
+                    logger.info(
+                        "[ROM Service] Stage 2 Validation Pass: no invalid points found — "
+                        "skipping correction call."
+                    )
+            elif polished_points and not validation_transcript_text:
+                logger.info(
+                    "[ROM Service] Stage 2 Validation Pass: skipped (no transcript provided)."
+                )
 
             # ── Stage 2 Final Semantic Deduplication Step (≥ 0.95 + LLM) ────
             if len(polished_points) > 1:
@@ -984,8 +2087,6 @@ class RomService:
                                         "original_point_ids": p.get("original_point_ids", []),
                                         "polished_text": p.get("polished_text", ""),
                                         "speakers": p.get("speakers", []),
-                                        "action_owner": p.get("action_owner"),
-                                        "decisions": p.get("decisions", []),
                                         "technical_terms": p.get("technical_terms", []),
                                         "dates": p.get("dates", []),
                                         "numbers": p.get("numbers", []),
@@ -1003,12 +2104,12 @@ class RomService:
                             if eval_type in ("duplicate", "complementary") and res_points:
                                 all_orig_ids = list(
                                     dict.fromkeys(
-                                        oid for p in cluster_points for oid in p.get("original_point_ids", [])
+                                        oid for p in cluster_points for oid in (p.get("original_point_ids") or [])
                                     )
                                 )
                                 all_speakers = list(
                                     dict.fromkeys(
-                                        spk for p in cluster_points for spk in p.get("speakers", []) if spk
+                                        spk for p in cluster_points for spk in (p.get("speakers") or []) if spk
                                     )
                                 )
                                 min_start = min(p.get("timeline_start", 0.0) for p in cluster_points)
@@ -1022,14 +2123,19 @@ class RomService:
                                     r_pt["timeline_end"] = max_end
                                     r_pt["speakers"] = all_speakers
                                     r_pt["dates"] = clean_calendar_dates(
-                                        r_pt.get("dates", []) or [d for p in cluster_points for d in p.get("dates", [])]
+                                        r_pt.get("dates") or [d for p in cluster_points for d in (p.get("dates") or [])]
                                     )
-                                    r_pt.setdefault("action_owner", None)
-                                    r_pt.setdefault("decisions", [])
                                     r_pt.setdefault("technical_terms", [])
                                     r_pt.setdefault("numbers", [])
                                     r_pt.setdefault("references", [])
                                     r_pt.setdefault("action_items", [])
+                                    # Carry action_owner from the first cluster point that has one
+                                    if not r_pt.get("action_owner"):
+                                        for _cp in cluster_points:
+                                            if _cp.get("action_owner"):
+                                                r_pt["action_owner"] = _cp["action_owner"]
+                                                break
+                                    r_pt.setdefault("action_owner", None)
                                     # Inherit context from the first cluster member
                                     r_pt["retrieved_context"] = cluster_points[0].get("retrieved_context", {})
                                     r_pt["context_usage_report"] = cluster_points[0].get("context_usage_report", {})
@@ -1054,12 +2160,177 @@ class RomService:
                 f"[ROM Service] Stage 2 complete: {len(polished_points)} enhanced point(s) "
                 f"from {total_points} original point(s)"
             )
+            if polished_points:
+                sample = polished_points[0]
+                logger.info(
+                    f"[Stage2\u2192Stage3] Outgoing schema (sample): "
+                    f"fields={list(sample.keys())} | "
+                    f"polished_text={'present' if sample.get('polished_text') else 'MISSING'} | "
+                    f"discussion_point={'present' if sample.get('discussion_point') else 'MISSING'} | "
+                    f"action_owner={sample.get('action_owner')} | "
+                    f"speakers={sample.get('speakers')}"
+                )
+
+                # Store Stage 2 points in ChromaDB for future cross-meeting context
+                try:
+                    self.index_stage2_points_in_chromadb(
+                        recording_id=recording_id,
+                        user_id=user_id,
+                        points=polished_points,
+                        meeting_name=meeting_name,
+                        meeting_date=meeting_date,
+                    )
+                except Exception as e:
+                    logger.warning(f"[ROM Service] Failed to auto-index Stage 2 points into ChromaDB: {e}")
+
             return polished_points
 
         finally:
             provider.unload_model()
             unload_text_embedder()
             gc.collect()
+
+    def _enhance_action_points_separately(
+        self,
+        polished_points: List[Dict],
+        discussion_points: List[Dict],
+        discussion_window_size: int,
+        provider,
+        embedder,
+        meeting_store,
+        global_store,
+        meeting_bm25,
+        global_bm25,
+        meeting_top_k: int,
+        global_top_k: int,
+        min_similarity_threshold: Optional[float],
+        _hybrid_retrieve,
+    ) -> List[Dict]:
+        """
+        Enhance action points separately using an expanded 2x window size.
+        Reuses retrieved context from the corresponding discussion points
+        and performs additional context retrieval for the expanded window range.
+        """
+        logger.info("[ROM Service] Stage 2 starting separate action point enhancement (2x window context)")
+
+        action_window_size = discussion_window_size * 2
+        total_pts = len(polished_points)
+        action_window_batches = []
+        for win_start in range(0, total_pts, action_window_size):
+            win = polished_points[win_start : win_start + action_window_size]
+            action_window_batches.append(win)
+
+        for act_win_idx, win in enumerate(action_window_batches):
+            window_action_items = []
+            for p in win:
+                acts = p.get("action_items") or []
+                for a in acts:
+                    norm = normalize_stage2_action_item(a)
+                    if norm["task"]:
+                        window_action_items.append({
+                            "original_point_id": p.get("id"),
+                            "task": norm["task"],
+                            "assignee": norm["assignee"],
+                            "deadline": norm["deadline"],
+                            "speakers": p.get("speakers", [])
+                        })
+
+            if not window_action_items:
+                continue
+
+            # Gather context already retrieved for discussion points in this 2x window
+            reused_meeting_chunks: List[Dict] = []
+            reused_global_chunks: List[Dict] = []
+
+            for p in win:
+                rc = p.get("retrieved_context") or {}
+                reused_meeting_chunks.extend(rc.get("meeting_chunks", []))
+                reused_global_chunks.extend(rc.get("global_chunks", []))
+
+            # Additional expanded retrieval for action points over 2x window
+            act_query_text = " ".join([a["task"] for a in window_action_items if a.get("task")]).strip()
+
+            expanded_meeting_chunks = list(reused_meeting_chunks)
+            expanded_global_chunks = list(reused_global_chunks)
+
+            if act_query_text:
+                try:
+                    q_vecs = embedder.encode_batch([act_query_text])
+                    norms = np.linalg.norm(q_vecs, axis=1, keepdims=True)
+                    norms = np.where(norms < 1e-9, 1.0, norms)
+                    query_vec = (q_vecs / norms)[0]
+
+                    if meeting_top_k > 0:
+                        new_m_chunks = _hybrid_retrieve(
+                            act_query_text, query_vec, meeting_store, meeting_bm25, meeting_top_k,
+                            min_score=min_similarity_threshold, store_name="Action Point Meeting Context (2x Window)"
+                        )
+                        seen_m = {c.get("text") for c in expanded_meeting_chunks if c.get("text")}
+                        for nc in new_m_chunks:
+                            txt = _extract_chunk_text(nc)
+                            if txt and txt not in seen_m:
+                                seen_m.add(txt)
+                                expanded_meeting_chunks.append({
+                                    "text": txt,
+                                    "score": float(nc.get("score", 0.0)),
+                                    "filename": nc.get("filename") or nc.get("document_name") or "Meeting Document"
+                                })
+
+                    if global_top_k > 0:
+                        new_g_chunks = _hybrid_retrieve(
+                            act_query_text, query_vec, global_store, global_bm25, global_top_k,
+                            min_score=min_similarity_threshold, store_name="Action Point Global Context (2x Window)"
+                        )
+                        seen_g = {c.get("text") for c in expanded_global_chunks if c.get("text")}
+                        for nc in new_g_chunks:
+                            txt = _extract_chunk_text(nc)
+                            if txt and txt not in seen_g:
+                                seen_g.add(txt)
+                                expanded_global_chunks.append({
+                                    "text": txt,
+                                    "score": float(nc.get("score", 0.0)),
+                                    "filename": nc.get("filename") or nc.get("document_name") or "Global Document"
+                                })
+                except Exception as ex:
+                    logger.warning(f"[ROM Service] Expanded context retrieval for action points failed: {ex}")
+
+            m_ctx_str = "\n\n".join([
+                f"[{c.get('filename', 'Meeting Doc')}]\n{c.get('text', '')}"
+                for c in expanded_meeting_chunks if c.get("text")
+            ])
+            g_ctx_str = "\n\n".join([
+                f"[{c.get('filename', 'Global Doc')}]\n{c.get('text', '')}"
+                for c in expanded_global_chunks if c.get("text")
+            ])
+
+            action_json = json.dumps(window_action_items, ensure_ascii=False)
+
+            try:
+                res = provider.enhance_rom_action_points(
+                    action_points_json=action_json,
+                    meeting_context=m_ctx_str,
+                    global_context=g_ctx_str,
+                )
+                enhanced_groups = res.get("enhanced_action_points", [])
+
+                enhanced_by_pid: Dict[str, List[Dict]] = {}
+                for eg in enhanced_groups:
+                    pid = eg.get("original_point_id")
+                    items = eg.get("action_items") or []
+                    norm_items = [normalize_stage2_action_item(it) for it in items if normalize_stage2_action_item(it)["task"]]
+                    if pid and norm_items:
+                        enhanced_by_pid.setdefault(pid, []).extend(norm_items)
+
+                for p in win:
+                    pid = p.get("id")
+                    if pid in enhanced_by_pid:
+                        p["action_items"] = enhanced_by_pid[pid]
+
+            except Exception as e_act:
+                logger.error(f"[ROM Service] Separate action point LLM enhancement failed: {e_act}", exc_info=True)
+
+        return polished_points
+
 
 
 
@@ -1250,6 +2521,10 @@ class RomService:
                 agenda_result = provider.generate_rom_agendas(agenda_text, context=retrieved_context_str)
                 raw_agendas   = agenda_result.get("agendas", [])
                 if raw_agendas:
+                    for a in raw_agendas:
+                        spk = a.get("speaker") or a.get("presenter")
+                        a["speaker"] = spk
+                        a["presenter"] = spk
                     agendas = raw_agendas
                     parsed_to_save = []
                     for a in agendas:
@@ -1347,26 +2622,6 @@ class RomService:
 
                 # Previous MoM expansion for this agenda
                 prev_expansion = previous_mom_expansion.get(aid, {})
-                prev_discussion = prev_expansion.get("previous_discussion", "")
-
-                # Build the embedding text: rich concatenation of all sources
-                embedding_text_parts = [title, desc]
-                embedding_text_parts.extend(kws)
-                embedding_text_parts.extend(rc)
-                embedding_text_parts.extend(alt)
-                embedding_text_parts.extend(themes)
-                if prev_discussion:
-                    embedding_text_parts.append(prev_discussion)
-                for field in ("previous_decisions", "previous_action_items", "pending_work", "follow_up_items"):
-                    vals = prev_expansion.get(field, [])
-                    if isinstance(vals, list):
-                        embedding_text_parts.extend(vals)
-                # Append first 2000 chars of retrieved context
-                if meeting_ctx_str:
-                    embedding_text_parts.append(meeting_ctx_str[:2000])
-                if global_ctx_str:
-                    embedding_text_parts.append(global_ctx_str[:1000])
-
                 expanded = {
                     "agenda_id": aid,
                     "title": title,
@@ -1378,57 +2633,21 @@ class RomService:
                     "previous_meeting_summary": prev_expansion if prev_expansion.get("found_in_previous_meeting") else {},
                     "meeting_context_snippet": meeting_ctx_str[:1500] if meeting_ctx_str else "",
                     "global_context_snippet": global_ctx_str[:1000] if global_ctx_str else "",
-                    "_embedding_text": " ".join(p for p in embedding_text_parts if p),
                 }
                 expanded_agendas.append(expanded)
                 logger.info(f"[ROM S3] Phase 2 expanded agenda {aid}: meeting_ctx={len(meeting_ctx_str)} chars, global_ctx={len(global_ctx_str)} chars, prev_mom={'yes' if prev_expansion.get('found_in_previous_meeting') else 'no'}")
 
-            # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            # PHASE 3 â€“ Top-3 Candidate Retrieval via Cosine Similarity
-            # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            logger.info("[ROM S3] Phase 3: Computing Top-3 candidate agendas per discussion point")
-            expanded_texts = [ea["_embedding_text"] for ea in expanded_agendas]
-            point_texts    = [p.get("polished_text", "") for p in polished_points]
-            all_texts      = expanded_texts + point_texts
-
-            embeddings = embedder.encode(all_texts)
-            norms      = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            norms      = np.where(norms < 1e-9, 1.0, norms)
-            embeddings = embeddings / norms
-
-            agenda_embs = embeddings[:len(expanded_agendas)]
-            point_embs  = embeddings[len(expanded_agendas):]
-
-            sim_matrix      = np.dot(point_embs, agenda_embs.T)  # (n_points, n_agendas)
-            sim_matrix_list = sim_matrix.tolist()
-
-            n_candidates    = min(3, len(expanded_agendas))
-            candidate_results: List[Dict] = []
-
-            for i, point in enumerate(polished_points):
-                row         = sim_matrix[i]
-                top_indices = np.argsort(row)[::-1][:n_candidates]
-                candidates  = [
-                    {"agenda_id": expanded_agendas[idx]["agenda_id"],
-                     "agenda_title": expanded_agendas[idx]["title"],
-                     "score": float(row[idx])}
-                    for idx in top_indices
-                ]
-                candidate_results.append({"point_id": point["id"], "candidates": candidates})
-
-            logger.info(f"[ROM S3] Phase 3 complete: Top-{n_candidates} candidates computed for {len(polished_points)} point(s)")
-
-            # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            # PHASE 4 â€“ Batch LLM Agenda Assignment
-            # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            logger.info(f"[ROM S3] Phase 4: Batch LLM agenda assignment (batch_size={batch_size})")
+            # ═════════════════════════════════════════════════════════════════
+            # PHASE 4 – Batch LLM Agenda Assignment (Direct Full Agenda Mapping)
+            # ═════════════════════════════════════════════════════════════════
+            logger.info(f"[ROM S3] Phase 4: Direct LLM agenda assignment for {len(polished_points)} point(s) against {len(agendas)} agenda(s) (batch_size={batch_size})")
             valid_agenda_ids = {a["agenda_id"] for a in agendas}
             agenda_ref_json  = json.dumps(
                 [{"agenda_id": a["agenda_id"], "title": a.get("title", ""), "description": a.get("description", "")} for a in agendas],
                 ensure_ascii=False
             )
-            # Build point_id â†’ candidate list lookup
-            cand_by_point_id: Dict[str, List[Dict]] = {c["point_id"]: c["candidates"] for c in candidate_results}
+            candidate_results: List[Dict] = []
+            sim_matrix_list: List[List[float]] = []
             batch_assignments: List[Dict] = []
             total_points      = len(polished_points)
             total_batches     = math.ceil(total_points / batch_size)
@@ -1439,14 +2658,12 @@ class RomService:
 
                 batch_items = []
                 for point in batch_points:
-                    pid        = point["id"]
-                    candidates = cand_by_point_id.get(pid, [])
+                    pid = point["id"]
                     batch_items.append({
                         "point_id": pid,
-                        "enhanced_point": point.get("polished_text", ""),
-                        "timeline": f"{_format_time_hhmm(point.get('timeline_start', 0))} â€“ {_format_time_hhmm(point.get('timeline_end', 0))}",
+                        "enhanced_point": point.get("polished_text") or point.get("text", ""),
+                        "timeline": f"{_format_time_hhmm(point.get('timeline_start', 0))} – {_format_time_hhmm(point.get('timeline_end', 0))}",
                         "speakers": point.get("speakers", []),
-                        "candidate_agendas": candidates,
                     })
 
                 batch_json_str = json.dumps(batch_items, ensure_ascii=False)
@@ -1457,7 +2674,6 @@ class RomService:
 
                 for point in batch_points:
                     pid        = point["id"]
-                    candidates = cand_by_point_id.get(pid, [])
                     llm_entry  = llm_map.get(pid, {})
 
                     assigned    = llm_entry.get("assigned_agenda_id", "")
@@ -1465,12 +2681,12 @@ class RomService:
                     reason      = llm_entry.get("reason", "")
                     is_probable = False
 
-                    # Fallback: if LLM returned unknown/empty ID, use highest-scoring candidate
+                    # Fallback: if LLM returned unknown/empty ID, assign to first agenda
                     if not assigned or assigned not in valid_agenda_ids:
                         is_probable = True
                         confidence  = "probable"
-                        reason      = f"Automatically assigned to best-matching candidate (LLM did not return a valid agenda ID)."
-                        assigned    = candidates[0]["agenda_id"] if candidates else (agendas[0]["agenda_id"] if agendas else "A1")
+                        reason      = "Automatically assigned to default agenda (LLM did not return a valid agenda ID)."
+                        assigned    = agendas[0]["agenda_id"] if agendas else "A1"
 
                     batch_assignments.append({
                         "point_id": pid,
@@ -1688,6 +2904,10 @@ class RomService:
                     agenda_result = provider.generate_rom_agendas(agenda_text, context=retrieved_context_str)
                     raw_agendas   = agenda_result.get("agendas", [])
                     if raw_agendas:
+                        for a in raw_agendas:
+                            spk = a.get("speaker") or a.get("presenter")
+                            a["speaker"] = spk
+                            a["presenter"] = spk
                         agendas = raw_agendas
                         parsed_to_save = []
                         for a in agendas:
@@ -1719,7 +2939,7 @@ class RomService:
 
             logger.info(f"[ROM S3-Agenda] {len(agendas)} agenda(s) loaded. Running Phase 1 & 2.")
 
-            # Phase 1 â€“ Previous MoM Expansion
+            # Phase 1 – Previous MoM Expansion
             previous_mom_expansion: Dict[str, Dict] = {}
             has_previous_mom = bool(previous_mom_texts and any(t.strip() for t in previous_mom_texts))
             if has_previous_mom:
@@ -1738,7 +2958,7 @@ class RomService:
             else:
                 logger.info("[ROM S3-Agenda] Phase 1: Skipped (no previous MoM files uploaded)")
 
-            # Phase 2 â€“ Per-agenda RAG retrieval
+            # Phase 2 – Per-agenda RAG retrieval
             logger.info("[ROM S3-Agenda] Phase 2: Per-agenda context expansion via RAG")
             expanded_agendas: List[Dict] = []
             retrieved_context_chunks: Dict[str, str] = {}
@@ -1778,24 +2998,6 @@ class RomService:
                         logger.warning(f"[ROM S3-Agenda] Phase 2 RAG failed for agenda {aid}: {e}")
 
                 prev_expansion = previous_mom_expansion.get(aid, {})
-                prev_discussion = prev_expansion.get("previous_discussion", "")
-
-                embedding_text_parts = [title, desc]
-                embedding_text_parts.extend(kws)
-                embedding_text_parts.extend(rc)
-                embedding_text_parts.extend(alt)
-                embedding_text_parts.extend(themes)
-                if prev_discussion:
-                    embedding_text_parts.append(prev_discussion)
-                for field in ("previous_decisions", "previous_action_items", "pending_work", "follow_up_items"):
-                    vals = prev_expansion.get(field, [])
-                    if isinstance(vals, list):
-                        embedding_text_parts.extend(vals)
-                if meeting_ctx_str:
-                    embedding_text_parts.append(meeting_ctx_str[:2000])
-                if global_ctx_str:
-                    embedding_text_parts.append(global_ctx_str[:1000])
-
                 expanded = {
                     "agenda_id": aid,
                     "title": title,
@@ -1807,14 +3009,9 @@ class RomService:
                     "previous_meeting_summary": prev_expansion if prev_expansion.get("found_in_previous_meeting") else {},
                     "meeting_context_snippet": meeting_ctx_str[:1500] if meeting_ctx_str else "",
                     "global_context_snippet": global_ctx_str[:1000] if global_ctx_str else "",
-                    "_embedding_text": " ".join(p for p in embedding_text_parts if p),
                 }
                 expanded_agendas.append(expanded)
                 retrieved_context_chunks[aid] = meeting_ctx_str[:1500] if meeting_ctx_str else ""
-
-            # Strip internal embedding key before returning
-            for ea in expanded_agendas:
-                ea.pop("_embedding_text", None)
 
             logger.info(f"[ROM S3-Agenda] Complete: {len(agendas)} agendas ready for use.")
             return {
@@ -1827,7 +3024,6 @@ class RomService:
             provider.unload_model()
             unload_text_embedder()
             gc.collect()
-
 
     def extract_agenda_document_points(
         self,
@@ -1863,7 +3059,6 @@ class RomService:
             provider.unload_model()
             gc.collect()
 
-
     def map_points_to_agendas(
         self,
         polished_points: List[Dict],
@@ -1878,12 +3073,10 @@ class RomService:
         agenda_doc_points: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """
-        Stage 3 â€“ Step 2: Map discussion points to agendas (Phases 3-5).
-        Requires pre-generated agendas and expanded_agendas from generate_agendas_only().
+        Stage 3 – Step 2: Map discussion points to agendas directly using LLM (Phases 4-5).
         Optionally merges agenda document points into the final ROM.
         """
         from services.ai_provider import get_provider
-        from services.text_embedding_service import get_text_embedder, unload_text_embedder
 
         user_id = _validate_user_id(user_id)
 
@@ -1907,77 +3100,18 @@ class RomService:
                 "final_rom_agendas": [],
             }
 
-        # If no expanded_agendas passed in, use agendas directly (build minimal expanded)
-        if not expanded_agendas:
-            expanded_agendas = [
-                {
-                    "agenda_id": a["agenda_id"],
-                    "title": a.get("title", ""),
-                    "description": a.get("description", ""),
-                    "keywords": a.get("keywords", []),
-                    "related_concepts": a.get("related_concepts", []),
-                    "alternative_terminology": a.get("alternative_terminology", []),
-                    "expected_themes": a.get("expected_themes", []),
-                    "_embedding_text": " ".join(filter(None, [
-                        a.get("title", ""), a.get("description", "")
-                    ] + a.get("keywords", []) + a.get("related_concepts", []))),
-                }
-                for a in agendas
-            ]
-        else:
-            # Re-add embedding text from title+description if missing
-            for ea in expanded_agendas:
-                if "_embedding_text" not in ea or not ea.get("_embedding_text"):
-                    ea["_embedding_text"] = " ".join(filter(None, [
-                        ea.get("title", ""), ea.get("description", "")
-                    ] + ea.get("keywords", []) + ea.get("related_concepts", [])))
-
         provider = get_provider()
-        embedder = get_text_embedder()
-        embedder.load()
 
         try:
-            # â”€â”€ Phase 3: Cosine similarity candidate retrieval â”€â”€
-            logger.info("[ROM S3-Map] Phase 3: Computing Top-3 candidate agendas per discussion point")
-            expanded_texts = [ea.get("_embedding_text", ea.get("title", "")) for ea in expanded_agendas]
-            point_texts    = [p.get("polished_text", "") for p in polished_points]
-            all_texts      = expanded_texts + point_texts
-
-            embeddings = embedder.encode(all_texts)
-            norms      = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            norms      = np.where(norms < 1e-9, 1.0, norms)
-            embeddings = embeddings / norms
-
-            agenda_embs = embeddings[:len(expanded_agendas)]
-            point_embs  = embeddings[len(expanded_agendas):]
-
-            sim_matrix      = np.dot(point_embs, agenda_embs.T)
-            sim_matrix_list = sim_matrix.tolist()
-
-            n_candidates    = min(3, len(expanded_agendas))
-            candidate_results: List[Dict] = []
-
-            for i, point in enumerate(polished_points):
-                row         = sim_matrix[i]
-                top_indices = np.argsort(row)[::-1][:n_candidates]
-                candidates  = [
-                    {"agenda_id": expanded_agendas[idx]["agenda_id"],
-                     "agenda_title": expanded_agendas[idx]["title"],
-                     "score": float(row[idx])}
-                    for idx in top_indices
-                ]
-                candidate_results.append({"point_id": point["id"], "candidates": candidates})
-
-            logger.info(f"[ROM S3-Map] Phase 3 complete: Top-{n_candidates} candidates computed for {len(polished_points)} point(s)")
-
-            # â”€â”€ Phase 4: Batch LLM Agenda Assignment â”€â”€
-            logger.info(f"[ROM S3-Map] Phase 4: Batch LLM agenda assignment (batch_size={batch_size})")
+            # ── Phase 4: Batch LLM Agenda Assignment (Direct Full Agenda Mapping) ──
+            logger.info(f"[ROM S3-Map] Phase 4: Direct LLM agenda assignment for {len(polished_points)} point(s) against {len(agendas)} agenda(s) (batch_size={batch_size})")
             valid_agenda_ids = {a["agenda_id"] for a in agendas}
             agenda_ref_json  = json.dumps(
                 [{"agenda_id": a["agenda_id"], "title": a.get("title", ""), "description": a.get("description", "")} for a in agendas],
                 ensure_ascii=False
             )
-            cand_by_point_id: Dict[str, List[Dict]] = {c["point_id"]: c["candidates"] for c in candidate_results}
+            candidate_results: List[Dict] = []
+            sim_matrix_list: List[List[float]] = []
             batch_assignments: List[Dict] = []
             total_points      = len(polished_points)
             total_batches     = math.ceil(total_points / batch_size)
@@ -1988,14 +3122,12 @@ class RomService:
 
                 batch_items = []
                 for point in batch_points:
-                    pid        = point["id"]
-                    candidates = cand_by_point_id.get(pid, [])
+                    pid = point["id"]
                     batch_items.append({
                         "point_id": pid,
-                        "enhanced_point": point.get("polished_text", ""),
-                        "timeline": f"{_format_time_hhmm(point.get('timeline_start', 0))} â€“ {_format_time_hhmm(point.get('timeline_end', 0))}",
+                        "enhanced_point": point.get("polished_text") or point.get("text", ""),
+                        "timeline": f"{_format_time_hhmm(point.get('timeline_start', 0))} – {_format_time_hhmm(point.get('timeline_end', 0))}",
                         "speakers": point.get("speakers", []),
-                        "candidate_agendas": candidates,
                     })
 
                 batch_json_str = json.dumps(batch_items, ensure_ascii=False)
@@ -2005,7 +3137,6 @@ class RomService:
 
                 for point in batch_points:
                     pid        = point["id"]
-                    candidates = cand_by_point_id.get(pid, [])
                     llm_entry  = llm_map.get(pid, {})
 
                     assigned    = llm_entry.get("assigned_agenda_id", "")
@@ -2016,8 +3147,8 @@ class RomService:
                     if not assigned or assigned not in valid_agenda_ids:
                         is_probable = True
                         confidence  = "probable"
-                        reason      = "Automatically assigned to best-matching candidate (LLM did not return a valid agenda ID)."
-                        assigned    = candidates[0]["agenda_id"] if candidates else (agendas[0]["agenda_id"] if agendas else "A1")
+                        reason      = "Automatically assigned to default agenda (LLM did not return a valid agenda ID)."
+                        assigned    = agendas[0]["agenda_id"] if agendas else "A1"
 
                     batch_assignments.append({
                         "point_id": pid,
@@ -2030,6 +3161,7 @@ class RomService:
                 logger.info(f"[ROM S3-Map] Phase 4 batch {batch_num}/{total_batches} complete")
 
             logger.info(f"[ROM S3-Map] Phase 4 complete: {len(batch_assignments)} assignment(s)")
+
 
             # â”€â”€ Phase 5: Agenda Grouping â”€â”€
             logger.info("[ROM S3-Map] Phase 5: Grouping discussion points by assigned agenda")
@@ -2119,12 +3251,16 @@ class RomService:
         recording_meta: Dict,
         recording_id: str = "",
         user_id: str = "",
+        separate_action_extraction: bool = False,
     ) -> Dict:
         """
         Generate Minutes of Meeting (MOM) using Stage 2/Stage 3 Enhanced Discussion Points.
         1. LLM is passed the points ONLY to generate Introduction and Conclusion.
         2. Key Discussion Points are constructed directly from each enhanced discussion point.
-        3. Action Items are extracted directly from each point's action_items/action_owner/dates.
+        3. Action Items are extracted depending on mode:
+           - separate_action_extraction=True: read directly from each point's action_items list.
+           - separate_action_extraction=False (default): call extract_actions_from_enhanced_points()
+             to extract embedded actions from polished_text via a final LLM pass.
         """
         from services.ai_provider import get_provider
 
@@ -2166,48 +3302,140 @@ class RomService:
             points_discussed.append(pt_text)
             points_text_lines.append(f"Point {idx}: {pt_text}")
 
-        # 2. Directly extract action_items from each enhanced point
+        # 2. Extract action items depending on mode
         action_items = []
-        for p in polished_points:
-            raw_acts = p.get("action_items")
-            if not raw_acts:
-                continue
 
-            if not isinstance(raw_acts, list):
-                raw_acts = [raw_acts]
-
-            dates = p.get("dates")
-            d_fallback = None
-            if dates:
-                d_str = ", ".join(dates) if isinstance(dates, list) else str(dates)
-                if d_str.strip() and d_str.strip().lower() not in ("none", "n/a", "null"):
-                    d_fallback = d_str.strip()
-
-            for act in raw_acts:
-                act_dict = normalize_action_item(act)
-                if not act_dict["task"]:
+        if separate_action_extraction:
+            # ── Separate-extraction mode: read action_items[] directly from each polished point ──
+            for p in polished_points:
+                raw_acts = p.get("action_items")
+                if not raw_acts:
                     continue
 
-                displayed_task = format_action_point_display_text(act_dict)
-                assignee = act_dict.get("assignee")
-                if assignee:
-                    owner = assignee
-                elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
-                    owner = p.get("action_owner")
-                else:
-                    owner = "Unassigned"
+                if not isinstance(raw_acts, list):
+                    raw_acts = [raw_acts]
 
-                deadline = act_dict.get("deadline") or d_fallback or "ASAP"
+                dates = p.get("dates")
+                d_fallback = None
+                if dates:
+                    d_str = ", ".join(dates) if isinstance(dates, list) else str(dates)
+                    if d_str.strip() and d_str.strip().lower() not in ("none", "n/a", "null"):
+                        d_fallback = d_str.strip()
+
+                for act in raw_acts:
+                    act_dict = normalize_action_item(act)
+                    if not act_dict["task"]:
+                        continue
+
+                    displayed_task = format_action_point_display_text(act_dict)
+                    assignee = act_dict.get("assignee")
+                    if assignee:
+                        owner = assignee
+                    elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
+                        owner = p.get("action_owner")
+                    else:
+                        owner = "Unassigned"
+
+                    deadline = act_dict.get("deadline") or d_fallback or "ASAP"
+
+                    action_items.append({
+                        "task": displayed_task or act_dict["task"],
+                        "item": displayed_task or act_dict["task"],
+                        "description": displayed_task or act_dict["task"],
+                        "owner": str(owner).strip(),
+                        "deadline": deadline,
+                        "status": "open",
+                        "raw_json": act_dict,
+                    })
+        else:
+            # ── Default (embedded) mode: run LLM extraction pass over polished_text ──
+            logger.info("[ROM Service] MoM generation: running extract_actions_from_enhanced_points (default mode)")
+            provider = get_provider()
+            try:
+                raw_extracted = provider.extract_actions_from_enhanced_points(polished_points)
+            except Exception as _ex:
+                logger.warning(f"[ROM Service] MoM action extraction pass failed ({_ex}). Continuing with no action items.")
+                raw_extracted = []
+            finally:
+                provider.unload_model()
+
+            # Build a lookup: id -> point (for fallback action_owner)
+            point_by_id = {p.get("id"): p for p in polished_points if p.get("id")}
+
+            for act in raw_extracted:
+                task = str(act.get("task") or "").strip()
+                if not task:
+                    continue
+
+                # owner: prefer extracted owner, then action_owner from the source point
+                raw_owner = act.get("owner")
+                if not raw_owner or str(raw_owner).strip().lower() in ("none", "n/a", "null", ""):
+                    src_id = act.get("source_point_id")
+                    src_point = point_by_id.get(src_id) if src_id else None
+                    if src_point and src_point.get("action_owner") and str(src_point.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
+                        raw_owner = src_point["action_owner"]
+                    else:
+                        raw_owner = None
+
+                owner_str = str(raw_owner).strip() if raw_owner else "Unassigned"
+                deadline = str(act.get("deadline") or "ASAP").strip()
+                if deadline.lower() in ("none", "n/a", "null", ""):
+                    deadline = "ASAP"
 
                 action_items.append({
-                    "task": displayed_task or act_dict["task"],
-                    "item": displayed_task or act_dict["task"],
-                    "description": displayed_task or act_dict["task"],
-                    "owner": str(owner).strip(),
+                    "task": task,
+                    "item": task,
+                    "description": task,
+                    "owner": owner_str,
                     "deadline": deadline,
                     "status": "open",
-                    "raw_json": act_dict,
+                    "raw_json": act,
                 })
+
+            logger.info(f"[ROM Service] MoM action extraction pass complete: {len(action_items)} action item(s)")
+
+        # ── Fallback: if no action items were extracted via LLM pass, check for pre-extracted action_items on points ──
+        if not action_items and not separate_action_extraction:
+            for p in polished_points:
+                raw_acts = p.get("action_items")
+                if not raw_acts:
+                    continue
+
+                if not isinstance(raw_acts, list):
+                    raw_acts = [raw_acts]
+
+                dates = p.get("dates")
+                d_fallback = None
+                if dates:
+                    d_str = ", ".join(dates) if isinstance(dates, list) else str(dates)
+                    if d_str.strip() and d_str.strip().lower() not in ("none", "n/a", "null"):
+                        d_fallback = d_str.strip()
+
+                for act in raw_acts:
+                    act_dict = normalize_action_item(act)
+                    if not act_dict["task"]:
+                        continue
+
+                    displayed_task = format_action_point_display_text(act_dict)
+                    assignee = act_dict.get("assignee")
+                    if assignee:
+                        owner = assignee
+                    elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
+                        owner = p.get("action_owner")
+                    else:
+                        owner = "Unassigned"
+
+                    deadline = act_dict.get("deadline") or d_fallback or "ASAP"
+
+                    action_items.append({
+                        "task": displayed_task or act_dict["task"],
+                        "item": displayed_task or act_dict["task"],
+                        "description": displayed_task or act_dict["task"],
+                        "owner": str(owner).strip(),
+                        "deadline": deadline,
+                        "status": "open",
+                        "raw_json": act_dict,
+                    })
 
         # 3. Generate Title, Introduction, and Conclusion using standard app generator
         overview = self.generate_mom_overview(points_text_lines, recording_meta)
@@ -2246,21 +3474,41 @@ class RomService:
 
         points_combined_str = "\n".join(points_text_lines)
         first_topic = points_text_lines[0][:80] if points_text_lines else filename
-        intro = f"This meeting covered {len(points_text_lines)} key discussion point(s) including topics related to {first_topic}."
-        conclusion = "The meeting concluded following thorough discussion of all agenda items, with clear action items assigned and next steps agreed upon."
+        part_str = ", ".join(str(p) for p in participants) if participants else "key stakeholders and team members"
+        
+        intro = (
+            f"This formal executive meeting session addressed {len(points_text_lines)} key discussion topic(s) "
+            f"pertaining to '{filename}'. The primary objective of the session was to review operational, strategic, "
+            f"and technical items, evaluating current progress and addressing critical focus areas. Participants including "
+            f"{part_str} actively contributed to evaluating proposals, resolving key inquiries, and setting strategic directives "
+            f"across all agenda points."
+        )
+        conclusion = (
+            "The meeting concluded following a comprehensive and detailed review of all agenda topics. Formal consensus was reached "
+            "on key items, with clear responsibilities and action items assigned to designated owners to ensure timely execution. "
+            "The team identified necessary follow-up milestones and agreed to maintain alignment on open items prior to the next scheduled review."
+        )
         title = filename
 
         prompt = (
             f"You are an executive assistant generating a formal Minutes of Meeting (MoM) document.\n\n"
             f"Recording name: '{filename}'\n"
             f"Date: {date_str}\n"
-            f"Participants: {', '.join(str(p) for p in participants) if participants else 'Unknown'}\n\n"
+            f"Participants: {part_str}\n\n"
             f"Discussion points from the meeting:\n"
             f"{points_combined_str}\n\n"
             f"Tasks:\n"
             f"1. Generate a professional, concise meeting TITLE that reflects the actual topics discussed (do NOT just use the filename; infer from content). Example: 'Q3 Engineering Review Meeting', 'Budget & Procurement Planning Session'.\n"
-            f"2. Write a high-level 2-3 sentence executive Introduction describing the meeting's objective, scope, and key participants.\n"
-            f"3. Write a 2-3 sentence professional Conclusion summarizing overall outcomes, key decisions made, and agreed next steps.\n\n"
+            f"2. Write a long, detailed, and comprehensive executive INTRODUCTION section (at least 2-3 detailed paragraphs or 150-250+ words). Thoroughly describe:\n"
+            f"   - The overarching purpose, objective, strategic context, and business/technical background of the meeting.\n"
+            f"   - Key participants, stakeholders involved, and their roles/contributions.\n"
+            f"   - The major scope, themes, and agenda items covered during the discussion.\n"
+            f"   - Do NOT make it brief or high-level. Provide rich background, context, and detail.\n"
+            f"3. Write an actual, long, detailed, and actionable CONCLUSION section (at least 2-3 detailed paragraphs or 150-250+ words). Synthesize:\n"
+            f"   - All primary outcomes, key decisions finalized, and unanimous agreements reached.\n"
+            f"   - Critical risks, dependencies, assumptions, or open issues identified for future review.\n"
+            f"   - A clear roadmap of next steps, action item expectations, target milestones, and follow-up plans.\n"
+            f"   - Do NOT provide generic 1-2 line closing remarks. Provide a complete, highly detailed concluding section.\n\n"
             f"Respond ONLY with valid JSON in this exact format (no markdown, no code blocks):\n"
             f"{{\n"
             f'  "title": "...",\n'
@@ -2272,9 +3520,9 @@ class RomService:
         provider = get_provider()
         try:
             if hasattr(provider, "query"):
-                raw_resp = provider.query(prompt, max_tokens=1024, temperature=0.2)
+                raw_resp = provider.query(prompt, max_tokens=2048, temperature=0.2)
             else:
-                raw_resp = provider._infer(prompt, max_new_tokens=1024)
+                raw_resp = provider._infer(prompt, max_new_tokens=2048)
             cleaned = str(raw_resp or "").strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("```")[1]
@@ -2285,9 +3533,9 @@ class RomService:
             if isinstance(data_parsed, dict):
                 if data_parsed.get("title") and str(data_parsed["title"]).strip():
                     title = str(data_parsed["title"]).strip()
-                if data_parsed.get("introduction"):
+                if data_parsed.get("introduction") and str(data_parsed["introduction"]).strip():
                     intro = str(data_parsed["introduction"]).strip()
-                if data_parsed.get("conclusion"):
+                if data_parsed.get("conclusion") and str(data_parsed["conclusion"]).strip():
                     conclusion = str(data_parsed["conclusion"]).strip()
         except Exception as e:
             logger.warning(f"[RomService] Title/Intro/Conclusion generation fallback: {e}")

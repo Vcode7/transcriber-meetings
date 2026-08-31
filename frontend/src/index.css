@@ -3530,3 +3530,296 @@
 .prose-ai li {
   margin-bottom: 0.25rem !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Stage 2 Editing Features
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Context Menu (right-click on selected text) */
+.stage2-context-menu {
+  position: fixed;
+  z-index: 200;
+  background: hsl(var(--card));
+  border: 2px solid hsl(var(--ink) / .8);
+  border-radius: 12px 18px 14px 16px / 18px 12px 16px 14px;
+  box-shadow: 4px 4px 0 0 hsl(var(--ink) / .3), 0 8px 24px hsl(var(--ink) / .15);
+  padding: 0.35rem;
+  min-width: 200px;
+  animation: fadeIn 0.12s ease-out;
+}
+
+.stage2-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0.55rem 0.85rem;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: hsl(var(--ink));
+  border: none;
+  background: none;
+  border-radius: 8px 12px 8px 12px / 12px 8px 12px 8px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.stage2-context-menu-item:hover {
+  background: hsl(var(--accent) / .1);
+  color: hsl(var(--accent));
+  transform: translateX(3px);
+}
+
+.stage2-context-menu-item.danger:hover {
+  background: hsl(var(--destructive) / .1);
+  color: hsl(var(--destructive));
+}
+
+.stage2-context-menu-divider {
+  height: 1px;
+  background: hsl(var(--ink) / .1);
+  margin: 0.25rem 0.5rem;
+}
+
+/* Change History Drawer (slide-over from right) */
+.change-history-drawer {
+  position: fixed;
+  right: 0;
+  top: 0;
+  height: 100vh;
+  width: 460px;
+  max-width: 90vw;
+  background: hsl(var(--paper));
+  border-left: 2.5px solid hsl(var(--ink) / .3);
+  box-shadow: -8px 0 32px hsl(var(--ink) / .12);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.change-history-drawer.open {
+  transform: translateX(0);
+}
+
+.change-history-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: hsl(var(--ink) / .2);
+  backdrop-filter: blur(2px);
+  z-index: 99;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.change-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.15rem 1.35rem;
+  border-bottom: 1.5px solid hsl(var(--ink) / .12);
+  flex-shrink: 0;
+}
+
+.change-history-header h3 {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: hsl(var(--ink));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.change-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.change-history-card {
+  background: hsl(var(--card));
+  border: 1.5px solid hsl(var(--border) / .4);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  transition: border-color 0.2s;
+}
+
+.change-history-card:hover {
+  border-color: hsl(var(--border) / .7);
+}
+
+.change-history-card.reverted {
+  opacity: 0.55;
+}
+
+/* Change Type Badges */
+.change-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.change-type-badge.merge {
+  background: hsl(280 75% 60% / .12);
+  color: hsl(280 75% 60%);
+  border: 1px solid hsl(280 75% 60% / .3);
+}
+
+.change-type-badge.split {
+  background: hsl(140 65% 45% / .12);
+  color: hsl(140 65% 45%);
+  border: 1px solid hsl(140 65% 45% / .3);
+}
+
+.change-type-badge.find_replace {
+  background: hsl(205 90% 55% / .12);
+  color: hsl(205 90% 55%);
+  border: 1px solid hsl(205 90% 55% / .3);
+}
+
+.change-type-badge.delete_text {
+  background: hsl(0 75% 55% / .12);
+  color: hsl(0 75% 55%);
+  border: 1px solid hsl(0 75% 55% / .3);
+}
+
+.change-type-badge.manual_edit {
+  background: hsl(30 90% 50% / .12);
+  color: hsl(30 90% 50%);
+  border: 1px solid hsl(30 90% 50% / .3);
+}
+
+.change-type-badge.delete {
+  background: hsl(0 75% 55% / .12);
+  color: hsl(0 75% 55%);
+  border: 1px solid hsl(0 75% 55% / .3);
+}
+
+.change-type-badge.reverted-badge {
+  background: hsl(var(--muted));
+  color: hsl(var(--pencil));
+  border: 1px solid hsl(var(--border) / .3);
+}
+
+/* Diff Before/After */
+.diff-before {
+  background: hsl(0 75% 55% / .06);
+  border: 1px solid hsl(0 75% 55% / .15);
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: hsl(var(--ink));
+  margin-top: 0.35rem;
+}
+
+.diff-after {
+  background: hsl(130 60% 42% / .06);
+  border: 1px solid hsl(130 60% 42% / .15);
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: hsl(var(--ink));
+  margin-top: 0.35rem;
+}
+
+/* Find & Replace Panel */
+.find-replace-panel {
+  background: hsl(var(--card));
+  border: 1.5px solid hsl(var(--border) / .4);
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  animation: slideUp 0.2s ease-out;
+}
+
+.find-replace-panel .fr-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.find-replace-panel .fr-input-row label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: hsl(var(--pencil));
+  min-width: 55px;
+  font-family: 'Inter', sans-serif;
+}
+
+.find-replace-panel .fr-input-row input {
+  flex: 1;
+  padding: 0.45rem 0.7rem;
+  border-radius: 6px;
+  border: 1.5px solid hsl(var(--border) / .4);
+  background: hsl(var(--background));
+  color: hsl(var(--ink));
+  font-size: 0.82rem;
+  font-family: 'Inter', sans-serif;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.find-replace-panel .fr-input-row input:focus {
+  border-color: hsl(var(--accent) / .5);
+}
+
+.find-replace-panel .fr-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.find-replace-panel .fr-preview-count {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: hsl(205 90% 55%);
+  font-family: 'Inter', sans-serif;
+}
+
+/* Merge Checkbox */
+.merge-checkbox {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 2px solid hsl(var(--border) / .5);
+  background: hsl(var(--card));
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.merge-checkbox:hover {
+  border-color: hsl(var(--accent) / .6);
+}
+
+.merge-checkbox.checked {
+  background: hsl(var(--accent));
+  border-color: hsl(var(--accent));
+}
+
+.merge-checkbox.checked svg {
+  color: white;
+}

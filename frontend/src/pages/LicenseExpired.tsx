@@ -7,7 +7,7 @@ interface LicenseExpiredProps {
 export default function LicenseExpired({ message }: LicenseExpiredProps) {
   const displayMessage =
     message ||
-    'This application license expired on 12 August 2026. Please contact the administrator for a renewed version.'
+    'This application license expired on 30 September 2026. Please contact the administrator for a renewed version.'
 
   return (
     <div
@@ -134,7 +134,7 @@ export default function LicenseExpired({ message }: LicenseExpiredProps) {
             <Calendar size={15} style={{ color: 'hsl(0 70% 60%)', flexShrink: 0 }} />
             <span style={{ fontSize: '0.83rem', color: 'hsl(220 10% 55%)' }}>
               License expired on{' '}
-              <strong style={{ color: 'hsl(0 5% 85%)' }}>12 August 2026</strong>
+              <strong style={{ color: 'hsl(0 5% 85%)' }}>30 September 2026</strong>
             </span>
           </div>
 

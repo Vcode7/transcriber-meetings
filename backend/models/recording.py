@@ -64,3 +64,13 @@ class JobStatus(BaseModel):
     progress: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+class RomMetadata(BaseModel):
+    id: str
+    recording_id: str
+    user_id: str
+    rom_data: Optional[Dict[str, Any]] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+

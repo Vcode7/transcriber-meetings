@@ -11,7 +11,7 @@ from sqlalchemy import text
 from database import get_db, get_db_context, dt_to_str, to_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file
-from utils.audio_utils import validate_audio, convert_to_wav, get_duration
+from utils.audio_utils import validate_audio, convert_to_wav, get_duration, trim_audio
 from tasks.pipeline import run_pipeline, run_finalize_pipeline
 from tasks.chunk_pipeline import run_chunk_pipeline
 from tasks.upload_chunk_pipeline import run_upload_chunk_pipeline, UPLOAD_CHUNK_THRESHOLD_SEC
@@ -185,6 +185,8 @@ async def upload_audio(
     participant_voice_ids: Optional[str] = Form(default="[]"),  # JSON array string
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    trim_start_sec: Optional[float] = Form(default=None),
+    trim_end_sec: Optional[float] = Form(default=None),
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -218,6 +220,22 @@ async def upload_audio(
         raise HTTPException(status_code=422, detail=reason)
 
     logger.info(f"[Audio] Audio validated OK: {wav_path}")
+
+    # ── Optional trim ─────────────────────────────────────────────────────
+    if trim_start_sec is not None and trim_end_sec is not None:
+        try:
+            file_dur = get_duration(wav_path)
+            t_start = max(0.0, float(trim_start_sec))
+            t_end = min(float(trim_end_sec), file_dur)
+            if t_end > t_start:
+                trimmed_path = trim_audio(wav_path, t_start, t_end)
+                delete_file(wav_path)
+                wav_path = trimmed_path
+                logger.info(f"[Audio] Trimmed upload to [{t_start:.2f}s – {t_end:.2f}s] → {wav_path}")
+            else:
+                logger.warning(f"[Audio] Trim params out of range ({trim_start_sec}–{trim_end_sec}); skipping trim.")
+        except Exception as trim_err:
+            logger.warning(f"[Audio] Trim failed (non-fatal): {trim_err}; using untrimmed file.")
 
     # Get duration (header-only read — no RAM spike regardless of file size)
     duration = get_duration(wav_path)
@@ -268,6 +286,8 @@ async def submit_recording(
     participant_voice_ids: Optional[str] = Form(default="[]"),
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    trim_start_sec: Optional[float] = Form(default=None),
+    trim_end_sec: Optional[float] = Form(default=None),
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -300,6 +320,22 @@ async def submit_recording(
         logger.warning(f"[Audio] Audio validation failed: {reason}")
         delete_file(wav_path)
         raise HTTPException(status_code=422, detail=reason)
+
+    # ── Optional trim ─────────────────────────────────────────────────────
+    if trim_start_sec is not None and trim_end_sec is not None:
+        try:
+            file_dur = get_duration(wav_path)
+            t_start = max(0.0, float(trim_start_sec))
+            t_end = min(float(trim_end_sec), file_dur)
+            if t_end > t_start:
+                trimmed_path = trim_audio(wav_path, t_start, t_end)
+                delete_file(wav_path)
+                wav_path = trimmed_path
+                logger.info(f"[Audio] Trimmed recording to [{t_start:.2f}s – {t_end:.2f}s] → {wav_path}")
+            else:
+                logger.warning(f"[Audio] Trim params out of range ({trim_start_sec}–{trim_end_sec}); skipping trim.")
+        except Exception as trim_err:
+            logger.warning(f"[Audio] Trim failed (non-fatal): {trim_err}; using untrimmed file.")
 
     # Get duration (header-only read — no RAM spike regardless of file size)
     duration = get_duration(wav_path)
@@ -684,7 +720,7 @@ async def list_active_jobs(
                 SELECT id, filename, status, progress, duration, created_at, meeting_prompt
                 FROM recordings
                 WHERE user_id = :uid
-                  AND status IN ('pending', 'processing', 'transcript_ready')
+                  AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
                 ORDER BY created_at DESC
                 LIMIT 20
             """),
@@ -738,3 +774,129 @@ async def list_active_jobs(
 
     logger.debug(f"[Audio] Active jobs for user {user_id}: {len(jobs)}")
     return {"jobs": jobs}
+
+
+# ── Missing Transcription Recovery endpoints ──────────────────
+
+@router.get("/{recording_id}/transcript/raw")
+async def get_raw_transcript(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return the raw aligned transcript segments saved after transcription+alignment,
+    before any speaker diarization.  Only available when job status is
+    'pending_transcript_review' or after pipeline has passed that point.
+    """
+    import json as _json
+    user_id = current_user["id"]
+    async with get_db_context() as db:
+        r = await db.execute(
+            text("SELECT id, status, raw_transcript FROM recordings WHERE id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        rec = r.mappings().fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+
+    raw = rec.get("raw_transcript") or "[]"
+    try:
+        segments = _json.loads(raw)
+    except Exception:
+        segments = []
+
+    return {
+        "recording_id": recording_id,
+        "status": rec["status"],
+        "segments": segments,
+    }
+
+
+from pydantic import BaseModel as _BaseModel
+from typing import List as _List
+
+class TranscriptCorrection(_BaseModel):
+    start: float
+    end: float
+    text: str
+
+class SubmitCorrectionsRequest(_BaseModel):
+    corrections: _List[TranscriptCorrection]
+
+
+@router.post("/{recording_id}/transcript/corrections")
+async def submit_transcript_corrections(
+    recording_id: str,
+    req: SubmitCorrectionsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Merge user-supplied transcript corrections into the raw_transcript and
+    set the recording status back to 'processing' so the pipeline resumes.
+
+    Each correction is inserted as a new segment at the correct chronological
+    position in the raw_transcript array.
+    """
+    import json as _json
+    user_id = current_user["id"]
+
+    async with get_db_context() as db:
+        r = await db.execute(
+            text("SELECT id, status, raw_transcript FROM recordings WHERE id = :rid AND user_id = :uid"),
+            {"rid": recording_id, "uid": user_id},
+        )
+        rec = r.mappings().fetchone()
+
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+
+    if rec["status"] not in ("pending_transcript_review",):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is not awaiting transcript review (status: {rec['status']})"
+        )
+
+    # Load existing segments
+    try:
+        segments = _json.loads(rec.get("raw_transcript") or "[]")
+    except Exception:
+        segments = []
+
+    # Insert correction segments
+    for corr in req.corrections:
+        segments.append({
+            "start": corr.start,
+            "end": corr.end,
+            "text": corr.text,
+            "words": [],  # no word-level alignment for manual corrections
+            "manually_added": True,
+        })
+
+    # Sort by start time
+    segments.sort(key=lambda s: s.get("start", 0.0))
+
+    merged_json = _json.dumps(segments, ensure_ascii=False)
+
+    # Write updated transcript and resume pipeline
+    async with get_db_context() as db:
+        await db.execute(
+            text("""
+                UPDATE recordings
+                SET status = 'processing',
+                    progress = 'diarizing',
+                    raw_transcript = :rt
+                WHERE id = :rid
+            """),
+            {"rt": merged_json, "rid": recording_id},
+        )
+        await db.commit()
+
+    logger.info(
+        f"[Audio] Transcript corrections submitted for {recording_id}: "
+        f"{len(req.corrections)} correction(s) merged; pipeline resumed."
+    )
+    return {
+        "status": "resumed",
+        "corrections_merged": len(req.corrections),
+        "total_segments": len(segments),
+    }
