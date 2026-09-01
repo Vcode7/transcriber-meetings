@@ -16,7 +16,7 @@ import warnings
 import numpy as np
 import soundfile as sf
 import librosa
-from typing import Tuple
+from typing import Tuple, Optional, List
 
 # Suppress librosa warnings
 warnings.filterwarnings('ignore', category=FutureWarning, module='librosa')
@@ -189,37 +189,45 @@ def convert_to_wav(input_path: str, output_path: str, sr: int = 16000) -> str:
         return output_path
 
 
-def trim_audio(wav_path: str, start_sec: float, end_sec: float) -> str:
+def process_audio_edit(
+    wav_path: str,
+    start_sec: Optional[float] = None,
+    end_sec: Optional[float] = None,
+    cut_start_sec: Optional[float] = None,
+    cut_end_sec: Optional[float] = None,
+) -> str:
     """
-    Trim a WAV file to the specified [start_sec, end_sec] range using ffmpeg.
+    Trim and/or cut a WAV file using ffmpeg.
 
-    Memory-efficient: ffmpeg streams the operation without loading the audio into RAM.
-    Returns the path to the trimmed WAV file (sibling of the original, with _trimmed suffix).
-    Original file is NOT deleted — the caller is responsible for cleanup.
+    Supports:
+    - Trimming boundary edges: [start_sec, end_sec]
+    - Removing a middle section: [cut_start_sec, cut_end_sec] and seamlessly joining the rest.
+    - Combining both: keeps [start_sec, cut_start_sec] and [cut_end_sec, end_sec].
+
+    Returns the path to the edited WAV file (sibling of the original, with _edited suffix).
+    Original file is NOT deleted — caller is responsible for cleanup.
 
     Parameters
     ----------
-    wav_path  : Path to the source 16kHz mono WAV file.
-    start_sec : Trim start time in seconds (≥ 0).
-    end_sec   : Trim end time in seconds (> start_sec).
+    wav_path      : Path to the source 16kHz mono WAV file.
+    start_sec     : Trim start time in seconds (>= 0).
+    end_sec       : Trim end time in seconds (> start_sec).
+    cut_start_sec : Start of section to remove (>= start_sec).
+    cut_end_sec   : End of section to remove (> cut_start_sec).
 
     Returns
     -------
-    Path to the trimmed WAV file.
-
-    Raises
-    ------
-    ValueError  : If start_sec >= end_sec or values are out of range.
-    RuntimeError: If ffmpeg fails.
+    Path to the processed WAV file.
     """
-    if start_sec < 0:
-        start_sec = 0.0
-    if end_sec <= start_sec:
-        raise ValueError(f"trim_audio: end_sec ({end_sec:.3f}) must be > start_sec ({start_sec:.3f})")
+    file_dur = get_duration(wav_path)
+    s = max(0.0, float(start_sec)) if start_sec is not None else 0.0
+    e = min(float(end_sec), file_dur) if end_sec is not None else file_dur
 
-    duration = end_sec - start_sec
+    if e <= s:
+        raise ValueError(f"process_audio_edit: end_sec ({e:.3f}) must be > start_sec ({s:.3f})")
+
     base, ext = os.path.splitext(wav_path)
-    trimmed_path = f"{base}_trimmed{ext}"
+    edited_path = f"{base}_edited{ext}"
 
     run_kwargs: dict = {
         "capture_output": True,
@@ -228,26 +236,97 @@ def trim_audio(wav_path: str, start_sec: float, end_sec: float) -> str:
     if os.name == "nt":
         run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
-    result = subprocess.run(
-        [
+    has_cut = False
+    if cut_start_sec is not None and cut_end_sec is not None:
+        c_start = max(s, float(cut_start_sec))
+        c_end = min(e, float(cut_end_sec))
+        if c_end > c_start + 0.01:
+            has_cut = True
+            seg1_valid = (c_start - s) >= 0.05
+            seg2_valid = (e - c_end) >= 0.05
+
+            if seg1_valid and seg2_valid:
+                # Two segments joined with concat filter
+                filter_str = (
+                    f"[0:a]atrim=start={s:.3f}:end={c_start:.3f},asetpts=PTS-STARTPTS[a1];"
+                    f"[0:a]atrim=start={c_end:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a2];"
+                    f"[a1][a2]concat=n=2:v=0:a=1[outa]"
+                )
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", wav_path,
+                    "-filter_complex", filter_str,
+                    "-map", "[outa]",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-f", "wav",
+                    "-acodec", "pcm_s16le",
+                    edited_path,
+                ]
+            elif seg1_valid:
+                # Keep only segment 1 [s, c_start]
+                duration = c_start - s
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(s),
+                    "-i", wav_path,
+                    "-t", str(duration),
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-f", "wav",
+                    "-acodec", "pcm_s16le",
+                    edited_path,
+                ]
+            elif seg2_valid:
+                # Keep only segment 2 [c_end, e]
+                duration = e - c_end
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(c_end),
+                    "-i", wav_path,
+                    "-t", str(duration),
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-f", "wav",
+                    "-acodec", "pcm_s16le",
+                    edited_path,
+                ]
+            else:
+                raise ValueError("Cut section covers the entire selected audio range.")
+
+            result = subprocess.run(cmd, **run_kwargs)
+            if result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace")[-500:]
+                raise RuntimeError(f"ffmpeg middle-cut failed (code {result.returncode}): {stderr}")
+            return edited_path
+
+    # If no cut applied, check if boundary trim is needed
+    if s > 0.01 or e < file_dur - 0.01:
+        duration = e - s
+        cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start_sec),    # seek BEFORE input for fast seek
+            "-ss", str(s),
             "-i", wav_path,
-            "-t", str(duration),       # trim duration
+            "-t", str(duration),
             "-ar", "16000",
             "-ac", "1",
             "-f", "wav",
             "-acodec", "pcm_s16le",
-            trimmed_path,
-        ],
-        **run_kwargs
-    )
+            edited_path,
+        ]
+        result = subprocess.run(cmd, **run_kwargs)
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace")[-500:]
+            raise RuntimeError(f"trim_audio ffmpeg failed (code {result.returncode}): {stderr}")
+        return edited_path
 
-    if result.returncode != 0:
-        stderr = result.stderr.decode(errors="replace")[-500:]
-        raise RuntimeError(f"trim_audio ffmpeg failed (code {result.returncode}): {stderr}")
+    # If untouched
+    return wav_path
 
-    return trimmed_path
+
+def trim_audio(wav_path: str, start_sec: float, end_sec: float) -> str:
+    """Backward-compatible wrapper for trim_audio."""
+    return process_audio_edit(wav_path, start_sec=start_sec, end_sec=end_sec)
 
 
 def compute_rms(audio: np.ndarray) -> float:

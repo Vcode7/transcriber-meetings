@@ -192,6 +192,13 @@ PROMPT_META: list[dict] = [
         "variables": ["{previous_context}", "{video_context_section}", "{window_text}"],
     },
     {
+        "key": "rom_discussion_embedded",
+        "name": "Stage 1: Extract Discussion Points with Embedded Actions",
+        "category": "ROM",
+        "description": "Default Stage 1 prompt. Extracts structured discussion points weaving actions, commitments, and explicit action_owner directly into points.",
+        "variables": ["{previous_context}", "{video_context_section}", "{window_text}"],
+    },
+    {
         "key": "rom_discussion_no_actions",
         "name": "Stage 1: Extract Discussion Points Only (No Actions)",
         "category": "ROM",
@@ -273,7 +280,7 @@ PROMPT_META: list[dict] = [
         "name": "Stage 3: Batch Agenda Assignment",
         "category": "ROM",
         "description": "Assigns each discussion point in a batch directly to the most appropriate agenda from the complete agenda list.",
-        "variables": ["{agenda_reference}", "{batch_json}"],
+        "variables": ["{agenda_reference}", "{discussion_order_guidance}", "{timeline_guidance}", "{batch_json}"],
     },
     {
         "key": "rom_agenda_doc_points",
@@ -315,6 +322,7 @@ def _defaults() -> dict[str, str]:
         COLLECTION_COMPARE_PROMPT,
         COLLECTION_TOPIC_GROWTH_PROMPT,
         ROM_DISCUSSION_EXTRACTION_PROMPT,
+        ROM_DISCUSSION_EMBEDDED_PROMPT,
         ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT,
         ROM_ACTION_EXTRACTION_PROMPT,
         STAGE1_JSON_REPAIR_PROMPT,
@@ -353,6 +361,7 @@ def _defaults() -> dict[str, str]:
         "collection_compare":             COLLECTION_COMPARE_PROMPT,
         "collection_topic_growth":        COLLECTION_TOPIC_GROWTH_PROMPT,
         "rom_discussion":                 ROM_DISCUSSION_EXTRACTION_PROMPT,
+        "rom_discussion_embedded":        ROM_DISCUSSION_EMBEDDED_PROMPT,
         "rom_discussion_no_actions":      ROM_DISCUSSION_NO_ACTION_ITEMS_PROMPT,
         "rom_action_extraction":         ROM_ACTION_EXTRACTION_PROMPT,
         "stage1_json_repair":             STAGE1_JSON_REPAIR_PROMPT,

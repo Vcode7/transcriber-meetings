@@ -263,7 +263,12 @@ export default function RecordPage() {
     setStage('stopped')
   }
 
-  const handleSubmit = async (trimStartSec?: number, trimEndSec?: number) => {
+  const handleSubmit = async (
+    trimStartSec?: number,
+    trimEndSec?: number,
+    cutStartSec?: number,
+    cutEndSec?: number
+  ) => {
     if (!recorder.audioBlob) return
     setStage('uploading')
     setUploadError(null)
@@ -278,6 +283,10 @@ export default function RecordPage() {
       if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
         form.append('trim_start_sec', String(trimStartSec))
         form.append('trim_end_sec', String(trimEndSec))
+      }
+      if (cutStartSec !== undefined && cutEndSec !== undefined && cutEndSec > cutStartSec) {
+        form.append('cut_start_sec', String(cutStartSec))
+        form.append('cut_end_sec', String(cutEndSec))
       }
 
       const hasChunks = recorder.chunkIdsRef.current.length > 0
@@ -685,7 +694,7 @@ export default function RecordPage() {
                 <AudioTrimmer
                   file={recorder.audioBlob}
                   fileName={`Recording (${recorder.formattedDuration})`}
-                  onConfirm={(start, end) => handleSubmit(start, end)}
+                  onConfirm={(start, end, cutStart, cutEnd) => handleSubmit(start, end, cutStart, cutEnd)}
                   onSkip={() => handleSubmit()}
                 />
               </div>

@@ -638,9 +638,13 @@ def transcribe_parallel(
         if result.get("raw_text"):
             merged_raw_parts.append(result["raw_text"])
 
+    from services.transcript_normalizer import sanitize_and_merge_segments
+    merged_segments = sanitize_and_merge_segments(merged_segments)
+    merged_aligned_segs = sanitize_and_merge_segments(merged_aligned_segs if merged_aligned_segs else merged_segments)
+
     total_merged = len(merged_segments)
     logger.info(
-        f"[Whisper/Parallel] ✅ Merge complete: {total_merged} segments from {total} chunk(s). "
+        f"[Whisper/Parallel] ✅ Merge complete: {total_merged} non-overlapping segments from {total} chunk(s). "
         f"Language={detected_language}. VRAM cleanup complete."
     )
 
@@ -698,6 +702,9 @@ def transcribe(
     enable_low_volume_recovery = bool(cfg.get("enable_low_volume_recovery", getattr(settings, "ENABLE_LOW_VOLUME_RECOVERY", True)))
     recovery_energy_threshold = float(cfg.get("recovery_energy_threshold", getattr(settings, "RECOVERY_ENERGY_THRESHOLD", -45.0)))
     recovery_min_duration_ms = int(cfg.get("recovery_min_duration_ms", getattr(settings, "RECOVERY_MIN_DURATION_MS", 300)))
+    missing_segment_min_duration_sec = float(cfg.get("missing_segment_min_duration_sec", getattr(settings, "MISSING_SEGMENT_MIN_DURATION_SEC", 2.0)))
+    if missing_segment_min_duration_sec <= 0:
+        missing_segment_min_duration_sec = 2.0
 
     whisper_batch_size = int(cfg.get("whisper_batch_size", getattr(settings, "WHISPER_BATCH_SIZE", 8)))
     whisper_batch_size = max(1, min(32, whisper_batch_size))
@@ -707,6 +714,7 @@ def transcribe(
         f"TranscriptionVAD={'Enabled (Region Processing)' if enable_transcription_vad else 'Disabled (Direct Full Audio)'}, "
         f"AlignmentVAD={'Enabled (Region Slicing)' if enable_alignment_vad else 'Disabled (Full Audio Single Pass)'}, "
         f"AudioNormalization={'Enabled' if enable_audio_norm else 'Disabled'}, "
+        f"MissingSegmentRecoveryMinDuration={missing_segment_min_duration_sec:.2f}s, "
         f"WhisperBatchSize={whisper_batch_size}"
     )
 
@@ -828,134 +836,130 @@ def transcribe(
 
         if enable_segment_merging:
             speech_regions = merge_speech_segments(speech_regions, max_merge_silence_ms)
-
-        # ── Low-Volume Recovery Pass (Secondary Whisper Pass on Quiet Regions with VAD Bypassed) ──
-        if enable_low_volume_recovery and audio_data is not None and len(audio_data) > 0:
-            try:
-                recovered_spans = detect_rejected_low_volume_regions(
-                    audio_data, sr, speech_regions,
-                    energy_threshold_db=recovery_energy_threshold,
-                    min_duration_sec=recovery_min_duration_ms / 1000.0,
-                )
-                if recovered_spans:
-                    pad_sec = min(0.5, max(0.3, speech_pad_ms / 1000.0))
-                    pad_ms = int(pad_sec * 1000)
-                    import tempfile
-                    from difflib import SequenceMatcher
-                    from services.audio_preprocessing import _apply_dynamic_range_compression, _normalize_loudness
-                    
-                    total_raw_recovered = 0
-                    total_merged_recovered = 0
-
-                    for r_start, r_end in recovered_spans:
-                        # Extract region with context padding (approx 300-500ms before and after)
-                        padded_start = max(0.0, r_start - pad_sec)
-                        padded_end = min(audio_dur, r_end + pad_sec)
-                        s_idx = int(padded_start * sr)
-                        e_idx = int(padded_end * sr)
-                        span_audio = audio_data[s_idx:e_idx]
-                        if len(span_audio) < int(sr * 0.2):
-                            continue
-                        
-                        # Apply selective adaptive loudness enhancement to recovery clip
-                        from services.audio_preprocessing import _apply_selective_loudness_enhancement
-                        enhanced_span, rec_stats = _apply_selective_loudness_enhancement(
-                            span_audio,
-                            sr=sr,
-                            target_dbfs=-18.0,
-                        )
-
-                        tmp_rec = None
-                        try:
-                            fd, tmp_rec = tempfile.mkstemp(suffix="_rec.wav")
-                            os.close(fd)
-                            sf.write(tmp_rec, enhanced_span, sr, subtype="PCM_16")
-
-                            # Direct Whisper pass with VAD explicitly bypassed
-                            rec_kwargs = {
-                                "batch_size": 1,
-                                "language": detected_lang,
-                            }
-                            if prompt_str and not hasattr(model, "options"):
-                                rec_kwargs["initial_prompt"] = prompt_str
-
-                            try:
-                                rec_res = model.transcribe(tmp_rec, **rec_kwargs)
-                            except TypeError as rec_te:
-                                logger.warning(f"[LowVolumeRecovery] Retrying transcribe without unsupported kwargs: {rec_te}")
-                                rec_kwargs.pop("language", None)
-                                rec_kwargs.pop("initial_prompt", None)
-                                rec_res = model.transcribe(tmp_rec, **rec_kwargs)
-
-                            for r_seg in rec_res.get("segments", []):
-                                txt = r_seg.get("text", "").strip()
-                                if not txt:
-                                    continue
-                                
-                                total_raw_recovered += 1
-                                seg_start = round(r_seg.get("start", 0.0) + padded_start, 3)
-                                seg_end = round(r_seg.get("end", 0.0) + padded_start, 3)
-                                shifted_seg = dict(r_seg)
-                                shifted_seg["start"] = seg_start
-                                shifted_seg["end"] = seg_end
-
-                                # Deduplicate against primary raw_segments
-                                txt_lower = txt.lower()
-                                is_dup = False
-                                for ex in raw_segments:
-                                    ex_txt = ex.get("text", "").strip().lower()
-                                    ex_start = ex.get("start", 0.0)
-                                    ex_end = ex.get("end", 0.0)
-                                    if abs(seg_start - ex_start) < 2.5 or abs(seg_end - ex_end) < 2.5:
-                                        if txt_lower in ex_txt or ex_txt in txt_lower:
-                                            is_dup = True
-                                            break
-                                        if SequenceMatcher(None, txt_lower, ex_txt).ratio() > 0.7:
-                                            is_dup = True
-                                            break
-
-                                if not is_dup:
-                                    raw_segments.append(shifted_seg)
-                                    total_merged_recovered += 1
-
-                        except Exception as rec_err:
-                            logger.debug(f"[LowVolumeRecovery] Recovery pass on span [{r_start:.2f}s-{r_end:.2f}s] failed: {rec_err}")
-                        finally:
-                            if tmp_rec and os.path.exists(tmp_rec):
-                                try:
-                                    os.unlink(tmp_rec)
-                                except OSError:
-                                    pass
-
-                    if total_merged_recovered > 0:
-                        raw_segments.sort(key=lambda s: s.get("start", 0.0))
-
-                    logger.info(
-                        f"[LowVolumeRecovery]\n"
-                        f"  - Candidate Regions: {len(recovered_spans)}\n"
-                        f"  - Context Padding: {pad_ms} ms\n"
-                        f"  - Audio Enhancement: Selective Adaptive Loudness Enhancement Applied\n"
-                        f"    - Avg Input Loudness: {rec_stats['avg_input_dbfs']} dBFS\n"
-                        f"    - Quiet Windows Detected: {rec_stats['quiet_windows_pct']}%\n"
-                        f"    - Avg Gain Applied: +{rec_stats['avg_gain_applied_db']} dB\n"
-                        f"    - Max Gain Applied: +{rec_stats['max_gain_applied_db']} dB\n"
-                        f"    - Peak Limiter Activated: {rec_stats['limiter_activated']}\n"
-                        f"  - Recovery Whisper Pass: Executed (VAD Bypassed)\n"
-                        f"  - Recovery Segments Produced: {total_raw_recovered}\n"
-                        f"  - New Segments Merged: {total_merged_recovered}"
-                    )
-                else:
-                    logger.info(
-                        f"[LowVolumeRecovery]\n"
-                        f"  - Candidate Regions: 0\n"
-                        f"  - Context Padding: {speech_pad_ms} ms\n"
-                        f"  - Audio Enhancement: Gain + Compression Configured\n"
-                        f"  - Recovery Whisper Pass: Skipped (No low-volume candidate regions found above threshold {recovery_energy_threshold} dBFS)"
-                    )
-            except Exception as low_vol_err:
-                logger.warning(f"[LowVolumeRecovery] Recovery pass failed ({low_vol_err}) — keeping primary segments")
     else:
-        logger.info("[Transcription] Transcription VAD: Disabled — bypassing speech region detection, padding, merging, and low-volume recovery pass.")
+        logger.info("[Transcription] Transcription VAD: Disabled — using primary transcription segment spans for gap analysis.")
+        speech_regions = [
+            (float(s.get("start", 0.0)), float(s.get("end", 0.0)))
+            for s in raw_segments
+            if float(s.get("end", 0.0)) > float(s.get("start", 0.0))
+        ]
+
+    # ── Missing Speech & Low-Volume Recovery Pass ──
+    # Runs whenever low-volume recovery or missing transcript recovery is enabled in user settings
+    missing_recovery_active = enable_low_volume_recovery or bool(user_settings.get("missing_transcript_recovery_enabled", False))
+    if missing_recovery_active and audio_data is not None and len(audio_data) > 0:
+        min_dur_sec = max(0.1, missing_segment_min_duration_sec)
+        logger.info(
+            f"[MissingSegmentRecovery] Running missing segment recovery pass: "
+            f"min_duration_threshold={min_dur_sec:.2f}s, energy_threshold={recovery_energy_threshold:.1f} dBFS"
+        )
+        try:
+            recovered_spans = detect_rejected_low_volume_regions(
+                audio_data, sr, speech_regions or [],
+                energy_threshold_db=recovery_energy_threshold,
+                min_duration_sec=min_dur_sec,
+            )
+            if recovered_spans:
+                pad_sec = min(0.5, max(0.3, speech_pad_ms / 1000.0))
+                pad_ms = int(pad_sec * 1000)
+                import tempfile
+                from services.transcript_normalizer import sanitize_and_merge_segments
+                
+                total_raw_recovered = 0
+                recovered_segments_to_merge = []
+
+                for r_start, r_end in recovered_spans:
+                    # Extract region with context padding (approx 300-500ms before and after)
+                    padded_start = max(0.0, r_start - pad_sec)
+                    padded_end = min(audio_dur, r_end + pad_sec)
+                    s_idx = int(padded_start * sr)
+                    e_idx = int(padded_end * sr)
+                    span_audio = audio_data[s_idx:e_idx]
+                    if len(span_audio) < int(sr * min_dur_sec):
+                        continue
+                    
+                    # Apply selective adaptive loudness enhancement to recovery clip
+                    from services.audio_preprocessing import _apply_selective_loudness_enhancement
+                    enhanced_span, rec_stats = _apply_selective_loudness_enhancement(
+                        span_audio,
+                        sr=sr,
+                        target_dbfs=-18.0,
+                    )
+
+                    tmp_rec = None
+                    try:
+                        fd, tmp_rec = tempfile.mkstemp(suffix="_rec.wav")
+                        os.close(fd)
+                        sf.write(tmp_rec, enhanced_span, sr, subtype="PCM_16")
+
+                        # Direct Whisper pass with VAD explicitly bypassed
+                        rec_kwargs = {
+                            "batch_size": 1,
+                            "language": detected_lang,
+                        }
+                        if prompt_str and not hasattr(model, "options"):
+                            rec_kwargs["initial_prompt"] = prompt_str
+
+                        try:
+                            rec_res = model.transcribe(tmp_rec, **rec_kwargs)
+                        except TypeError as rec_te:
+                            logger.warning(f"[MissingSegmentRecovery] Retrying transcribe without unsupported kwargs: {rec_te}")
+                            rec_kwargs.pop("language", None)
+                            rec_kwargs.pop("initial_prompt", None)
+                            rec_res = model.transcribe(tmp_rec, **rec_kwargs)
+
+                        for r_seg in rec_res.get("segments", []):
+                            txt = r_seg.get("text", "").strip()
+                            if not txt:
+                                continue
+                            
+                            total_raw_recovered += 1
+                            seg_start = round(r_seg.get("start", 0.0) + padded_start, 3)
+                            seg_end = round(r_seg.get("end", 0.0) + padded_start, 3)
+                            shifted_seg = dict(r_seg)
+                            shifted_seg["start"] = seg_start
+                            shifted_seg["end"] = seg_end
+                            shifted_seg["manually_added"] = False
+                            recovered_segments_to_merge.append(shifted_seg)
+
+                    except Exception as rec_err:
+                        logger.debug(f"[MissingSegmentRecovery] Recovery pass on span [{r_start:.2f}s-{r_end:.2f}s] failed: {rec_err}")
+                    finally:
+                        if tmp_rec and os.path.exists(tmp_rec):
+                            try:
+                                os.unlink(tmp_rec)
+                            except OSError:
+                                pass
+
+                orig_count = len(raw_segments)
+                if recovered_segments_to_merge:
+                    raw_segments = sanitize_and_merge_segments(raw_segments, recovered_segments_to_merge)
+                recovered_segments_count = max(0, len(raw_segments) - orig_count)
+
+                logger.info(
+                    f"[MissingSegmentRecovery]\n"
+                    f"  - Minimum Segment Duration Threshold: {min_dur_sec:.2f}s\n"
+                    f"  - Candidate Regions (>= {min_dur_sec:.2f}s): {len(recovered_spans)}\n"
+                    f"  - Context Padding: {pad_ms} ms\n"
+                    f"  - Audio Enhancement: Selective Adaptive Loudness Enhancement Applied\n"
+                    f"    - Avg Input Loudness: {rec_stats['avg_input_dbfs']} dBFS\n"
+                    f"    - Quiet Windows Detected: {rec_stats['quiet_windows_pct']}%\n"
+                    f"    - Avg Gain Applied: +{rec_stats['avg_gain_applied_db']} dB\n"
+                    f"    - Max Gain Applied: +{rec_stats['max_gain_applied_db']} dB\n"
+                    f"    - Peak Limiter Activated: {rec_stats['limiter_activated']}\n"
+                    f"  - Recovery Whisper Pass: Executed (VAD Bypassed)\n"
+                    f"  - Recovery Segments Produced: {total_raw_recovered}\n"
+                    f"  - New Segments Merged (Non-Overlapping): {recovered_segments_count}"
+                )
+            else:
+                logger.info(
+                    f"[MissingSegmentRecovery]\n"
+                    f"  - Minimum Segment Duration Threshold: {min_dur_sec:.2f}s\n"
+                    f"  - Candidate Regions: 0 (No missing speech spans >= {min_dur_sec:.2f}s found above threshold {recovery_energy_threshold} dBFS)\n"
+                    f"  - Recovery Whisper Pass: Skipped"
+                )
+        except Exception as low_vol_err:
+            logger.warning(f"[MissingSegmentRecovery] Recovery pass failed ({low_vol_err}) — keeping primary segments")
 
     # ── Step 4: Normalize Text & Run Forced Alignment ─────────────────────
     vocab_terms: Optional[List[str]] = None
@@ -1059,14 +1063,17 @@ def transcribe(
         })
         raw_parts.append(text)
 
-    total_words_count = sum(len(s["words"]) for s in segments)
+    from services.transcript_normalizer import sanitize_and_merge_segments
+    segments = sanitize_and_merge_segments(segments)
+    aligned_result = {"segments": segments}
+    total_words_count = sum(len(s.get("words", [])) for s in segments)
 
     logger.info(
         f"[Transcription Pipeline Final Statistics]\n"
         f"  - Audio Duration: {audio_dur:.2f}s\n"
         f"  - Preprocessing Normalization: {'Applied' if enable_audio_norm else 'Disabled'}\n"
         f"  - Low-Volume Recovery Segments Added: {recovered_segments_count}\n"
-        f"  - Final Transcript Segments: {len(segments)} ({total_words_count} total words)"
+        f"  - Final Transcript Segments (Non-Overlapping): {len(segments)} ({total_words_count} total words)"
     )
 
     return {

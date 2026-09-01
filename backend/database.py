@@ -184,6 +184,7 @@ async def connect_db():
                 enable_low_volume_recovery INTEGER NOT NULL DEFAULT 1,
                 recovery_energy_threshold REAL NOT NULL DEFAULT -45.0,
                 recovery_min_duration_ms INTEGER NOT NULL DEFAULT 300,
+                missing_segment_min_duration_sec REAL NOT NULL DEFAULT 2.0,
                 whisper_parallel_processing INTEGER NOT NULL DEFAULT 1,
                 whisper_parallel_chunk_minutes INTEGER NOT NULL DEFAULT 10,
                 rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
@@ -640,11 +641,20 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
-        # missing_transcript_recovery_enabled — user toggle to pause pipeline after transcription
+        # missing_transcript_recovery_enabled — user toggle for missing transcript recovery
         try:
             await conn.execute(text(
                 "ALTER TABLE user_settings ADD COLUMN missing_transcript_recovery_enabled "
                 "INTEGER NOT NULL DEFAULT 0"
+            ))
+        except Exception:
+            pass  # column already exists
+
+        # missing_segment_min_duration_sec — minimum segment length threshold for missing speech recovery
+        try:
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN missing_segment_min_duration_sec "
+                "REAL NOT NULL DEFAULT 2.0"
             ))
         except Exception:
             pass  # column already exists

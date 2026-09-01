@@ -117,8 +117,9 @@ class UserSettings(BaseModel):
     min_audio_duration_seconds: float = Field(default=2.0, ge=0.1, le=30.0)
     min_audio_rms_threshold: float = Field(default=0.003, ge=0.0001, le=0.1)
 
-    # Missing Transcription Recovery
+    # Missing Segment / Transcription Recovery Settings
     missing_transcript_recovery_enabled: bool = False
+    missing_segment_min_duration_sec: float = Field(default=2.0, ge=0.1, le=60.0)
 
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -238,8 +239,9 @@ class UserSettingsUpdate(BaseModel):
     min_audio_duration_seconds: float | None = Field(default=None, ge=0.1, le=30.0)
     min_audio_rms_threshold: float | None = Field(default=None, ge=0.0001, le=0.1)
 
-    # Missing Transcription Recovery
+    # Missing Segment / Transcription Recovery Settings
     missing_transcript_recovery_enabled: bool | None = None
+    missing_segment_min_duration_sec: float | None = Field(default=None, ge=0.1, le=60.0)
 
 
 

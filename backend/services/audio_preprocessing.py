@@ -590,31 +590,59 @@ def detect_rejected_low_volume_regions(
     sr: int,
     speech_regions: List[Tuple[float, float]],
     energy_threshold_db: float = -45.0,
-    min_duration_sec: float = 0.3,
+    min_duration_sec: float = 2.0,
 ) -> List[Tuple[float, float]]:
     """
-    Analyze rejected (non-speech) regions between VAD speech spans.
-    Returns regions containing audio energy >= energy_threshold_db (likely quiet speech).
+    Analyze rejected (untranscribed/non-speech) audio gaps between speech spans.
+    Only gaps with duration >= min_duration_sec (default 2.0s) and audio energy >= energy_threshold_db
+    are selected for missing segment recovery. Shorter segments are ignored.
     """
+    min_duration_sec = max(0.05, float(min_duration_sec))
     total_sec = len(audio) / sr
     if total_sec <= 0:
         return []
 
     sorted_speech = sorted(speech_regions, key=lambda x: x[0])
     rejected_spans: List[Tuple[float, float]] = []
+    ignored_short_spans: int = 0
 
     curr = 0.0
     for s, e in sorted_speech:
-        if s - curr >= min_duration_sec:
+        gap_dur = s - curr
+        if gap_dur >= min_duration_sec:
             rejected_spans.append((curr, s))
+        elif gap_dur > 0:
+            ignored_short_spans += 1
+            logger.debug(
+                f"[MissingSegmentRecovery] Ignoring missing span [{curr:.2f}s–{s:.2f}s] "
+                f"(duration {gap_dur:.2f}s < threshold {min_duration_sec:.2f}s)"
+            )
         curr = max(curr, e)
-    if total_sec - curr >= min_duration_sec:
+
+    tail_gap = total_sec - curr
+    if tail_gap >= min_duration_sec:
         rejected_spans.append((curr, total_sec))
+    elif tail_gap > 0:
+        ignored_short_spans += 1
+        logger.debug(
+            f"[MissingSegmentRecovery] Ignoring trailing missing span [{curr:.2f}s–{total_sec:.2f}s] "
+            f"(duration {tail_gap:.2f}s < threshold {min_duration_sec:.2f}s)"
+        )
+
+    logger.info(
+        f"[MissingSegmentRecovery] Gap analysis: total_audio={total_sec:.2f}s, "
+        f"speech_spans={len(sorted_speech)}, min_segment_threshold={min_duration_sec:.2f}s, "
+        f"candidate_gaps={len(rejected_spans)}, ignored_short_gaps={ignored_short_spans}"
+    )
 
     recovered_spans: List[Tuple[float, float]] = []
     threshold_linear = 10 ** (energy_threshold_db / 20.0)
 
     for r_start, r_end in rejected_spans:
+        span_dur = r_end - r_start
+        if span_dur < min_duration_sec:
+            continue
+
         s_idx = int(r_start * sr)
         e_idx = int(r_end * sr)
         chunk = audio[s_idx:e_idx]
@@ -626,11 +654,21 @@ def detect_rejected_low_volume_regions(
 
         if rms >= threshold_linear:
             recovered_spans.append((round(r_start, 3), round(r_end, 3)))
+            logger.info(
+                f"[MissingSegmentRecovery] Candidate span [{r_start:.2f}s–{r_end:.2f}s] "
+                f"({span_dur:.2f}s >= {min_duration_sec:.2f}s) passed energy check: "
+                f"RMS={rms_db:.1f} dBFS >= {energy_threshold_db:.1f} dBFS → queued for recovery"
+            )
+        else:
             logger.debug(
-                f"[Preprocess] Rejected region [{r_start:.2f}s–{r_end:.2f}s] "
-                f"passed recovery check (RMS={rms_db:.1f} dBFS >= {energy_threshold_db:.1f} dBFS)"
+                f"[MissingSegmentRecovery] Candidate span [{r_start:.2f}s–{r_end:.2f}s] "
+                f"({span_dur:.2f}s) below energy threshold (RMS={rms_db:.1f} dBFS < {energy_threshold_db:.1f} dBFS) → skipped"
             )
 
+    logger.info(
+        f"[MissingSegmentRecovery] Evaluation complete: {len(recovered_spans)} missing segment(s) "
+        f">= {min_duration_sec:.2f}s qualified for secondary Whisper transcription"
+    )
     return recovered_spans
 
 

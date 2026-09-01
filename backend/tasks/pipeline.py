@@ -689,72 +689,23 @@ async def _run_pipeline_impl(
         except Exception as e:
             logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
 
-        # ── Optional: Missing Transcription Recovery pause ─────────────────────
-        # When enabled in user settings, the pipeline pauses here so the user can
-        # review the raw transcript, fill in silence gaps, and submit corrections.
-        # The pipeline resumes when the frontend POST /audio/{id}/transcript/corrections
-        # sets status back to 'processing', or after a 60-minute timeout.
-        _missing_recovery = bool(user_settings_dict.get("missing_transcript_recovery_enabled", False))
-        if _missing_recovery:
-            logger.info(
-                f"[Pipeline] {recording_id} — Missing Transcription Recovery enabled: "
-                f"saving raw transcript ({len(transcript_segs)} segs) & pausing"
-            )
-            _raw_segs_json = to_json(transcript_segs)
-            await _update_status_safe(recording_id, "pending_transcript_review", {
-                "raw_transcript": _raw_segs_json,
-                "progress": "pending_transcript_review",
-            })
-            _review_resumed = False
-            for _wait_iter in range(720):  # max 60 min (720 × 5 s)
-                await asyncio.sleep(5)
-                # Honour cooperative cancellation
-                current_task = asyncio.current_task()
-                if current_task and current_task.cancelled():
-                    return
-                try:
-                    async with get_db_context() as _rdb:
-                        _rr = await _rdb.execute(
-                            text("SELECT status, raw_transcript FROM recordings WHERE id = :rid"),
-                            {"rid": recording_id},
-                        )
-                        _rrow = _rr.mappings().fetchone()
-                    if _rrow:
-                        _st = _rrow.get("status", "")
-                        if _st == "processing":
-                            # User submitted corrections — reload the (possibly updated) segments
-                            _upd_json = _rrow.get("raw_transcript") or _raw_segs_json
-                            try:
-                                _upd_segs = from_json(_upd_json, [])
-                                if _upd_segs:
-                                    transcript_segs = _upd_segs
-                                    aligned_result = {"segments": transcript_segs}
-                                    logger.info(
-                                        f"[Pipeline] {recording_id} — Corrections applied: "
-                                        f"{len(transcript_segs)} segments; pipeline resuming"
-                                    )
-                            except Exception as _ce:
-                                logger.warning(
-                                    f"[Pipeline] {recording_id} — Could not apply corrections ({_ce}); "
-                                    "using original transcript"
-                                )
-                            _review_resumed = True
-                            break
-                        elif _st in ("cancelled", "error"):
-                            logger.info(
-                                f"[Pipeline] {recording_id} — Cancelled/errored during transcript review"
-                            )
-                            return
-                except Exception as _poll_err:
-                    logger.warning(
-                        f"[Pipeline] {recording_id} — Review-poll error (non-fatal): {_poll_err}"
-                    )
-            if not _review_resumed:
-                logger.warning(
-                    f"[Pipeline] {recording_id} — Transcript review timed out (60 min); "
-                    "continuing with original transcript"
-                )
-                await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
+        # ── Missing Transcription Recovery & Non-Overlapping Merge ───────────
+        # Ensure all segments (from primary pass and any recovery passes) are strictly
+        # sanitized, deduplicated, and non-overlapping before proceeding to Diarization.
+        from services.transcript_normalizer import sanitize_and_merge_segments
+        transcript_segs = sanitize_and_merge_segments(transcript_segs)
+        aligned_result = {"segments": transcript_segs}
+        _raw_segs_json = to_json(transcript_segs)
+
+        # Save raw transcript snapshot in DB and set progress to diarizing
+        await _update_status_safe(recording_id, "processing", {
+            "raw_transcript": _raw_segs_json,
+            "progress": "diarizing",
+        })
+        logger.info(
+            f"[Pipeline] {recording_id} — Missing transcription retrieval / transcription phase completed: "
+            f"{len(transcript_segs)} non-overlapping segments; continuing pipeline directly to Stage 2 (Diarization)"
+        )
 
         # ── Stage 2: Diarization ──────────────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
@@ -1314,9 +1265,25 @@ def _post_process_whisperx_segments(
 
     out = []
     for seg_idx, seg in enumerate(wx_result.get("segments", [])):
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+
         raw_id = seg.get("speaker", "")
-        label = id_to_label.get(raw_id) or seg.get("speaker") or _fallback_label(raw_id, seg_idx)
+        label = id_to_label.get(raw_id)
         profile_id = id_to_profile.get(raw_id)
+
+        if not label:
+            best_ov = 0.0
+            best_id_label = None
+            best_id_profile = None
+            for s in identified_segs:
+                ov = max(0.0, min(seg_end, s["end"]) - max(seg_start, s["start"]))
+                if ov > best_ov:
+                    best_ov = ov
+                    best_id_label = s.get("speaker_label") or s.get("speaker")
+                    best_id_profile = s.get("speaker_profile_id")
+            label = best_id_label or seg.get("speaker") or _fallback_label(raw_id, seg_idx)
+            profile_id = best_id_profile or profile_id
 
         enriched_words = []
         for w in seg.get("words", []):
@@ -1327,13 +1294,15 @@ def _post_process_whisperx_segments(
             word_conf = w.get("probability")
             if word_conf is None:
                 word_conf = w.get("score", 1.0)
+            w_speaker_lbl = id_to_label.get(w_raw) or (w_raw if w_raw else None) or label
             enriched_words.append({
                 "word": w.get("word", "").strip(),
                 "start": round(float(w.get("start", seg["start"])), 3),
                 "end": round(float(w.get("end", seg["end"])), 3),
                 "probability": round(float(word_conf), 4),
-                "speaker_label": id_to_label.get(w_raw) or w_raw or label,
+                "speaker_label": w_speaker_lbl,
             })
+
 
         seg_start = seg["start"]
         seg_end = seg["end"]
@@ -1866,6 +1835,11 @@ async def _run_finalize_pipeline_impl(
             unload_align_model()
         except Exception as e:
             logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
+        
+        from services.transcript_normalizer import sanitize_and_merge_segments
+        merged_segments = sanitize_and_merge_segments(merged_segments)
+        merged_aligned_segments = sanitize_and_merge_segments(merged_aligned_segments if merged_aligned_segments else merged_segments)
+        
         full_raw_text = " ".join(merged_raw_parts)
         language = detected_language or "en"
         aligned_result = {"segments": merged_aligned_segments}

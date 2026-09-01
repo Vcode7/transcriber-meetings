@@ -28,7 +28,7 @@ Provides two complementary normalization modes:
 """
 import re
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -405,3 +405,241 @@ def normalize_segments_for_alignment(
         logger.debug("[Normalizer] normalize_segments_for_alignment: no changes needed")
 
     return result
+
+
+def sanitize_and_merge_segments(
+    existing_segments: List[Dict[str, Any]],
+    new_segments: Optional[List[Dict[str, Any]]] = None,
+    min_segment_dur: float = 0.05,
+) -> List[Dict[str, Any]]:
+    """
+    Merge existing transcript segments with newly recovered / manual correction segments
+    and strictly sanitize timestamps so that:
+      1. All segments are ordered chronologically by start time.
+      2. No two adjacent segments overlap: seg[i].end <= seg[i+1].start.
+      3. Overlapping boundaries are clamped cleanly without creating negative or zero durations.
+      4. Duplicate or near-duplicate segments are detected and pruned.
+      5. Word-level tokens are clamped to segment boundaries, and synthetic word tokens
+         are generated for recovered/manual segments lacking word alignments.
+
+    Returns a new list of sanitized, non-overlapping segment dicts.
+    """
+    import copy
+    from difflib import SequenceMatcher
+
+    all_raw: List[Dict[str, Any]] = []
+
+    for s in (existing_segments or []):
+        if isinstance(s, dict):
+            all_raw.append(copy.deepcopy(s))
+
+    for s in (new_segments or []):
+        if isinstance(s, dict):
+            item = copy.deepcopy(s)
+            item["manually_added"] = item.get("manually_added", True)
+            all_raw.append(item)
+
+    if not all_raw:
+        return []
+
+    # Step 1: Basic validation and normalization
+    valid_candidates: List[Dict[str, Any]] = []
+    for s in all_raw:
+        try:
+            start = round(float(s.get("start", 0.0)), 3)
+            end = round(float(s.get("end", start + 0.1)), 3)
+        except (ValueError, TypeError):
+            continue
+
+        text = str(s.get("text", "")).strip()
+        if not text or end <= start:
+            continue
+
+        start = max(0.0, start)
+        end = max(start + min_segment_dur, end)
+
+        seg_copy = dict(s)
+        seg_copy["start"] = start
+        seg_copy["end"] = end
+        seg_copy["text"] = text
+        valid_candidates.append(seg_copy)
+
+    if not valid_candidates:
+        return []
+
+    # Step 2: Sort chronologically
+    valid_candidates.sort(key=lambda x: (x["start"], x["end"]))
+
+    # Step 3: Deduplicate identical/overlapping candidates
+    deduped: List[Dict[str, Any]] = []
+    for cand in valid_candidates:
+        c_text = cand["text"].lower()
+        c_start = cand["start"]
+        c_end = cand["end"]
+
+        is_duplicate = False
+        for ex in deduped:
+            ex_text = ex["text"].lower()
+            ex_start = ex["start"]
+            ex_end = ex["end"]
+
+            time_overlap = max(0.0, min(c_end, ex_end) - max(c_start, ex_start))
+            if time_overlap > 0:
+                # Check text similarity
+                if c_text == ex_text or c_text in ex_text or ex_text in c_text:
+                    is_duplicate = True
+                    # If candidate has word data and existing does not, copy words
+                    if cand.get("words") and not ex.get("words"):
+                        ex["words"] = cand["words"]
+                    break
+                ratio = SequenceMatcher(None, c_text, ex_text).ratio()
+                if ratio >= 0.75:
+                    is_duplicate = True
+                    break
+
+        if not is_duplicate:
+            deduped.append(cand)
+
+    # Step 4: Strict Non-Overlap Resolution
+    deduped.sort(key=lambda x: (x["start"], x["end"]))
+    merged: List[Dict[str, Any]] = []
+
+    for curr in deduped:
+        if not merged:
+            merged.append(curr)
+            continue
+
+        prev = merged[-1]
+        prev_start = prev["start"]
+        prev_end = prev["end"]
+        curr_start = curr["start"]
+        curr_end = curr["end"]
+
+        if curr_start >= prev_end:
+            # Clean non-overlapping progression
+            merged.append(curr)
+            continue
+
+        # Overlap detected: prev_end > curr_start
+        overlap_sec = prev_end - curr_start
+
+        # Case A: curr is engulfed inside prev (prev_start <= curr_start and curr_end <= prev_end)
+        if curr_end <= prev_end:
+            if curr_start - prev_start >= min_segment_dur:
+                prev["end"] = round(curr_start, 3)
+                merged.append(curr)
+            else:
+                # Merge text into prev if distinct
+                if curr["text"].lower() not in prev["text"].lower():
+                    prev["text"] = f"{prev['text']} {curr['text']}".strip()
+            continue
+
+        # Case B: Partial overlap (prev_start <= curr_start < prev_end < curr_end)
+        if curr_start - prev_start >= min_segment_dur:
+            # Clamp prev_end to curr_start
+            prev["end"] = round(curr_start, 3)
+            merged.append(curr)
+        else:
+            # prev and curr start almost simultaneously
+            # Split time range between them
+            midpoint = round((prev_start + curr_end) / 2.0, 3)
+            if midpoint - prev_start >= min_segment_dur and curr_end - midpoint >= min_segment_dur:
+                prev["end"] = midpoint
+                curr["start"] = midpoint
+                merged.append(curr)
+            else:
+                # Merge into one segment
+                if curr["text"].lower() not in prev["text"].lower():
+                    prev["text"] = f"{prev['text']} {curr['text']}".strip()
+                prev["end"] = max(prev["end"], curr_end)
+
+    # Step 5: Word-level clamping & synthetic word generation
+    final_segments: List[Dict[str, Any]] = []
+    for seg in merged:
+        seg_start = round(float(seg["start"]), 3)
+        seg_end = round(float(seg["end"]), 3)
+        seg_text = seg["text"].strip()
+
+        if seg_end - seg_start < min_segment_dur or not seg_text:
+            continue
+
+        raw_words = seg.get("words") or []
+        cleaned_words: List[Dict[str, Any]] = []
+
+        if raw_words:
+            last_w_end = seg_start
+            for w in raw_words:
+                w_text = str(w.get("word", "")).strip()
+                if not w_text:
+                    continue
+                try:
+                    w_start = round(max(seg_start, min(seg_end, float(w.get("start", last_w_end)))), 3)
+                    w_end = round(max(w_start + 0.01, min(seg_end, float(w.get("end", w_start + 0.1)))), 3)
+                except (ValueError, TypeError):
+                    w_start = last_w_end
+                    w_end = min(seg_end, w_start + 0.1)
+
+                if w_start < last_w_end:
+                    w_start = last_w_end
+                if w_end <= w_start:
+                    w_end = min(seg_end, w_start + 0.05)
+
+                cleaned_words.append({
+                    "word": w_text,
+                    "start": w_start,
+                    "end": w_end,
+                    "probability": round(float(w.get("probability", w.get("score", 1.0))), 4),
+                    "speaker_label": w.get("speaker_label") or seg.get("speaker_label"),
+                })
+                last_w_end = w_end
+
+        # If no words exist (e.g. manual recovery or quiet region addition), synthesize them
+        if not cleaned_words:
+            tokens = seg_text.split()
+            if tokens:
+                total_dur = seg_end - seg_start
+                dur_per_word = max(0.01, total_dur / len(tokens))
+                for idx, tok in enumerate(tokens):
+                    w_start = round(seg_start + idx * dur_per_word, 3)
+                    w_end = round(seg_start + (idx + 1) * dur_per_word if idx < len(tokens) - 1 else seg_end, 3)
+                    if w_end <= w_start:
+                        w_end = round(w_start + 0.01, 3)
+                    cleaned_words.append({
+                        "word": tok,
+                        "start": w_start,
+                        "end": w_end,
+                        "probability": 1.0,
+                        "speaker_label": seg.get("speaker_label"),
+                    })
+
+        seg["start"] = seg_start
+        seg["end"] = seg_end
+        seg["text"] = seg_text
+        seg["words"] = cleaned_words
+        final_segments.append(seg)
+
+    # Final guarantee: monotonic non-overlapping check
+    for i in range(len(final_segments) - 1):
+        if final_segments[i]["end"] > final_segments[i + 1]["start"]:
+            final_segments[i]["end"] = final_segments[i + 1]["start"]
+
+    # Ensure all final segments have strictly valid duration and bounded word timestamps
+    valid_final: List[Dict[str, Any]] = []
+    for s in final_segments:
+        s_start = round(float(s["start"]), 3)
+        s_end = round(float(s["end"]), 3)
+        if s_end - s_start >= min_segment_dur and s["text"].strip():
+            s["start"] = s_start
+            s["end"] = s_end
+            bounded_words = []
+            for w in s.get("words", []):
+                w_start = round(max(s_start, min(s_end, float(w.get("start", s_start)))), 3)
+                w_end = round(max(w_start + 0.01, min(s_end, float(w.get("end", s_end)))), 3)
+                w["start"] = w_start
+                w["end"] = w_end
+                bounded_words.append(w)
+            s["words"] = bounded_words
+            valid_final.append(s)
+
+    return valid_final
+

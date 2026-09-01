@@ -12,6 +12,8 @@ import {
 import api from '../api/client'
 import { toast } from 'sonner'
 import { getApiErrorDetail } from '../lib/errors'
+import { AgendaTimelineControls, AgendaTimelineRange } from '../components/AgendaTimelineControls'
+import { Stage2ContextPreviewModal, Stage2ContextGroup } from '../components/Stage2ContextPreviewModal'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -77,6 +79,15 @@ const getActionOwnerText = (pt: any): string | null => {
   // Also check if pt is itself an action item object with assignee/owner
   if (!owner && typeof pt === 'object') {
     owner = pt.assignee || pt.owner
+  }
+
+  // Also check if discussion_point has embedded (Owner: ...) pattern
+  if (!owner && pt.discussion_point && typeof pt.discussion_point === 'string') {
+    const m = pt.discussion_point.match(/\((?:Owner|Assignee|Action Owner):\s*([^)]+)\)/i) ||
+              pt.discussion_point.match(/\[(?:Owner|Assignee|Action Owner):\s*([^\]]+)\]/i)
+    if (m && m[1]) {
+      owner = m[1].trim()
+    }
   }
 
   if (!owner) return null
@@ -248,6 +259,8 @@ interface RomData {
     batch_assignments: any[]
     agenda_groups: Record<string, string[]>
     agenda_doc_points: Record<string, AgendaDocEntry>
+    discussion_order?: string[]
+    agenda_timeline?: Record<string, AgendaTimelineRange>
     completed_at: string | null
   } | null
   final_rom: {
@@ -549,9 +562,13 @@ function Stage1WindowRerunModal({
                     <div key={i} style={{ padding: '.45rem .6rem', borderRadius: 6, background: 'hsl(var(--paper)/.4)', border: '1px solid hsl(var(--border)/.3)', fontSize: '.76rem', lineHeight: 1.4 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
                         <span style={{ fontWeight: 700, color: 'hsl(280,75%,60%)' }}>P{i + 1}</span>
-                        {owner && (
+                        {owner ? (
                           <span style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                             <UserCheck size={8} /> Owner: {owner}
+                          </span>
+                        ) : (
+                          <span style={{ background: 'hsl(var(--muted)/.5)', color: 'hsl(var(--pencil))', border: '1px solid hsl(var(--border)/.3)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <UserCheck size={8} /> No action owner
                           </span>
                         )}
                       </div>
@@ -578,9 +595,13 @@ function Stage1WindowRerunModal({
                         <div key={i} style={{ padding: '.45rem .6rem', borderRadius: 6, background: 'hsl(var(--paper))', border: '1px solid hsl(140,70%,45%/.3)', fontSize: '.76rem', lineHeight: 1.4 }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
                             <span style={{ fontWeight: 700, color: 'hsl(140,70%,45%)' }}>New P{i + 1}</span>
-                            {owner && (
+                            {owner ? (
                               <span style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                                 <UserCheck size={8} /> Owner: {owner}
+                              </span>
+                            ) : (
+                              <span style={{ background: 'hsl(var(--muted)/.5)', color: 'hsl(var(--pencil))', border: '1px solid hsl(var(--border)/.3)', padding: '0 5px', borderRadius: 6, fontSize: '.64rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                                <UserCheck size={8} /> No action owner
                               </span>
                             )}
                           </div>
@@ -953,6 +974,13 @@ export default function RomPage() {
   const [stage2EditDraft, setStage2EditDraft] = useState('')
   const [savingStage2Point, setSavingStage2Point] = useState(false)
 
+  // Stage 2 Retrieve Context Preview state
+  const [showContextPreview, setShowContextPreview] = useState(false)
+  const [contextPreviewGroups, setContextPreviewGroups] = useState<Stage2ContextGroup[]>([])
+  const [contextPreviewTotalGroups, setContextPreviewTotalGroups] = useState(0)
+  const [contextPreviewTotalPoints, setContextPreviewTotalPoints] = useState(0)
+  const [previewingContext, setPreviewingContext] = useState(false)
+
   useEffect(() => {
     const handleScrollOrClick = () => {
       if (contextMenu) setContextMenu(null)
@@ -983,6 +1011,82 @@ export default function RomPage() {
 
   // Stage 3 – include agenda doc points toggle
   const [includeAgendaDocPoints, setIncludeAgendaDocPoints] = useState(false)
+
+  // Stage 3 – Agenda Discussion Order & Approximate Timeline
+  const [discussionOrder, setDiscussionOrder] = useState<string[]>([])
+  const [agendaTimeline, setAgendaTimeline] = useState<Record<string, AgendaTimelineRange>>({})
+
+  // Compute effective meeting duration
+  const effectiveMeetingDuration = Math.max(
+    recording?.duration && recording.duration > 10
+      ? recording.duration
+      : Math.max(
+          ...((romData?.stage2?.polished_points || []).map(p => p.timeline_end || 0)),
+          ...((romData?.stage1?.windows || []).map(w => w.window_end || 0)),
+          1800
+        ),
+    60
+  )
+
+  // Synchronize discussionOrder and agendaTimeline with romData.stage3
+  useEffect(() => {
+    const s3Agendas = romData?.stage3?.agendas || []
+    if (s3Agendas.length === 0) {
+      setDiscussionOrder([])
+      setAgendaTimeline({})
+      return
+    }
+
+    const currentIds = s3Agendas.map((a, idx) => a.agenda_id || `A${idx + 1}`)
+    const savedOrder = romData?.stage3?.discussion_order || []
+
+    let newOrder = savedOrder.filter(id => currentIds.includes(id))
+    currentIds.forEach(id => {
+      if (!newOrder.includes(id)) newOrder.push(id)
+    })
+    if (newOrder.length === 0) newOrder = currentIds
+
+    setDiscussionOrder(newOrder)
+
+    const savedTimeline = romData?.stage3?.agenda_timeline || {}
+    const hasValidSavedTimeline = newOrder.every(
+      id => savedTimeline[id] && typeof savedTimeline[id].start_sec === 'number' && typeof savedTimeline[id].end_sec === 'number'
+    )
+
+    if (hasValidSavedTimeline) {
+      setAgendaTimeline(savedTimeline)
+    } else {
+      const count = newOrder.length
+      const slice = effectiveMeetingDuration / count
+      const initialTimeline: Record<string, AgendaTimelineRange> = {}
+      newOrder.forEach((id, idx) => {
+        initialTimeline[id] = {
+          start_sec: Math.round(idx * slice * 10) / 10,
+          end_sec: Math.round((idx + 1) * slice * 10) / 10,
+        }
+      })
+      setAgendaTimeline(initialTimeline)
+    }
+  }, [romData?.stage3?.agendas, romData?.stage3?.discussion_order, romData?.stage3?.agenda_timeline, effectiveMeetingDuration])
+
+  const resetAgendaOrderAndTimeline = () => {
+    const s3Agendas = romData?.stage3?.agendas || []
+    if (s3Agendas.length === 0) return
+    const naturalOrder = s3Agendas.map((a, idx) => a.agenda_id || `A${idx + 1}`)
+    setDiscussionOrder(naturalOrder)
+
+    const count = naturalOrder.length
+    const slice = effectiveMeetingDuration / count
+    const initialTimeline: Record<string, AgendaTimelineRange> = {}
+    naturalOrder.forEach((id, idx) => {
+      initialTimeline[id] = {
+        start_sec: Math.round(idx * slice * 10) / 10,
+        end_sec: Math.round((idx + 1) * slice * 10) / 10,
+      }
+    })
+    setAgendaTimeline(initialTimeline)
+    toast.info('Reset agenda sequence & timeline to natural order')
+  }
 
   // Stage 3 – per-agenda supporting document upload tracking
   const [agendaDocUploading, setAgendaDocUploading] = useState<Record<string, boolean>>({})
@@ -1291,6 +1395,8 @@ export default function RomPage() {
         batch_size: stage3BatchSize,
         include_agenda_doc_points: includeAgendaDocPoints,
         agendas: romData?.stage3?.agendas || undefined,
+        discussion_order: discussionOrder.length > 0 ? discussionOrder : undefined,
+        agenda_timeline: Object.keys(agendaTimeline).length > 0 ? agendaTimeline : undefined,
       })
       const fullData = res.data.rom_data || {
         ...(romData || {} as RomData),
@@ -1644,6 +1750,39 @@ export default function RomPage() {
       setStage2Status('error')
       toast.error(getApiErrorDetail(e) || 'Stage 2 failed')
       return false
+    }
+  }
+
+  const runPreviewStage2Context = async () => {
+    if (!id) return
+    setPreviewingContext(true)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/preview-context`, {
+        meeting_context_top_k: Math.max(0, Number(meetingTopK) || 0),
+        global_context_top_k: Math.max(0, Number(globalTopK) || 0),
+        discussion_window_size: Math.max(3, Number(discussionWindowSize) || 5),
+        min_similarity_threshold: minSimilarityThreshold,
+        process_all_together: processAllTogether,
+        reference_example_points: stage2ReferenceExamples.filter(p => p && p.trim()),
+        previous_meeting_mode: previousMeetingMode,
+        previous_meeting_id: previousMeetingMode === 'select' ? (selectedPreviousMeetingId || null) : null,
+        previous_meeting_top_k: previousMeetingMode !== 'off' ? Math.max(0, Number(previousMeetingTopK) || 0) : 0,
+      })
+      setContextPreviewGroups(res.data.groups || [])
+      setContextPreviewTotalGroups(res.data.total_groups || res.data.groups?.length || 0)
+      setContextPreviewTotalPoints(res.data.total_points || 0)
+      setShowContextPreview(true)
+      const shownCount = res.data.groups?.length || 0
+      const totalCount = res.data.total_groups || shownCount
+      if (totalCount > shownCount) {
+        toast.success(`Retrieved context preview for initial ${shownCount} of ${totalCount} group(s)`)
+      } else {
+        toast.success(`Retrieved context preview for ${shownCount} group(s)`)
+      }
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to retrieve context preview')
+    } finally {
+      setPreviewingContext(false)
     }
   }
 
@@ -2369,19 +2508,38 @@ export default function RomPage() {
               )}
             </div>
 
-            <button
-              onClick={runStage2}
-              disabled={stage2Status === 'processing' || stage1Status !== 'done'}
-              style={{
-                width: '100%', padding: '4px 8px', borderRadius: 7, fontSize: '.73rem', fontWeight: 600,
-                background: (stage2Status === 'processing' || stage1Status !== 'done') ? 'hsl(var(--muted))' : 'hsl(205,90%,55%)',
-                color: 'white', border: 'none', cursor: (stage2Status === 'processing' || stage1Status !== 'done') ? 'not-allowed' : 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5
-              }}
-            >
-              {stage2Status === 'processing' ? <Loader size={11} className="spin" /> : <Sparkles size={11} />}
-              {stage2Status === 'processing' ? 'Enhancing...' : 'Enhance Points'}
-            </button>
+            <div style={{ display: 'flex', gap: 5 }}>
+              <button
+                type="button"
+                onClick={runPreviewStage2Context}
+                disabled={previewingContext || stage1Status !== 'done'}
+                style={{
+                  flex: 1, padding: '4px 6px', borderRadius: 7, fontSize: '.71rem', fontWeight: 600,
+                  border: '1px solid hsl(205,90%,55%/.4)', background: 'hsl(205,90%,55%/.08)', color: 'hsl(205,90%,45%)',
+                  cursor: (previewingContext || stage1Status !== 'done') ? 'not-allowed' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontFamily: 'Inter'
+                }}
+                title="Preview retrieved context for all point groups without modifying points"
+              >
+                {previewingContext ? <Loader size={10} className="spin" /> : <BookOpen size={10} />}
+                {previewingContext ? 'Retrieving...' : 'Retrieve Context'}
+              </button>
+
+              <button
+                type="button"
+                onClick={runStage2}
+                disabled={stage2Status === 'processing' || stage1Status !== 'done'}
+                style={{
+                  flex: 1, padding: '4px 6px', borderRadius: 7, fontSize: '.71rem', fontWeight: 600,
+                  background: (stage2Status === 'processing' || stage1Status !== 'done') ? 'hsl(var(--muted))' : 'hsl(205,90%,55%)',
+                  color: 'white', border: 'none', cursor: (stage2Status === 'processing' || stage1Status !== 'done') ? 'not-allowed' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontFamily: 'Inter'
+                }}
+              >
+                {stage2Status === 'processing' ? <Loader size={10} className="spin" /> : <Sparkles size={10} />}
+                {stage2Status === 'processing' ? 'Enhancing...' : 'Enhance Points'}
+              </button>
+            </div>
           </div>
 
           {/* ── STAGE 3 STEP 1 – CREATE AGENDA ── */}
@@ -2571,6 +2729,16 @@ export default function RomPage() {
               </div>
               <input type="range" min={5} max={50} step={5} value={stage3BatchSize} onChange={e => setStage3BatchSize(Number(e.target.value))} style={{ width: '100%', accentColor: 'hsl(45,90%,55%)' }} />
             </div>
+
+            {/* Discussion Order & Timeline Info */}
+            {discussionOrder.length > 0 && (
+              <div style={{ padding: '.35rem .5rem', borderRadius: 6, background: 'hsl(140,70%,45%/.06)', border: '1px solid hsl(140,70%,45%/.2)', fontSize: '.66rem', color: 'hsl(var(--ink))' }}>
+                <div style={{ fontWeight: 700, color: 'hsl(140,70%,40%)', marginBottom: 2 }}>Order &amp; Timeline Guidance:</div>
+                <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '.63rem', color: 'hsl(var(--pencil))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {discussionOrder.join(' → ')}
+                </div>
+              </div>
+            )}
 
             {/* Include Agenda Document Points checkbox */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: 'hsl(var(--ink))', padding: '.3rem .4rem', borderRadius: 6, background: includeAgendaDocPoints ? 'hsl(280,75%,60%/.08)' : 'transparent', border: `1px solid ${includeAgendaDocPoints ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.3)'}`, transition: 'all .15s' }}>
@@ -2848,23 +3016,24 @@ export default function RomPage() {
                                                 }}>
                                                   <UserCheck size={9} /> Owner: {owner}
                                                 </span>
-                                              ) : null
+                                              ) : (
+                                                <span style={{
+                                                  background: 'hsl(var(--muted)/.6)', color: 'hsl(var(--pencil))',
+                                                  border: '1px solid hsl(var(--border)/.35)',
+                                                  padding: '1px 7px', borderRadius: 10, fontSize: '.68rem', fontWeight: 600,
+                                                  display: 'inline-flex', alignItems: 'center', gap: 3
+                                                }}>
+                                                  <UserCheck size={9} /> No action owner
+                                                </span>
+                                              )
                                             })()}
                                           </div>
                                         </div>
                                         <p style={{ fontSize: '.88rem', fontWeight: 500, color: 'hsl(var(--ink))', lineHeight: 1.5, margin: 0 }}>
                                           {formatItemText(pt.discussion_point)}
                                         </p>
-                                        {((getActionOwnerText(pt) !== null) || (pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0 || (pt.dates?.length || 0) > 0 || (pt.numbers?.length || 0) > 0 || (pt.references?.length || 0) > 0) && (
+                                        {((pt.action_items?.length || 0) > 0 || (pt.technical_terms?.length || 0) > 0 || (pt.dates?.length || 0) > 0 || (pt.numbers?.length || 0) > 0 || (pt.references?.length || 0) > 0) && (
                                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                                            {(() => {
-                                              const owner = getActionOwnerText(pt)
-                                              return owner ? (
-                                                <span key="owner-tag" style={{ background: 'hsl(35,95%,50%/.15)', color: 'hsl(35,95%,40%)', border: '1px solid hsl(35,95%,50%/.35)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                                                  <UserCheck size={9} /> Owner: {owner}
-                                                </span>
-                                              ) : null
-                                            })()}
                                             {pt.action_items?.map((a, idx) => (
                                               <span key={`act-${idx}`} style={{ background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,45%)', border: '1px solid hsl(35,90%,50%/.3)', padding: '1px 6px', borderRadius: 8, fontSize: '.66rem', fontWeight: 600 }}>Action: {formatItemText(a)}</span>
                                             ))}
@@ -2961,12 +3130,38 @@ export default function RomPage() {
                   <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
                     <Target size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(205,90%,55%)' }} />
                     <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>No Stage 2 Enhanced Points Yet</div>
-                    <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
-                      Complete Stage 1 first, then click <strong>Enhance Points</strong> to run RAG context enrichment and batch point merging.
+                    <div style={{ fontSize: '.84rem', maxWidth: 460, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
+                      Complete Stage 1 first, then click <strong>Retrieve Context</strong> to preview matched documents/previous points, or click <strong>Run Stage 2 Enhancement</strong> to enhance.
                     </div>
-                    <button onClick={runStage2} disabled={stage2Status === 'processing' || stage1Count === 0} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
-                      <Sparkles size={14} /> Run Stage 2 Enhancement
-                    </button>
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'center', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        onClick={runPreviewStage2Context}
+                        disabled={previewingContext || stage1Count === 0}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          padding: '.45rem 1rem', borderRadius: 8,
+                          border: '1.5px solid hsl(205,90%,55%/.4)',
+                          background: 'hsl(205,90%,55%/.08)',
+                          color: 'hsl(205,90%,45%)',
+                          fontSize: '.8rem', fontWeight: 600,
+                          cursor: (previewingContext || stage1Count === 0) ? 'not-allowed' : 'pointer',
+                          fontFamily: 'Inter',
+                        }}
+                      >
+                        {previewingContext ? <Loader size={14} className="spin" /> : <BookOpen size={14} />}
+                        {previewingContext ? 'Retrieving Context...' : 'Retrieve Context (Preview)'}
+                      </button>
+
+                      <button
+                        onClick={runStage2}
+                        disabled={stage2Status === 'processing' || stage1Count === 0}
+                        className="btn btn-primary"
+                        style={{ fontSize: '.8rem', padding: '.45rem 1rem', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Sparkles size={14} /> Run Stage 2 Enhancement
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -2983,6 +3178,26 @@ export default function RomPage() {
 
                   {/* ── Stage 2 Editing Toolbar ── */}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      onClick={runPreviewStage2Context}
+                      disabled={previewingContext || stage1Count === 0}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '.35rem .7rem', borderRadius: 8,
+                        border: '1.5px solid hsl(205,90%,55%/.4)',
+                        background: 'hsl(205,90%,55%/.08)',
+                        color: 'hsl(205,90%,45%)',
+                        fontSize: '.74rem', fontWeight: 600,
+                        cursor: (previewingContext || stage1Count === 0) ? 'not-allowed' : 'pointer',
+                        fontFamily: 'Inter',
+                      }}
+                      title="Preview retrieved context for all point groups without modifying points"
+                    >
+                      {previewingContext ? <Loader size={12} className="spin" /> : <BookOpen size={12} />}
+                      {previewingContext ? 'Retrieving...' : 'Retrieve Context'}
+                    </button>
+
                     <button
                       onClick={() => setShowFindReplace(v => !v)}
                       style={{
@@ -3327,6 +3542,17 @@ export default function RomPage() {
                     </div>
                   </div>
 
+                  {/* ── Stage 3 Interactive Agenda Discussion Sequence & Approximate Timeline ── */}
+                  <AgendaTimelineControls
+                    agendas={romData.stage3.agendas}
+                    totalDuration={effectiveMeetingDuration}
+                    discussionOrder={discussionOrder}
+                    agendaTimeline={agendaTimeline}
+                    onChangeOrder={(newOrder) => setDiscussionOrder(newOrder)}
+                    onChangeTimeline={(newTimeline) => setAgendaTimeline(newTimeline)}
+                    onReset={resetAgendaOrderAndTimeline}
+                  />
+
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                     {romData.stage3.agendas.map((agenda: any, aIdx: number) => {
                       const agendaId = agenda.agenda_id || `A${aIdx + 1}`
@@ -3335,12 +3561,19 @@ export default function RomPage() {
                       const expanded = romData.stage3?.expanded_agendas?.find((ea: any) => ea.agenda_id === agendaId)
                       const isEditingThisAgenda = editingAgendaId === agendaId
                       const presenterName = agenda.presenter || agenda.speaker || docEntry?.presenter
+                      const seqRank = discussionOrder.indexOf(agendaId) + 1
+                      const timeRange = agendaTimeline[agendaId]
 
                       return (
                         <div key={agendaId} style={{ borderRadius: 10, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
                           {/* Agenda Header */}
                           <div style={{ background: 'hsl(140,70%,50%/.08)', padding: '.75rem 1rem', borderBottom: '1px solid hsl(var(--border)/.3)', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                            <span style={{ background: 'hsl(140,70%,45%)', color: 'white', fontWeight: 700, fontSize: '.72rem', padding: '2px 7px', borderRadius: 5, flexShrink: 0, marginTop: 2 }}>{agendaId}</span>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0, marginTop: 2 }}>
+                              <span style={{ background: 'hsl(140,70%,45%)', color: 'white', fontWeight: 700, fontSize: '.72rem', padding: '2px 7px', borderRadius: 5 }}>{agendaId}</span>
+                              {seqRank > 0 && (
+                                <span style={{ fontSize: '.6rem', color: 'hsl(var(--pencil))', fontWeight: 600 }}>#{seqRank} seq</span>
+                              )}
+                            </div>
                             <div style={{ flex: 1 }}>
                               {isEditingThisAgenda ? (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -3390,11 +3623,18 @@ export default function RomPage() {
                                     </button>
                                   </div>
                                   {agenda.description && <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', marginTop: 2, lineHeight: 1.35 }}>{agenda.description}</div>}
-                                  {presenterName && (
-                                    <div style={{ marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600 }}>
-                                      <User size={10} /> Presenter: {presenterName}
-                                    </div>
-                                  )}
+                                  <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                                    {presenterName && (
+                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600 }}>
+                                        <User size={10} /> Presenter: {presenterName}
+                                      </div>
+                                    )}
+                                    {timeRange && (
+                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,40%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>
+                                        <Clock size={10} /> {fmtTime(timeRange.start_sec)} – {fmtTime(timeRange.end_sec)}
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -4142,8 +4382,19 @@ export default function RomPage() {
           </div>
         </>
       )}
-  </div>
-)
+
+      {/* Stage 2 Retrieve Context Preview Modal */}
+      <Stage2ContextPreviewModal
+        isOpen={showContextPreview}
+        onClose={() => setShowContextPreview(false)}
+        groups={contextPreviewGroups}
+        totalGroups={contextPreviewTotalGroups}
+        totalPoints={contextPreviewTotalPoints}
+        onEnhance={runStage2}
+        isEnhancing={stage2Status === 'processing'}
+      />
+    </div>
+  )
 }
 
 

@@ -120,6 +120,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rom_stage2_process_all_together": False,
         "rom_pipeline_mode": "base",
         "missing_transcript_recovery_enabled": False,
+        "missing_segment_min_duration_sec": 2.0,
         "max_tokens_rom_discussion": 4096,
         "max_tokens_rom_discussion_no_actions": 4096,
         "max_tokens_rom_action_extraction": 2048,
@@ -158,6 +159,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["rom_stage2_process_all_together"] = bool(res.get("rom_stage2_process_all_together", 0))
     res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
     res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
+    res["missing_segment_min_duration_sec"] = float(res.get("missing_segment_min_duration_sec") or 2.0)
 
     if res.get("embedding_model"):
         from config import settings
@@ -217,6 +219,14 @@ async def update_settings(
         patch["rom_stage2_process_all_together"] = 1 if patch["rom_stage2_process_all_together"] else 0
     if "missing_transcript_recovery_enabled" in patch:
         patch["missing_transcript_recovery_enabled"] = 1 if patch["missing_transcript_recovery_enabled"] else 0
+    if "missing_segment_min_duration_sec" in patch:
+        try:
+            val = float(patch["missing_segment_min_duration_sec"])
+            if val <= 0:
+                raise ValueError("Must be positive")
+            patch["missing_segment_min_duration_sec"] = round(val, 2)
+        except (ValueError, TypeError):
+            patch["missing_segment_min_duration_sec"] = 2.0
 
     # Sync embedding model setting with runtime config & unload existing text embedder if changed
     if "embedding_model" in patch and patch["embedding_model"]:

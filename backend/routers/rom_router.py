@@ -122,6 +122,8 @@ class GenerateFinalRomRequest(BaseModel):
     batch_size: int = Field(default=20, ge=5, le=100)
     include_agenda_doc_points: bool = Field(default=False)
     agendas: Optional[List[dict]] = Field(default=None, description="Optional edited agenda items from Stage 3")
+    discussion_order: Optional[List[str]] = Field(default=None, description="Expected agenda discussion order, e.g. ['A1', 'A3', 'A2']")
+    agenda_timeline: Optional[Dict[str, Dict[str, float]]] = Field(default=None, description="Approximate agenda timeline ranges with start_sec and end_sec")
 
 class UpdateStage3AgendasRequest(BaseModel):
     agendas: List[dict]
@@ -785,6 +787,65 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
     }
 
 
+@router.post("/{recording_id}/stage2/preview-context")
+async def preview_stage2_context(
+    recording_id: str,
+    req: Stage2Request,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """Preview context retrieved for all Stage 2 point groups without running LLM enhancement or altering points."""
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    points = data.get("stage1", {}).get("discussion_points", [])
+
+    if not points:
+        raise HTTPException(status_code=400, detail="Stage 1 must be completed first to preview context")
+
+    r = await db.execute(
+        text("SELECT rom_min_similarity_threshold, rom_stage2_process_all_together FROM user_settings WHERE user_id = :uid"),
+        {"uid": user_id},
+    )
+    us_row = r.fetchone()
+
+    min_sim_thresh = req.min_similarity_threshold
+    if min_sim_thresh is None and us_row and us_row[0] is not None:
+        min_sim_thresh = us_row[0]
+
+    proc_all_together = req.process_all_together
+    if proc_all_together is None and us_row and us_row[1] is not None:
+        proc_all_together = bool(us_row[1])
+    elif proc_all_together is None:
+        proc_all_together = False
+
+    loop = asyncio.get_event_loop()
+    preview_result = await loop.run_in_executor(
+        None,
+        lambda: rom_service.preview_stage2_context(
+            discussion_points=points,
+            recording_id=recording_id,
+            user_id=user_id,
+            meeting_top_k=req.meeting_context_top_k,
+            global_top_k=req.global_context_top_k,
+            discussion_window_size=req.discussion_window_size,
+            min_similarity_threshold=min_sim_thresh,
+            process_all_together=proc_all_together,
+            previous_meeting_mode=req.previous_meeting_mode,
+            previous_meeting_id=req.previous_meeting_id,
+            previous_meeting_top_k=req.previous_meeting_top_k,
+            max_preview_groups=3,
+        )
+    )
+
+    return {
+        "status": "success",
+        "groups": preview_result.get("groups", []),
+        "total_groups": preview_result.get("total_groups", 0),
+        "preview_groups_count": preview_result.get("preview_groups_count", len(preview_result.get("groups", []))),
+        "total_points": preview_result.get("total_points", 0),
+    }
+
+
 @router.get("/stage2/example-points")
 async def get_stage2_example_points_endpoint(current_user: dict = Depends(get_current_user)):
     """Get persisted style-only Stage 2 reference example points."""
@@ -1248,18 +1309,26 @@ async def generate_final_rom_from_agendas(
             batch_size=req.batch_size,
             include_agenda_doc_points=req.include_agenda_doc_points,
             agenda_doc_points=agenda_doc_points,
+            discussion_order=req.discussion_order,
+            agenda_timeline=req.agenda_timeline,
         )
     )
 
-    # Update stage3 with mapping results
-    data["stage3"].update({
+    # Update stage3 with mapping results and guidance parameters
+    stage3_updates = {
         "status": "done",
         "candidate_results": result.get("candidate_results", []),
         "batch_assignments": result.get("batch_assignments", []),
         "point_mappings": result.get("point_mappings", {}),
         "agenda_groups": result.get("agenda_groups", {}),
         "similarity_matrix": result.get("similarity_matrix", []),
-    })
+    }
+    if req.discussion_order is not None:
+        stage3_updates["discussion_order"] = req.discussion_order
+    if req.agenda_timeline is not None:
+        stage3_updates["agenda_timeline"] = req.agenda_timeline
+
+    data["stage3"].update(stage3_updates)
 
     from services.rom_service import apply_speaker_mappings_to_final_rom
 

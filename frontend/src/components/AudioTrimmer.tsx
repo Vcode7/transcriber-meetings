@@ -1,19 +1,17 @@
 /**
- * AudioTrimmer — Interactive audio/video trim component.
+ * AudioTrimmer — Interactive audio/video trim & cut component.
  *
- * Renders a waveform canvas using the Web Audio API, two draggable start/end
- * handle bars, a preview play button, and Process / Skip buttons.
- *
- * Props
- * ─────
- *   file          : File | Blob to decode and visualise
- *   fileName      : display name shown in the header
- *   onConfirm(s, e) : called when user clicks "Process Recording" with trim seconds
- *   onSkip()      : called when user clicks "Skip Trim" to use the full recording
+ * Supports:
+ * - Full Light / Dark theme integration matching application style.
+ * - Draggable start/end trim boundary handles.
+ * - Optional "Remove Middle Section" cut feature with draggable cut-in / cut-out handles.
+ * - Smooth, reliable Preview Playback (with automatic cut-section skipping and Stop control).
+ * - Process / Skip buttons.
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { Play, Pause, Scissors, SkipForward, Clock, Waveform } from 'lucide-react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { Play, Pause, Square, Scissors, SkipForward, Clock, RotateCcw, Volume2, Sparkles, Check } from 'lucide-react'
+import { useUIStore } from '../store/ui'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,34 +20,58 @@ function fmtTime(sec: number): string {
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const s = Math.floor(sec % 60)
+  const ms = Math.floor((sec % 1) * 10)
   if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+function fmtTimeWithTenths(sec: number): string {
+  if (!isFinite(sec) || sec < 0) return '0:00.0'
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  const tenths = Math.floor((sec % 1) * 10)
+  return `${m}:${String(s).padStart(2, '0')}.${tenths}`
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const HANDLE_W = 14       // handle bar width px
-const CANVAS_H = 96       // waveform canvas height px
+const HANDLE_W = 16       // handle bar width px
+const CANVAS_H = 104      // waveform canvas height px
 const PEAK_BINS = 600     // number of amplitude buckets to draw
 
-// ── Component ────────────────────────────────────────────────────────────────
+// ── Props ────────────────────────────────────────────────────────────────────
 
-interface AudioTrimmerProps {
+export interface AudioTrimmerProps {
   file: File | Blob
   fileName?: string
-  onConfirm: (startSec: number, endSec: number) => void
+  onConfirm: (
+    startSec: number,
+    endSec: number,
+    cutStartSec?: number,
+    cutEndSec?: number
+  ) => void
   onSkip: () => void
 }
 
+type DragHandle = 'start' | 'end' | 'cut-start' | 'cut-end' | null
+
 export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: AudioTrimmerProps) {
+  const theme = useUIStore((s) => s.theme)
+  const isDark = theme === 'dark'
+
   const [duration, setDuration] = useState(0)
   const [trimStart, setTrimStart] = useState(0)
   const [trimEnd, setTrimEnd] = useState(0)
+
+  // Middle cut section state
+  const [isCutEnabled, setIsCutEnabled] = useState(false)
+  const [cutStart, setCutStart] = useState(0)
+  const [cutEnd, setCutEnd] = useState(0)
+
   const [isPlaying, setIsPlaying] = useState(false)
   const [playHead, setPlayHead] = useState(0)
   const [peaks, setPeaks] = useState<number[]>([])
   const [loading, setLoading] = useState(true)
-  const [decodeError, setDecodeError] = useState('')
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -57,87 +79,299 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: Audi
   const rafRef = useRef<number>(0)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // Live state refs to avoid stale closures during RAF / audio events
+  const trimStartRef = useRef(0)
+  const trimEndRef = useRef(0)
+  const isCutEnabledRef = useRef(false)
+  const cutStartRef = useRef(0)
+  const cutEndRef = useRef(0)
+  const isPlayingRef = useRef(false)
+
+  trimStartRef.current = trimStart
+  trimEndRef.current = trimEnd
+  isCutEnabledRef.current = isCutEnabled
+  cutStartRef.current = cutStart
+  cutEndRef.current = cutEnd
+  isPlayingRef.current = isPlaying
+
   // Track dragging state
-  const dragging = useRef<'start' | 'end' | null>(null)
+  const dragging = useRef<DragHandle>(null)
   const containerRectRef = useRef<DOMRect | null>(null)
 
-  // ── Decode audio → waveform peaks ─────────────────────────────────────────
+  // ── Decode audio → waveform peaks & setup Audio element ───────────────────
   useEffect(() => {
     setLoading(true)
-    setDecodeError('')
     let cancelled = false
 
     const url = URL.createObjectURL(file)
     blobUrlRef.current = url
 
-    // Create audio element for playback
     const audio = new Audio(url)
     audio.preload = 'auto'
     audioRef.current = audio
 
-    audio.addEventListener('loadedmetadata', () => {
+    const onLoadedMetadata = () => {
       if (cancelled) return
-      const dur = audio.duration
+      const dur = audio.duration || 0
       setDuration(dur)
       setTrimStart(0)
       setTrimEnd(dur)
-    })
+      // Default cut section in the middle quarter
+      const defaultCutStart = dur * 0.35
+      const defaultCutEnd = dur * 0.65
+      setCutStart(defaultCutStart)
+      setCutEnd(defaultCutEnd)
+    }
 
-    audio.addEventListener('timeupdate', () => {
-      if (cancelled) return
-      setPlayHead(audio.currentTime)
-      if (audioRef.current && audioRef.current.currentTime >= trimEnd - 0.1) {
-        audioRef.current.pause()
-        setIsPlaying(false)
-      }
-    })
-
-    audio.addEventListener('ended', () => {
+    const onEnded = () => {
       if (cancelled) return
       setIsPlaying(false)
-    })
-
-    // Decode for waveform via AudioContext
-    const ctx = new AudioContext()
-    file.arrayBuffer().then(buf => {
-      if (cancelled) return
-      return ctx.decodeAudioData(buf)
-    }).then(decoded => {
-      if (!decoded || cancelled) return
-      const channel = decoded.getChannelData(0)
-      const blockSize = Math.max(1, Math.floor(channel.length / PEAK_BINS))
-      const out: number[] = []
-      for (let i = 0; i < PEAK_BINS; i++) {
-        const start = i * blockSize
-        let max = 0
-        for (let j = 0; j < blockSize; j++) {
-          const v = Math.abs(channel[start + j] || 0)
-          if (v > max) max = v
-        }
-        out.push(max)
+      isPlayingRef.current = false
+      if (audioRef.current) {
+        audioRef.current.currentTime = trimStartRef.current
       }
-      // Normalize
-      const globalMax = Math.max(...out, 0.001)
-      setPeaks(out.map(v => v / globalMax))
-      setLoading(false)
-    }).catch(err => {
+      setPlayHead(trimStartRef.current)
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+
+    const onPause = () => {
       if (cancelled) return
-      console.warn('[AudioTrimmer] Waveform decode failed:', err)
-      // Still show UI with placeholder waveform (all zeros)
-      setPeaks(Array(PEAK_BINS).fill(0.05))
-      setLoading(false)
-    })
+      setIsPlaying(false)
+      isPlayingRef.current = false
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+
+    audio.addEventListener('loadedmetadata', onLoadedMetadata)
+    audio.addEventListener('ended', onEnded)
+    audio.addEventListener('pause', onPause)
+
+    // Decode waveform via Web Audio API
+    const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+    file.arrayBuffer()
+      .then((buf) => {
+        if (cancelled) return
+        return ctx.decodeAudioData(buf)
+      })
+      .then((decoded) => {
+        if (!decoded || cancelled) return
+        const channel = decoded.getChannelData(0)
+        const blockSize = Math.max(1, Math.floor(channel.length / PEAK_BINS))
+        const out: number[] = []
+        for (let i = 0; i < PEAK_BINS; i++) {
+          const start = i * blockSize
+          let max = 0
+          for (let j = 0; j < blockSize; j++) {
+            const v = Math.abs(channel[start + j] || 0)
+            if (v > max) max = v
+          }
+          out.push(max)
+        }
+        const globalMax = Math.max(...out, 0.001)
+        setPeaks(out.map((v) => v / globalMax))
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.warn('[AudioTrimmer] Waveform decode failed, using fallback:', err)
+        setPeaks(Array(PEAK_BINS).fill(0.08))
+        setLoading(false)
+      })
 
     return () => {
       cancelled = true
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      audio.removeEventListener('loadedmetadata', onLoadedMetadata)
+      audio.removeEventListener('ended', onEnded)
+      audio.removeEventListener('pause', onPause)
       audio.pause()
-      ctx.close()
+      ctx.close().catch(() => {})
       URL.revokeObjectURL(url)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file])
 
-  // ── Draw waveform ─────────────────────────────────────────────────────────
+  // ── High precision animation loop for Preview Playback ─────────────────────
+  const loopPlayback = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio || !isPlayingRef.current) return
+
+    const cur = audio.currentTime
+    const tStart = trimStartRef.current
+    const tEnd = trimEndRef.current
+    const isCut = isCutEnabledRef.current
+    const cStart = cutStartRef.current
+    const cEnd = cutEndRef.current
+
+    // Check if entered middle cut section -> immediately skip forward to cutEnd
+    if (isCut && cEnd > cStart) {
+      if (cur >= cStart && cur < cEnd) {
+        audio.currentTime = cEnd
+        setPlayHead(cEnd)
+        rafRef.current = requestAnimationFrame(loopPlayback)
+        return
+      }
+    }
+
+    // Check if reached trimEnd boundary -> stop playback smoothly
+    if (cur >= tEnd) {
+      audio.pause()
+      audio.currentTime = tStart
+      setIsPlaying(false)
+      isPlayingRef.current = false
+      setPlayHead(tStart)
+      return
+    }
+
+    setPlayHead(cur)
+    rafRef.current = requestAnimationFrame(loopPlayback)
+  }, [])
+
+  // ── Play / Pause / Stop ───────────────────────────────────────────────────
+  const togglePlay = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio || duration === 0) return
+
+    if (isPlaying) {
+      audio.pause()
+      setIsPlaying(false)
+      isPlayingRef.current = false
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    } else {
+      let targetTime = audio.currentTime
+      // If outside trim boundaries, reset to trimStart
+      if (targetTime < trimStart || targetTime >= trimEnd - 0.05) {
+        targetTime = trimStart
+      }
+      // If inside cut region, skip to cutEnd
+      if (isCutEnabled && targetTime >= cutStart && targetTime < cutEnd) {
+        targetTime = cutEnd
+      }
+
+      audio.currentTime = targetTime
+      setPlayHead(targetTime)
+      audio.play()
+        .then(() => {
+          setIsPlaying(true)
+          isPlayingRef.current = true
+          if (rafRef.current) cancelAnimationFrame(rafRef.current)
+          rafRef.current = requestAnimationFrame(loopPlayback)
+        })
+        .catch((err) => {
+          console.warn('[AudioTrimmer] Play error:', err)
+          setIsPlaying(false)
+          isPlayingRef.current = false
+        })
+    }
+  }, [isPlaying, duration, trimStart, trimEnd, isCutEnabled, cutStart, cutEnd, loopPlayback])
+
+  const handleStop = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.pause()
+    audio.currentTime = trimStart
+    setIsPlaying(false)
+    isPlayingRef.current = false
+    setPlayHead(trimStart)
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+  }, [trimStart])
+
+  const handleResetAll = useCallback(() => {
+    setTrimStart(0)
+    setTrimEnd(duration)
+    setIsCutEnabled(false)
+    setCutStart(duration * 0.35)
+    setCutEnd(duration * 0.65)
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0
+    }
+    setPlayHead(0)
+  }, [duration])
+
+  // ── Canvas click → seek ───────────────────────────────────────────────────
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current || duration === 0) return
+    const rect = canvasRef.current.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const frac = Math.max(0, Math.min(1, x / rect.width))
+    let t = frac * duration
+
+    // If clicking inside cut region, jump to cut end
+    if (isCutEnabled && t >= cutStart && t < cutEnd) {
+      t = cutEnd
+    }
+
+    if (audioRef.current) {
+      audioRef.current.currentTime = t
+    }
+    setPlayHead(t)
+  }, [duration, isCutEnabled, cutStart, cutEnd])
+
+  // ── Handle dragging ───────────────────────────────────────────────────────
+  const getCanvasFrac = useCallback((clientX: number): number => {
+    const rect = containerRectRef.current
+    if (!rect || rect.width === 0) return 0
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  }, [])
+
+  const onMouseDown = useCallback((handle: DragHandle) => (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragging.current = handle
+    if (containerRef.current) {
+      containerRectRef.current = containerRef.current.getBoundingClientRect()
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current || duration === 0) return
+      const frac = getCanvasFrac(ev.clientX)
+      const t = frac * duration
+
+      if (dragging.current === 'start') {
+        const maxStart = isCutEnabled ? Math.min(trimEnd - 0.5, cutStart - 0.2) : trimEnd - 0.5
+        setTrimStart(Math.max(0, Math.min(t, maxStart)))
+      } else if (dragging.current === 'end') {
+        const minEnd = isCutEnabled ? Math.max(trimStart + 0.5, cutEnd + 0.2) : trimStart + 0.5
+        setTrimEnd(Math.min(duration, Math.max(t, minEnd)))
+      } else if (dragging.current === 'cut-start') {
+        const minCutStart = trimStart + 0.1
+        const maxCutStart = cutEnd - 0.3
+        setCutStart(Math.max(minCutStart, Math.min(t, maxCutStart)))
+      } else if (dragging.current === 'cut-end') {
+        const minCutEnd = cutStart + 0.3
+        const maxCutEnd = trimEnd - 0.1
+        setCutEnd(Math.max(minCutEnd, Math.min(t, maxCutEnd)))
+      }
+    }
+
+    const onUp = () => {
+      dragging.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [duration, trimStart, trimEnd, isCutEnabled, cutStart, cutEnd, getCanvasFrac])
+
+  // ── Manual time inputs parser ─────────────────────────────────────────────
+  const parseTime = (v: string): number | null => {
+    const parts = v.trim().split(':').map(Number)
+    if (parts.some(isNaN)) return null
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if (parts.length === 2) return parts[0] * 60 + parts[1]
+    return parts[0]
+  }
+
+  // ── Computed handle positions (%) ──────────────────────────────────────────
+  const startPct = duration > 0 ? (trimStart / duration) * 100 : 0
+  const endPct = duration > 0 ? (trimEnd / duration) * 100 : 100
+  const cutStartPct = duration > 0 ? (cutStart / duration) * 100 : 35
+  const cutEndPct = duration > 0 ? (cutEnd / duration) * 100 : 65
+
+  const totalTrimmed = Math.max(0, trimEnd - trimStart)
+  const cutDuration = isCutEnabled ? Math.max(0, cutEnd - cutStart) : 0
+  const effectiveDuration = Math.max(0, totalTrimmed - cutDuration)
+
+  // ── Waveform Canvas Rendering ─────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || peaks.length === 0 || duration === 0) return
@@ -150,203 +384,251 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: Audi
 
     ctx.clearRect(0, 0, W, H)
 
-    // Background
-    ctx.fillStyle = 'hsl(220 20% 8%)'
+    // Base background
+    ctx.fillStyle = isDark ? 'hsl(220 20% 9%)' : 'hsl(220 25% 97%)'
     ctx.fillRect(0, 0, W, H)
 
-    // Clipped region (outside trim) — darker
+    // Boundaries in pixels
     const sx = (trimStart / duration) * W
     const ex = (trimEnd / duration) * W
+    const csx = isCutEnabled ? (cutStart / duration) * W : 0
+    const cex = isCutEnabled ? (cutEnd / duration) * W : 0
 
-    // Muted region - left
-    ctx.fillStyle = 'hsl(220 15% 6%)'
+    // Outer trimmed regions (Muted)
+    ctx.fillStyle = isDark ? 'hsl(220 18% 6% / 0.85)' : 'hsl(220 15% 91% / 0.95)'
     ctx.fillRect(0, 0, sx, H)
-    // Muted region - right
-    ctx.fillStyle = 'hsl(220 15% 6%)'
     ctx.fillRect(ex, 0, W - ex, H)
 
-    // Selected region highlight
-    ctx.fillStyle = 'hsl(220 70% 50% / 0.08)'
+    // Active selected region highlight
+    ctx.fillStyle = isDark ? 'hsl(215 80% 55% / 0.12)' : 'hsl(215 90% 50% / 0.08)'
     ctx.fillRect(sx, 0, ex - sx, H)
 
-    // Draw peaks
+    // Removed middle section highlight
+    if (isCutEnabled && cex > csx) {
+      // Red tinted backdrop
+      ctx.fillStyle = isDark ? 'hsl(0 75% 45% / 0.28)' : 'hsl(0 85% 60% / 0.18)'
+      ctx.fillRect(csx, 0, cex - csx, H)
+
+      // Diagonal hazard lines for removed area
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(csx, 0, cex - csx, H)
+      ctx.clip()
+      ctx.strokeStyle = isDark ? 'hsl(0 70% 55% / 0.22)' : 'hsl(0 75% 50% / 0.20)'
+      ctx.lineWidth = 2
+      const step = 14
+      for (let x = csx - H; x < cex + H; x += step) {
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x + H, H)
+        ctx.stroke()
+      }
+      ctx.restore()
+    }
+
+    // Draw waveform bars
     const barW = W / peaks.length
     peaks.forEach((amp, i) => {
       const x = i * barW
-      const inRange = x >= sx && x <= ex
-      const isHead = playHead > 0 && x <= (playHead / duration) * W
+      const inTrimRange = x >= sx && x <= ex
+      const inCutRange = isCutEnabled && x >= csx && x <= cex
+      const isPlayed = playHead > 0 && x <= (playHead / duration) * W
 
-      // Color logic
-      if (isHead && inRange) {
-        ctx.fillStyle = 'hsl(220 90% 70%)'
-      } else if (inRange) {
-        ctx.fillStyle = 'hsl(220 70% 55%)'
+      if (!inTrimRange) {
+        // Outside trim boundaries
+        ctx.fillStyle = isDark ? 'hsl(220 15% 22%)' : 'hsl(220 12% 80%)'
+      } else if (inCutRange) {
+        // Inside removed middle section
+        ctx.fillStyle = isPlayed
+          ? (isDark ? 'hsl(0 85% 65%)' : 'hsl(0 85% 45%)')
+          : (isDark ? 'hsl(0 65% 45%)' : 'hsl(0 70% 60%)')
       } else {
-        ctx.fillStyle = 'hsl(220 20% 28%)'
+        // Active kept region
+        if (isPlayed) {
+          ctx.fillStyle = isDark ? 'hsl(215 95% 75%)' : 'hsl(215 95% 40%)'
+        } else {
+          ctx.fillStyle = isDark ? 'hsl(215 80% 58%)' : 'hsl(215 80% 52%)'
+        }
       }
 
-      const barH = Math.max(2, amp * (cx - 4))
-      ctx.fillRect(x, cx - barH, Math.max(1, barW - 0.5), barH * 2)
+      const barH = Math.max(3, amp * (cx - 8))
+      ctx.fillRect(x, cx - barH, Math.max(1, barW - 0.6), barH * 2)
     })
 
-    // Trim handles — vertical lines
-    ctx.strokeStyle = 'hsl(45 100% 60%)'
+    // Boundary marker lines
+    // Trim Start / End lines (Amber)
+    ctx.strokeStyle = isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)'
     ctx.lineWidth = 2
-    ctx.setLineDash([4, 3])
+    ctx.setLineDash([5, 3])
     ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); ctx.stroke()
     ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, H); ctx.stroke()
+
+    // Cut Start / End lines (Red/Orange)
+    if (isCutEnabled) {
+      ctx.strokeStyle = isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)'
+      ctx.lineWidth = 2
+      ctx.setLineDash([4, 2])
+      ctx.beginPath(); ctx.moveTo(csx, 0); ctx.lineTo(csx, H); ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(cex, 0); ctx.lineTo(cex, H); ctx.stroke()
+    }
     ctx.setLineDash([])
 
-    // Play head
+    // Playhead line (Cyan / Blue)
     if (playHead > 0) {
       const ph = (playHead / duration) * W
-      ctx.strokeStyle = 'hsl(0 90% 65%)'
-      ctx.lineWidth = 1.5
-      ctx.beginPath(); ctx.moveTo(ph, 0); ctx.lineTo(ph, H); ctx.stroke()
+      ctx.strokeStyle = isDark ? 'hsl(190 100% 60%)' : 'hsl(215 95% 45%)'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(ph, 0)
+      ctx.lineTo(ph, H)
+      ctx.stroke()
     }
-  }, [peaks, duration, trimStart, trimEnd, playHead])
+  }, [peaks, duration, trimStart, trimEnd, isCutEnabled, cutStart, cutEnd, playHead, isDark])
 
-  // ── Playback ──────────────────────────────────────────────────────────────
-  const togglePlay = useCallback(() => {
-    const audio = audioRef.current
-    if (!audio) return
-    if (isPlaying) {
-      audio.pause()
-      setIsPlaying(false)
-    } else {
-      if (audio.currentTime < trimStart || audio.currentTime >= trimEnd - 0.1) {
-        audio.currentTime = trimStart
-      }
-      audio.play().catch(() => {})
-      setIsPlaying(true)
-    }
-  }, [isPlaying, trimStart, trimEnd])
-
-  // ── Canvas click → seek ───────────────────────────────────────────────────
-  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || duration === 0) return
-    const rect = canvasRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const frac = Math.max(0, Math.min(1, x / rect.width))
-    const t = frac * duration
-    if (audioRef.current) {
-      audioRef.current.currentTime = t
-      setPlayHead(t)
-    }
-  }, [duration])
-
-  // ── Drag handles ──────────────────────────────────────────────────────────
-  const getCanvasFrac = useCallback((clientX: number): number => {
-    const rect = containerRectRef.current
-    if (!rect) return 0
-    // The canvas fills the container minus handle padding
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-  }, [])
-
-  const onMouseDown = useCallback((handle: 'start' | 'end') => (e: React.MouseEvent) => {
-    e.preventDefault()
-    dragging.current = handle
-    if (containerRef.current) {
-      containerRectRef.current = containerRef.current.getBoundingClientRect()
-    }
-
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current || duration === 0) return
-      const frac = getCanvasFrac(ev.clientX)
-      const t = frac * duration
-      if (dragging.current === 'start') {
-        setTrimStart(Math.min(t, trimEnd - 1))
-      } else {
-        setTrimEnd(Math.max(t, trimStart + 1))
-      }
-    }
-
-    const onUp = () => {
-      dragging.current = null
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [duration, trimEnd, trimStart, getCanvasFrac])
-
-  // ── Manual time inputs ────────────────────────────────────────────────────
-  const parseTime = (v: string): number | null => {
-    const parts = v.split(':').map(Number)
-    if (parts.some(isNaN)) return null
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-    if (parts.length === 2) return parts[0] * 60 + parts[1]
-    return parts[0]
+  // ── Palette definitions for Light vs Dark ─────────────────────────────────
+  const themeStyles = isDark ? {
+    containerBg: 'hsl(220 18% 10%)',
+    containerBorder: '1.5px solid hsl(220 25% 20%)',
+    containerShadow: '0 12px 36px hsl(220 30% 4% / 0.7)',
+    headerBg: 'hsl(220 20% 13%)',
+    headerBorder: '1px solid hsl(220 25% 18%)',
+    textPrimary: 'hsl(220 10% 95%)',
+    textMuted: 'hsl(220 15% 58%)',
+    waveformBg: 'hsl(220 20% 8%)',
+    inputBg: 'hsl(220 20% 8%)',
+    inputBorder: '1.5px solid hsl(220 25% 22%)',
+    inputText: 'hsl(220 10% 92%)',
+    toolbarBg: 'hsl(220 20% 11%)',
+    sectionBorder: '1px solid hsl(220 25% 16%)',
+    ghostBtnBg: 'transparent',
+    ghostBtnBorder: '1.5px solid hsl(220 25% 24%)',
+    ghostBtnText: 'hsl(220 15% 65%)',
+    ghostBtnHoverBorder: 'hsl(220 30% 40%)',
+    ghostBtnHoverText: 'hsl(220 10% 85%)',
+    cutBadgeBg: 'hsl(0 75% 55% / 0.15)',
+    cutBadgeBorder: '1px solid hsl(0 75% 55% / 0.35)',
+    cutBadgeText: 'hsl(0 80% 70%)',
+  } : {
+    containerBg: '#ffffff',
+    containerBorder: '1.5px solid hsl(220 20% 84%)',
+    containerShadow: '0 12px 32px hsl(220 20% 20% / 0.12)',
+    headerBg: 'hsl(220 25% 97.5%)',
+    headerBorder: '1px solid hsl(220 20% 88%)',
+    textPrimary: 'hsl(222 47% 12%)',
+    textMuted: 'hsl(220 10% 46%)',
+    waveformBg: 'hsl(220 25% 97%)',
+    inputBg: '#ffffff',
+    inputBorder: '1.5px solid hsl(220 20% 80%)',
+    inputText: 'hsl(222 47% 12%)',
+    toolbarBg: 'hsl(220 25% 98%)',
+    sectionBorder: '1px solid hsl(220 20% 88%)',
+    ghostBtnBg: '#ffffff',
+    ghostBtnBorder: '1.5px solid hsl(220 20% 78%)',
+    ghostBtnText: 'hsl(220 15% 35%)',
+    ghostBtnHoverBorder: 'hsl(220 30% 50%)',
+    ghostBtnHoverText: 'hsl(222 47% 12%)',
+    cutBadgeBg: 'hsl(0 85% 95%)',
+    cutBadgeBorder: '1px solid hsl(0 75% 75%)',
+    cutBadgeText: 'hsl(0 75% 42%)',
   }
-
-  // ── Computed handle positions (%) ──────────────────────────────────────────
-  const startPct = duration > 0 ? (trimStart / duration) * 100 : 0
-  const endPct = duration > 0 ? (trimEnd / duration) * 100 : 100
-  const selectedDuration = trimEnd - trimStart
 
   return (
     <div style={{
-      background: 'hsl(220 18% 10%)',
+      background: themeStyles.containerBg,
       borderRadius: '16px',
-      border: '1.5px solid hsl(220 30% 22%)',
+      border: themeStyles.containerBorder,
       overflow: 'hidden',
-      boxShadow: '0 8px 32px hsl(220 30% 5% / 0.6)',
+      boxShadow: themeStyles.containerShadow,
       fontFamily: 'Inter, sans-serif',
+      transition: 'background .25s, border-color .25s',
     }}>
 
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: '12px',
-        padding: '1rem 1.25rem',
-        borderBottom: '1px solid hsl(220 25% 18%)',
-        background: 'hsl(220 20% 12%)',
+        padding: '0.95rem 1.25rem',
+        borderBottom: themeStyles.headerBorder,
+        background: themeStyles.headerBg,
       }}>
         <div style={{
-          width: '34px', height: '34px', borderRadius: '10px', flexShrink: 0,
-          background: 'hsl(220 70% 55% / 0.15)',
-          border: '1.5px solid hsl(220 70% 55% / 0.3)',
+          width: '36px', height: '36px', borderRadius: '10px', flexShrink: 0,
+          background: isDark ? 'hsl(215 80% 55% / 0.15)' : 'hsl(215 90% 50% / 0.10)',
+          border: `1.5px solid ${isDark ? 'hsl(215 80% 55% / 0.3)' : 'hsl(215 85% 50% / 0.25)'}`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
-          <Scissors size={16} style={{ color: 'hsl(220 70% 65%)' }} />
+          <Scissors size={17} style={{ color: isDark ? 'hsl(215 85% 70%)' : 'hsl(215 90% 45%)' }} />
         </div>
+
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: '.9rem', fontWeight: 700, color: 'hsl(220 10% 92%)' }}>
-            Edit Recording
+          <div style={{ fontSize: '.92rem', fontWeight: 700, color: themeStyles.textPrimary, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span>Edit Recording</span>
+            {isCutEnabled && (
+              <span style={{
+                fontSize: '.68rem', fontWeight: 700,
+                background: themeStyles.cutBadgeBg,
+                border: themeStyles.cutBadgeBorder,
+                color: themeStyles.cutBadgeText,
+                padding: '1px 7px', borderRadius: '999px',
+              }}>
+                ✂ Middle Cut Active
+              </span>
+            )}
           </div>
-          <div style={{ fontSize: '.75rem', color: 'hsl(220 15% 55%)', marginTop: '1px' }}>
+          <div style={{ fontSize: '.76rem', color: themeStyles.textMuted, marginTop: '1px' }}>
             {fileName ? `"${fileName}" — ` : ''}
-            Trim the audio before processing, or skip to use the full recording
+            Trim outer boundaries or remove an unwanted middle section
           </div>
         </div>
-        <div style={{
-          fontSize: '.72rem', fontWeight: 700,
-          background: 'hsl(220 70% 55% / 0.1)',
-          border: '1px solid hsl(220 70% 55% / 0.25)',
-          color: 'hsl(220 70% 70%)',
-          padding: '3px 10px', borderRadius: '999px',
-          display: 'flex', alignItems: 'center', gap: '5px',
-          whiteSpace: 'nowrap',
-        }}>
-          <Clock size={11} />
-          {loading ? '...' : fmtTime(duration)}
+
+        {/* Duration pills */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{
+            fontSize: '.74rem', fontWeight: 700,
+            background: isDark ? 'hsl(220 20% 16%)' : 'hsl(220 20% 92%)',
+            border: `1px solid ${isDark ? 'hsl(220 20% 26%)' : 'hsl(220 20% 82%)'}`,
+            color: themeStyles.textMuted,
+            padding: '3px 9px', borderRadius: '999px',
+            display: 'flex', alignItems: 'center', gap: '4px',
+            whiteSpace: 'nowrap',
+          }}>
+            <Clock size={12} />
+            Orig: {loading ? '...' : fmtTime(duration)}
+          </div>
+
+          <button
+            onClick={handleResetAll}
+            title="Reset trim and cut boundaries"
+            style={{
+              background: 'transparent',
+              border: `1px solid ${isDark ? 'hsl(220 20% 24%)' : 'hsl(220 20% 82%)'}`,
+              borderRadius: '8px',
+              padding: '4px 8px',
+              color: themeStyles.textMuted,
+              cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '4px',
+              fontSize: '.72rem', fontWeight: 600,
+              transition: 'all .15s',
+            }}
+          >
+            <RotateCcw size={12} />
+            Reset
+          </button>
         </div>
       </div>
 
-      {/* Waveform area */}
-      <div style={{ padding: '1.25rem 1.25rem 0' }}>
+      {/* Waveform Canvas Area */}
+      <div style={{ padding: '1.1rem 1.25rem 0' }}>
         {loading ? (
           <div style={{
             height: `${CANVAS_H}px`,
-            background: 'hsl(220 20% 8%)',
+            background: themeStyles.waveformBg,
             borderRadius: '10px',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: 'hsl(220 15% 45%)',
-            fontSize: '.82rem',
-            border: '1px solid hsl(220 25% 14%)',
+            color: themeStyles.textMuted,
+            fontSize: '.84rem',
+            border: themeStyles.inputBorder,
           }}>
-            <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>Decoding waveform…</span>
+            <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>Decoding audio waveform…</span>
           </div>
         ) : (
           <div ref={containerRef} style={{ position: 'relative', userSelect: 'none' }}>
@@ -360,11 +642,12 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: Audi
                 borderRadius: '10px',
                 cursor: 'crosshair',
                 display: 'block',
+                border: themeStyles.inputBorder,
               }}
               onClick={handleCanvasClick}
             />
 
-            {/* Start handle */}
+            {/* Start Trim Handle (Amber) */}
             <div
               onMouseDown={onMouseDown('start')}
               style={{
@@ -380,23 +663,24 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: Audi
             >
               <div style={{
                 width: '4px', height: '100%',
-                background: 'hsl(45 100% 60%)',
+                background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
                 borderRadius: '2px',
-                boxShadow: '0 0 8px hsl(45 100% 60% / 0.6)',
+                boxShadow: isDark ? '0 0 8px hsl(45 100% 55% / 0.7)' : '0 0 6px hsl(38 95% 48% / 0.5)',
               }} />
               <div style={{
                 position: 'absolute', top: '-24px',
-                background: 'hsl(45 100% 60%)',
-                color: 'hsl(45 100% 10%)',
-                fontSize: '.64rem', fontWeight: 800,
-                padding: '2px 6px', borderRadius: '6px',
+                background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
+                color: isDark ? 'hsl(45 100% 8%)' : '#ffffff',
+                fontSize: '.66rem', fontWeight: 800,
+                padding: '2px 6px', borderRadius: '5px',
                 whiteSpace: 'nowrap',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
               }}>
-                {fmtTime(trimStart)}
+                Start {fmtTime(trimStart)}
               </div>
             </div>
 
-            {/* End handle */}
+            {/* End Trim Handle (Amber) */}
             <div
               onMouseDown={onMouseDown('end')}
               style={{
@@ -412,176 +696,450 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip }: Audi
             >
               <div style={{
                 width: '4px', height: '100%',
-                background: 'hsl(45 100% 60%)',
+                background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
                 borderRadius: '2px',
-                boxShadow: '0 0 8px hsl(45 100% 60% / 0.6)',
+                boxShadow: isDark ? '0 0 8px hsl(45 100% 55% / 0.7)' : '0 0 6px hsl(38 95% 48% / 0.5)',
               }} />
               <div style={{
                 position: 'absolute', top: '-24px',
-                background: 'hsl(45 100% 60%)',
-                color: 'hsl(45 100% 10%)',
-                fontSize: '.64rem', fontWeight: 800,
-                padding: '2px 6px', borderRadius: '6px',
+                background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
+                color: isDark ? 'hsl(45 100% 8%)' : '#ffffff',
+                fontSize: '.66rem', fontWeight: 800,
+                padding: '2px 6px', borderRadius: '5px',
                 whiteSpace: 'nowrap',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
               }}>
-                {fmtTime(trimEnd)}
+                End {fmtTime(trimEnd)}
               </div>
             </div>
+
+            {/* Cut Start Handle (Red / Coral) */}
+            {isCutEnabled && (
+              <div
+                onMouseDown={onMouseDown('cut-start')}
+                style={{
+                  position: 'absolute',
+                  top: 0, bottom: 0,
+                  left: `calc(${cutStartPct}% - ${HANDLE_W / 2}px)`,
+                  width: `${HANDLE_W}px`,
+                  cursor: 'ew-resize',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 11,
+                }}
+              >
+                <div style={{
+                  width: '3.5px', height: '100%',
+                  background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
+                  borderRadius: '2px',
+                  boxShadow: '0 0 8px hsl(0 85% 60% / 0.7)',
+                }} />
+                <div style={{
+                  position: 'absolute', bottom: '-22px',
+                  background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
+                  color: '#ffffff',
+                  fontSize: '.64rem', fontWeight: 800,
+                  padding: '2px 6px', borderRadius: '5px',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+                }}>
+                  ✂ Cut In {fmtTime(cutStart)}
+                </div>
+              </div>
+            )}
+
+            {/* Cut End Handle (Red / Coral) */}
+            {isCutEnabled && (
+              <div
+                onMouseDown={onMouseDown('cut-end')}
+                style={{
+                  position: 'absolute',
+                  top: 0, bottom: 0,
+                  left: `calc(${cutEndPct}% - ${HANDLE_W / 2}px)`,
+                  width: `${HANDLE_W}px`,
+                  cursor: 'ew-resize',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 11,
+                }}
+              >
+                <div style={{
+                  width: '3.5px', height: '100%',
+                  background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
+                  borderRadius: '2px',
+                  boxShadow: '0 0 8px hsl(0 85% 60% / 0.7)',
+                }} />
+                <div style={{
+                  position: 'absolute', bottom: '-22px',
+                  background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
+                  color: '#ffffff',
+                  fontSize: '.64rem', fontWeight: 800,
+                  padding: '2px 6px', borderRadius: '5px',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+                }}>
+                  ✂ Cut Out {fmtTime(cutEnd)}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Time inputs row */}
+      {/* Primary Controls Row: Playback & Trim Boundaries */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: '12px',
-        padding: '1rem 1.25rem 0',
+        display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px',
+        padding: '1.25rem 1.25rem 0',
       }}>
-        {/* Playback */}
+        {/* Play / Pause */}
         <button
           onClick={togglePlay}
           disabled={loading || duration === 0}
           style={{
             display: 'flex', alignItems: 'center', gap: '7px',
-            padding: '0.5rem 1rem',
-            borderRadius: '8px',
-            background: isPlaying ? 'hsl(0 75% 55% / 0.15)' : 'hsl(220 70% 55% / 0.12)',
-            border: `1.5px solid ${isPlaying ? 'hsl(0 75% 55% / 0.4)' : 'hsl(220 70% 55% / 0.3)'}`,
-            color: isPlaying ? 'hsl(0 75% 65%)' : 'hsl(220 70% 68%)',
-            fontSize: '.82rem', fontWeight: 600,
+            padding: '0.48rem 0.95rem',
+            borderRadius: '9px',
+            background: isPlaying
+              ? (isDark ? 'hsl(0 75% 55% / 0.2)' : 'hsl(0 85% 55% / 0.12)')
+              : (isDark ? 'hsl(215 80% 55% / 0.18)' : 'hsl(215 90% 50% / 0.10)'),
+            border: `1.5px solid ${
+              isPlaying
+                ? (isDark ? 'hsl(0 75% 55% / 0.5)' : 'hsl(0 80% 50% / 0.4)')
+                : (isDark ? 'hsl(215 80% 55% / 0.4)' : 'hsl(215 85% 50% / 0.35)')
+            }`,
+            color: isPlaying
+              ? (isDark ? 'hsl(0 80% 70%)' : 'hsl(0 80% 45%)')
+              : (isDark ? 'hsl(215 85% 72%)' : 'hsl(215 90% 42%)'),
+            fontSize: '.82rem', fontWeight: 700,
             cursor: loading ? 'not-allowed' : 'pointer',
-            transition: 'all .18s',
+            transition: 'all .16s ease',
           }}
         >
           {isPlaying ? <Pause size={14} /> : <Play size={14} />}
           {isPlaying ? 'Pause' : 'Preview'}
         </button>
 
-        {/* Start time */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
-          <span style={{ fontSize: '.75rem', color: 'hsl(45 80% 55%)', fontWeight: 600, whiteSpace: 'nowrap' }}>
-            Start
+        {/* Stop Button */}
+        <button
+          onClick={handleStop}
+          disabled={loading || duration === 0}
+          title="Stop playback and rewind to start"
+          style={{
+            display: 'flex', alignItems: 'center', gap: '5px',
+            padding: '0.48rem 0.75rem',
+            borderRadius: '9px',
+            background: themeStyles.ghostBtnBg,
+            border: themeStyles.ghostBtnBorder,
+            color: themeStyles.ghostBtnText,
+            fontSize: '.82rem', fontWeight: 600,
+            cursor: loading ? 'not-allowed' : 'pointer',
+            transition: 'all .16s ease',
+          }}
+        >
+          <Square size={13} />
+          Stop
+        </button>
+
+        <div style={{ height: '22px', width: '1px', background: isDark ? 'hsl(220 20% 22%)' : 'hsl(220 20% 86%)', margin: '0 2px' }} />
+
+        {/* Trim Start Input */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+          <span style={{
+            fontSize: '.74rem', fontWeight: 700,
+            color: isDark ? 'hsl(45 100% 60%)' : 'hsl(38 95% 42%)',
+            whiteSpace: 'nowrap',
+          }}>
+            Trim Start:
           </span>
           <input
             type="text"
             value={fmtTime(trimStart)}
-            onChange={e => {
+            onChange={(e) => {
               const t = parseTime(e.target.value)
               if (t !== null && t >= 0 && t < trimEnd - 0.5) setTrimStart(t)
             }}
             style={{
-              flex: 1, minWidth: 0, maxWidth: '80px',
-              background: 'hsl(220 20% 8%)',
-              border: '1.5px solid hsl(220 25% 22%)',
-              color: 'hsl(220 10% 88%)',
-              padding: '4px 8px', borderRadius: '6px',
+              width: '68px',
+              background: themeStyles.inputBg,
+              border: themeStyles.inputBorder,
+              color: themeStyles.inputText,
+              padding: '4px 6px', borderRadius: '6px',
               fontSize: '.8rem', fontFamily: 'JetBrains Mono, monospace',
-              textAlign: 'center',
+              textAlign: 'center', fontWeight: 600,
             }}
           />
         </div>
 
-        <span style={{ color: 'hsl(220 15% 40%)', fontSize: '.8rem' }}>→</span>
+        <span style={{ color: themeStyles.textMuted, fontSize: '.8rem' }}>→</span>
 
-        {/* End time */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
-          <span style={{ fontSize: '.75rem', color: 'hsl(45 80% 55%)', fontWeight: 600, whiteSpace: 'nowrap' }}>
-            End
+        {/* Trim End Input */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+          <span style={{
+            fontSize: '.74rem', fontWeight: 700,
+            color: isDark ? 'hsl(45 100% 60%)' : 'hsl(38 95% 42%)',
+            whiteSpace: 'nowrap',
+          }}>
+            Trim End:
           </span>
           <input
             type="text"
             value={fmtTime(trimEnd)}
-            onChange={e => {
+            onChange={(e) => {
               const t = parseTime(e.target.value)
               if (t !== null && t > trimStart + 0.5 && t <= duration) setTrimEnd(t)
             }}
             style={{
-              flex: 1, minWidth: 0, maxWidth: '80px',
-              background: 'hsl(220 20% 8%)',
-              border: '1.5px solid hsl(220 25% 22%)',
-              color: 'hsl(220 10% 88%)',
-              padding: '4px 8px', borderRadius: '6px',
+              width: '68px',
+              background: themeStyles.inputBg,
+              border: themeStyles.inputBorder,
+              color: themeStyles.inputText,
+              padding: '4px 6px', borderRadius: '6px',
               fontSize: '.8rem', fontFamily: 'JetBrains Mono, monospace',
-              textAlign: 'center',
+              textAlign: 'center', fontWeight: 600,
             }}
           />
         </div>
 
-        {/* Duration badge */}
+        {/* Toggle Remove Middle Section */}
+        <button
+          onClick={() => {
+            const next = !isCutEnabled
+            setIsCutEnabled(next)
+            if (next && (cutEnd <= cutStart || cutStart < trimStart || cutEnd > trimEnd)) {
+              // Reset cut range comfortably inside trim bounds
+              const segDur = trimEnd - trimStart
+              setCutStart(trimStart + segDur * 0.3)
+              setCutEnd(trimStart + segDur * 0.7)
+            }
+          }}
+          style={{
+            marginLeft: 'auto',
+            display: 'flex', alignItems: 'center', gap: '6px',
+            padding: '0.45rem 0.85rem',
+            borderRadius: '9px',
+            background: isCutEnabled
+              ? (isDark ? 'hsl(0 75% 50% / 0.2)' : 'hsl(0 85% 60% / 0.12)')
+              : (isDark ? 'hsl(220 20% 15%)' : 'hsl(220 20% 93%)'),
+            border: `1.5px solid ${
+              isCutEnabled
+                ? (isDark ? 'hsl(0 75% 55% / 0.5)' : 'hsl(0 80% 50% / 0.4)')
+                : (isDark ? 'hsl(220 25% 24%)' : 'hsl(220 20% 82%)')
+            }`,
+            color: isCutEnabled
+              ? (isDark ? 'hsl(0 85% 70%)' : 'hsl(0 80% 45%)')
+              : themeStyles.textPrimary,
+            fontSize: '.78rem', fontWeight: 700,
+            cursor: 'pointer',
+            transition: 'all .16s ease',
+          }}
+        >
+          <Scissors size={13} />
+          {isCutEnabled ? 'Cut Section Active' : '+ Cut Middle Section'}
+        </button>
+      </div>
+
+      {/* Middle Cut Controls Panel (shown when enabled) */}
+      {isCutEnabled && (
         <div style={{
-          fontSize: '.72rem', fontWeight: 700,
-          background: 'hsl(140 60% 45% / 0.1)',
-          border: '1px solid hsl(140 60% 45% / 0.25)',
-          color: 'hsl(140 60% 55%)',
+          margin: '0.9rem 1.25rem 0',
+          padding: '0.75rem 1rem',
+          borderRadius: '10px',
+          background: isDark ? 'hsl(0 75% 50% / 0.08)' : 'hsl(0 85% 60% / 0.06)',
+          border: `1.5px dashed ${isDark ? 'hsl(0 75% 55% / 0.35)' : 'hsl(0 80% 50% / 0.28)'}`,
+          display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            color: isDark ? 'hsl(0 85% 72%)' : 'hsl(0 80% 45%)',
+            fontSize: '.78rem', fontWeight: 700,
+          }}>
+            <Scissors size={14} />
+            <span>Remove portion:</span>
+          </div>
+
+          {/* Cut Start Input */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span style={{ fontSize: '.74rem', color: themeStyles.textMuted, fontWeight: 600 }}>
+              From
+            </span>
+            <input
+              type="text"
+              value={fmtTime(cutStart)}
+              onChange={(e) => {
+                const t = parseTime(e.target.value)
+                if (t !== null && t >= trimStart && t < cutEnd - 0.3) setCutStart(t)
+              }}
+              style={{
+                width: '68px',
+                background: themeStyles.inputBg,
+                border: `1.5px solid ${isDark ? 'hsl(0 75% 55% / 0.4)' : 'hsl(0 80% 60% / 0.4)'}`,
+                color: themeStyles.inputText,
+                padding: '3px 6px', borderRadius: '6px',
+                fontSize: '.78rem', fontFamily: 'JetBrains Mono, monospace',
+                textAlign: 'center', fontWeight: 600,
+              }}
+            />
+          </div>
+
+          <span style={{ color: themeStyles.textMuted, fontSize: '.78rem' }}>to</span>
+
+          {/* Cut End Input */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span style={{ fontSize: '.74rem', color: themeStyles.textMuted, fontWeight: 600 }}>
+              To
+            </span>
+            <input
+              type="text"
+              value={fmtTime(cutEnd)}
+              onChange={(e) => {
+                const t = parseTime(e.target.value)
+                if (t !== null && t > cutStart + 0.3 && t <= trimEnd) setCutEnd(t)
+              }}
+              style={{
+                width: '68px',
+                background: themeStyles.inputBg,
+                border: `1.5px solid ${isDark ? 'hsl(0 75% 55% / 0.4)' : 'hsl(0 80% 60% / 0.4)'}`,
+                color: themeStyles.inputText,
+                padding: '3px 6px', borderRadius: '6px',
+                fontSize: '.78rem', fontFamily: 'JetBrains Mono, monospace',
+                textAlign: 'center', fontWeight: 600,
+              }}
+            />
+          </div>
+
+          <div style={{
+            fontSize: '.72rem', fontWeight: 700,
+            background: isDark ? 'hsl(0 75% 55% / 0.2)' : 'hsl(0 85% 60% / 0.12)',
+            color: isDark ? 'hsl(0 85% 72%)' : 'hsl(0 80% 45%)',
+            padding: '2px 8px', borderRadius: '6px',
+            marginLeft: 'auto',
+          }}>
+            ✂ -{fmtTime(cutDuration)} removed
+          </div>
+
+          <button
+            onClick={() => setIsCutEnabled(false)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: themeStyles.textMuted,
+              fontSize: '.72rem',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            Remove Cut
+          </button>
+        </div>
+      )}
+
+      {/* Summary Row */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0.85rem 1.25rem 0',
+        fontSize: '.76rem', color: themeStyles.textMuted,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Volume2 size={13} style={{ color: isDark ? 'hsl(215 80% 65%)' : 'hsl(215 90% 48%)' }} />
+          <span>Keeps:</span>
+          {isCutEnabled ? (
+            <span style={{ fontWeight: 600, color: themeStyles.textPrimary }}>
+              [{fmtTime(trimStart)} – {fmtTime(cutStart)}] + [{fmtTime(cutEnd)} – {fmtTime(trimEnd)}]
+            </span>
+          ) : (
+            <span style={{ fontWeight: 600, color: themeStyles.textPrimary }}>
+              [{fmtTime(trimStart)} – {fmtTime(trimEnd)}]
+            </span>
+          )}
+        </div>
+
+        {/* Final output duration badge */}
+        <div style={{
+          fontSize: '.74rem', fontWeight: 700,
+          background: isDark ? 'hsl(140 60% 45% / 0.15)' : 'hsl(135 65% 42% / 0.12)',
+          border: `1px solid ${isDark ? 'hsl(140 60% 45% / 0.35)' : 'hsl(135 65% 42% / 0.25)'}`,
+          color: isDark ? 'hsl(140 60% 65%)' : 'hsl(135 70% 32%)',
           padding: '3px 10px', borderRadius: '999px',
           whiteSpace: 'nowrap',
         }}>
-          {fmtTime(selectedDuration)} selected
+          Output: {fmtTime(effectiveDuration)}
         </div>
       </div>
 
       {/* Action buttons */}
       <div style={{
         display: 'flex', gap: '10px',
-        padding: '1.25rem',
-        borderTop: '1px solid hsl(220 25% 14%)',
-        marginTop: '1.25rem',
+        padding: '1.1rem 1.25rem',
+        borderTop: themeStyles.sectionBorder,
+        marginTop: '1rem',
       }}>
         {/* Skip */}
         <button
           onClick={onSkip}
           style={{
             display: 'flex', alignItems: 'center', gap: '7px',
-            padding: '0.65rem 1.1rem',
+            padding: '0.62rem 1.1rem',
             borderRadius: '10px',
-            background: 'transparent',
-            border: '1.5px solid hsl(220 25% 24%)',
-            color: 'hsl(220 15% 58%)',
+            background: themeStyles.ghostBtnBg,
+            border: themeStyles.ghostBtnBorder,
+            color: themeStyles.ghostBtnText,
             fontSize: '.85rem', fontWeight: 600,
             cursor: 'pointer',
-            transition: 'all .18s',
+            transition: 'all .16s ease',
             flexShrink: 0,
           }}
-          onMouseEnter={e => {
-            (e.currentTarget as HTMLButtonElement).style.borderColor = 'hsl(220 30% 38%)'
-            ;(e.currentTarget as HTMLButtonElement).style.color = 'hsl(220 10% 75%)'
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.borderColor = themeStyles.ghostBtnHoverBorder
+            ;(e.currentTarget as HTMLButtonElement).style.color = themeStyles.ghostBtnHoverText
           }}
-          onMouseLeave={e => {
-            (e.currentTarget as HTMLButtonElement).style.borderColor = 'hsl(220 25% 24%)'
-            ;(e.currentTarget as HTMLButtonElement).style.color = 'hsl(220 15% 58%)'
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.borderColor = isDark ? 'hsl(220 25% 24%)' : 'hsl(220 20% 78%)'
+            ;(e.currentTarget as HTMLButtonElement).style.color = themeStyles.ghostBtnText
           }}
         >
           <SkipForward size={14} />
           Skip Trim / Use Full
         </button>
 
-        {/* Process */}
+        {/* Process Recording */}
         <button
-          onClick={() => onConfirm(trimStart, trimEnd)}
-          disabled={loading || selectedDuration < 1}
+          onClick={() => {
+            onConfirm(
+              trimStart,
+              trimEnd,
+              isCutEnabled ? cutStart : undefined,
+              isCutEnabled ? cutEnd : undefined
+            )
+          }}
+          disabled={loading || effectiveDuration < 0.5}
           style={{
             flex: 1,
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-            padding: '0.65rem 1.25rem',
+            padding: '0.62rem 1.25rem',
             borderRadius: '10px',
-            background: 'linear-gradient(135deg, hsl(220 70% 50%), hsl(260 70% 58%))',
+            background: isDark
+              ? 'linear-gradient(135deg, hsl(215 80% 50%), hsl(255 75% 58%))'
+              : 'linear-gradient(135deg, hsl(215 85% 48%), hsl(250 80% 54%))',
             border: 'none',
-            color: '#fff',
+            color: '#ffffff',
             fontSize: '.88rem', fontWeight: 700,
-            cursor: loading || selectedDuration < 1 ? 'not-allowed' : 'pointer',
-            opacity: loading || selectedDuration < 1 ? 0.55 : 1,
-            transition: 'all .18s',
-            boxShadow: '0 4px 16px hsl(220 70% 50% / 0.35)',
+            cursor: loading || effectiveDuration < 0.5 ? 'not-allowed' : 'pointer',
+            opacity: loading || effectiveDuration < 0.5 ? 0.55 : 1,
+            transition: 'all .16s ease',
+            boxShadow: isDark
+              ? '0 4px 16px hsl(215 80% 50% / 0.4)'
+              : '0 4px 14px hsl(215 80% 45% / 0.28)',
           }}
         >
           <Scissors size={15} />
           Process Recording
-          {selectedDuration > 0 && (
+          {effectiveDuration > 0 && (
             <span style={{
-              fontSize: '.72rem', fontWeight: 600,
-              background: 'hsl(0 0% 100% / 0.2)',
+              fontSize: '.72rem', fontWeight: 700,
+              background: 'rgba(255, 255, 255, 0.22)',
               padding: '2px 8px', borderRadius: '999px', marginLeft: '4px',
             }}>
-              {fmtTime(selectedDuration)}
+              {fmtTime(effectiveDuration)}
             </span>
           )}
         </button>

@@ -134,8 +134,9 @@ interface UserSettings {
   min_audio_duration_seconds?: number
   min_audio_rms_threshold?: number
 
-  // Missing Transcription Recovery
+  // Missing Segment Recovery
   missing_transcript_recovery_enabled?: boolean
+  missing_segment_min_duration_sec?: number
 }
 
 interface PromptTemplate {
@@ -1480,21 +1481,32 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {/* Missing Transcription Recovery Checkpoint */}
+              {/* Missing Segment Recovery */}
               <div style={{ borderRadius: 12, border: '1.5px solid hsl(280,75%,60%/.35)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
                 <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Sparkles size={16} style={{ color: 'hsl(280,75%,60%)' }} /> Missing Transcription Recovery Checkpoint
+                  <Sparkles size={16} style={{ color: 'hsl(280,75%,60%)' }} /> Missing Segment Recovery
                 </h3>
                 <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
-                  When enabled, pauses the processing pipeline immediately after speech transcription and forced alignment.
-                  An interactive checkpoint panel allows you to review detected speech gaps and manually insert any missed speech before Diarization and AI analysis proceed.
+                  Automatically detects untranscribed audio gaps and recovers missed speech using secondary Whisper passes with adaptive loudness enhancement, merging recovered segments without overlap.
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
                   <SettingToggle
-                    label="Enable Missing Transcription Recovery Review Pause"
+                    label="Enable Missing Segment Recovery"
                     checked={settings.missing_transcript_recovery_enabled ?? false}
                     onChange={v => setSettings({ ...settings, missing_transcript_recovery_enabled: v })}
+                  />
+                  <SettingCard
+                    title="Minimum Segment Length Threshold (secs)"
+                    description="Only missing audio gaps equal to or longer than this threshold (default: 2.0s) are evaluated for recovery. Shorter segments are ignored."
+                    value={settings.missing_segment_min_duration_sec ?? 2.0}
+                    min={0.1}
+                    max={30.0}
+                    step={0.1}
+                    onChange={v => {
+                      const num = typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v * 10) / 10 : 2.0
+                      setSettings({ ...settings, missing_segment_min_duration_sec: num })
+                    }}
                   />
                 </div>
               </div>

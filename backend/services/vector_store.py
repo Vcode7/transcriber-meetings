@@ -692,33 +692,39 @@ def _sanitize_collection_name(name: str) -> str:
     return sanitized
 
 
+_STORE_CACHE: Dict[str, VectorStore] = {}
+
+
+def _get_or_create_store(name: str, dim: int = 0) -> VectorStore:
+    sanitized = _sanitize_collection_name(name)
+    if sanitized in _STORE_CACHE:
+        store = _STORE_CACHE[sanitized]
+        if dim > 0 and store._dim != dim:
+            store._dim = dim
+        if not store._loaded:
+            store.load_or_create()
+        return store
+    store = VectorStore(collection_name=sanitized, dim=dim)
+    store.load_or_create()
+    _STORE_CACHE[sanitized] = store
+    return store
+
+
 def get_global_context_store(user_id: str, dim: int = 0) -> VectorStore:
     """Return the VectorStore for global context documents for a specific user."""
-    name = _sanitize_collection_name(f"global_context_{user_id}")
-    store = VectorStore(collection_name=name, dim=dim)
-    store.load_or_create()
-    return store
+    return _get_or_create_store(f"global_context_{user_id}", dim=dim)
 
 
 def get_meeting_context_store(recording_id: str, dim: int = 0) -> VectorStore:
     """Return the VectorStore for meeting context attachments."""
-    name = _sanitize_collection_name(f"meeting_{recording_id}")
-    store = VectorStore(collection_name=name, dim=dim)
-    store.load_or_create()
-    return store
+    return _get_or_create_store(f"meeting_{recording_id}", dim=dim)
 
 
 def get_transcript_store(recording_id: str, dim: int = 0) -> VectorStore:
     """Return the VectorStore for transcript chunks."""
-    name = _sanitize_collection_name(f"transcript_{recording_id}")
-    store = VectorStore(collection_name=name, dim=dim)
-    store.load_or_create()
-    return store
+    return _get_or_create_store(f"transcript_{recording_id}", dim=dim)
 
 
 def get_stage2_points_store(user_id: str, dim: int = 0) -> VectorStore:
     """Return the VectorStore for Stage 2 polished discussion points for a specific user."""
-    name = _sanitize_collection_name(f"stage2_points_{user_id}")
-    store = VectorStore(collection_name=name, dim=dim)
-    store.load_or_create()
-    return store
+    return _get_or_create_store(f"stage2_points_{user_id}", dim=dim)

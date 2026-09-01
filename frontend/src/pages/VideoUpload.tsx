@@ -390,7 +390,12 @@ export default function VideoUploadPage() {
     }
   }
 
-  const handleUpload = async (trimStartSec?: number, trimEndSec?: number) => {
+  const handleUpload = async (
+    trimStartSec?: number,
+    trimEndSec?: number,
+    cutStartSec?: number,
+    cutEndSec?: number
+  ) => {
     if (!file) return
     setUploading(true); setError('')
     setProcessing('video-upload' as ProcessingStage, 'uploading')
@@ -404,6 +409,10 @@ export default function VideoUploadPage() {
       if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
         form.append('trim_start_sec', String(trimStartSec))
         form.append('trim_end_sec', String(trimEndSec))
+      }
+      if (cutStartSec !== undefined && cutEndSec !== undefined && cutEndSec > cutStartSec) {
+        form.append('cut_start_sec', String(cutStartSec))
+        form.append('cut_end_sec', String(cutEndSec))
       }
       const res = await api.post('/video/upload', form)
       const rId = res.data.recording_id
@@ -633,7 +642,7 @@ export default function VideoUploadPage() {
                 <AudioTrimmer
                   file={file}
                   fileName={file.name}
-                  onConfirm={(start, end) => handleUpload(start, end)}
+                  onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
                   onSkip={() => handleUpload()}
                 />
                 <AdvancedOptionsPanel onChange={setAdvancedOpts} />

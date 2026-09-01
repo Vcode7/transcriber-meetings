@@ -1406,11 +1406,15 @@ CORE EXTRACTION RULES:
    - Capture shared context (e.g. project name, meeting topic) once in the most relevant point.
    - If a technical term or date appears in several statements on the same topic, include it only in the single merged point.
 
-4. ACTION ITEMS
+4. ACTION ITEMS & ACTION OWNER IDENTIFICATION (CRITICAL)
    - Every action item in "action_items" MUST identify: assigner, assignee, task, and deadline (or null if not mentioned).
-   - Assign tasks ONLY when the assignee is an explicit person name, organization, or specific role/title.
-   - Do NOT use vague references such as "my team", "our team", "you", "they", "we", "someone" as assignees — use null.
-   - Preserve original wording and intent. Never invent responsibilities.
+   - Set `action_owner` at the discussion point level to the name of the person responsible for the action in this point.
+   - Follow conversation flow and speaker turns:
+     * FIRST-PERSON COMMITMENTS: When a speaker says "I will...", "I'll handle...", "Let me...", "I can take this", "I'm going to...", or agrees to do something, set `assignee` and `action_owner` to THAT speaker's label/name.
+     * DIRECT ASSIGNMENTS & REQUESTS: When participant A assigns or asks participant B to do a task (e.g., "Alice: Bob, please send the report"), and Bob acknowledges or the request is clear, set `assignee` and `action_owner` to the assigned person ("Bob").
+     * NAMED RESPONSIBILITIES: If any named person, specific role/title, or organization is identified as responsible, extract their name into `assignee` and `action_owner`.
+   - Do NOT use vague pronouns ("I", "you", "we", "they", "someone") — resolve them to the actual named speaker from the transcript turn header.
+   - If no action is mentioned in the point, set `action_items: []` and `action_owner: null`.
 
 5. DATES & TECHNICAL ACCURACY
    - DATES: Extract ONLY actual calendar dates (e.g. "July 8, 2026", "next Monday"). NEVER output transcript timestamps or audio offsets as dates.
@@ -1438,6 +1442,7 @@ Extract discussion points as JSON:
     {{
       "discussion_point": "Complete, meaningful capture of who said what and what was discussed — including decisions made and questions raised",
       "speakers": ["Speaker Name"],
+      "action_owner": "Name of person responsible for completing the action (e.g. Speaker Name), or null if no action",
       "technical_terms": ["Exact abbreviations, technical terms, and project names used"],
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
@@ -1599,13 +1604,15 @@ CORE EXTRACTION RULES:
    - Do not invent, infer, or embellish information not present in the transcript.
    - Apply only minimal grammatical corrections needed for readability.
 
-3. ACTION OWNER
-   - Set `action_owner` to the name of the person explicitly responsible for completing the action mentioned in this point.
-   - Only assign `action_owner` when the responsible party is explicitly identified as a named person, organization, or specific role/title.
-   - Do NOT use vague references such as "my team", "our team", "you", "they", "we", "someone" as action_owner — use null.
-   - Never invent an owner. Only assign when the conversation explicitly identifies who is responsible.
-   - If there is no action in this point, set `action_owner` to null.
-   - If multiple people are responsible for different actions in the same point, set `action_owner` to the person responsible for the primary/first action, or null if unclear.
+3. ACTION OWNER IDENTIFICATION (CRITICAL):
+   - For every discussion point containing an action, task, follow-up, assignment, or commitment, actively identify the responsible person/owner from the transcript speaker turns and conversation context.
+   - Follow conversation flow and speaker turns:
+     * FIRST-PERSON COMMITMENTS: When a speaker says "I will...", "I'll handle...", "Let me...", "I can take this", "I'm going to...", or agrees/volunteers to do something, set `action_owner` to THAT speaker's label/name.
+     * DIRECT ASSIGNMENTS & REQUESTS: When participant A assigns or asks participant B to do a task (e.g., "Alice: Bob, please update the ticket"), and Bob acknowledges or the assignment is clear, set `action_owner` to the assigned person ("Bob").
+     * NAMED RESPONSIBILITIES: If any named person, specific role/title, or organization is identified as responsible, extract their name into `action_owner`.
+   - Do NOT output vague pronouns ("I", "you", "we", "they", "someone") — resolve them to the actual named speaker from the transcript turn header (e.g. `[12.0-15.0] Vikas: ...` -> `Vikas`).
+   - If multiple people are responsible for actions in the point, list them comma-separated (e.g., "Alice, Bob").
+   - If there is no task or action commitment in this discussion point, set `action_owner` to null.
 
 4. AVOID DUPLICATION ACROSS POINTS
    - Do NOT repeat the same technical terms, speaker names, dates, numbers, or context across multiple discussion points.
@@ -1641,7 +1648,7 @@ Extract discussion points as JSON. Do NOT include a separate action_items list:
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
       "references": ["Any documents, standards, or references mentioned"],
-      "action_owner": "Name of person responsible for completing the action, or null if none"
+      "action_owner": "Name of person responsible for completing the action (e.g. Speaker Name), or comma-separated names if multiple, or null if no action"
     }}
   ]
 }}
@@ -1949,13 +1956,16 @@ ASSIGNMENT RULES:
 - You MUST assign an assigned_agenda_id selected from the AGENDA REFERENCE list provided below.
 - Do NOT invent new agenda names or IDs.
 - Do NOT assign an agenda_id that is not present in the AGENDA REFERENCE list.
+- Transcript content and actual spoken evidence are the PRIMARY SOURCE OF TRUTH. Always match discussion points based on what was actually discussed.
+- Any discussion order or approximate timeline provided below is for LOW-PRIORITY CONTEXTUAL GUIDANCE ONLY. Do NOT force an assignment purely based on timestamp or sequence if the spoken content clearly belongs to a different agenda.
 - If you are uncertain, choose the closest agenda and set confidence to "low".
 - Write a concise 1-sentence reason for each assignment.
 - Confidence levels: "high" = clearly on-topic, "medium" = likely related, "low" = uncertain but best match.
 
 AGENDA REFERENCE (titles and descriptions for context):
 {agenda_reference}
-
+{discussion_order_guidance}
+{timeline_guidance}
 DISCUSSION POINTS BATCH:
 {batch_json}
 
@@ -4859,13 +4869,24 @@ class QwenProvider(AIProvider):
 
         return data if isinstance(data, dict) else {"expansions": []}
 
-    def assign_agenda_batch(self, batch_json: str, agenda_reference_json: str) -> Dict:
-        """Phase 4: Batch agenda assignment - LLM assigns each point to one of its Top-3 candidates.
+    def assign_agenda_batch(
+        self,
+        batch_json: str,
+        agenda_reference_json: str,
+        discussion_order_text: Optional[str] = None,
+        timeline_guidance_text: Optional[str] = None,
+    ) -> Dict:
+        """Phase 4: Batch agenda assignment - LLM assigns each point to one of its candidate agendas.
         Returns assignments list with point_id, assigned_agenda_id, confidence, reason.
         """
+        order_sec = f"\nEXPECTED AGENDA DISCUSSION ORDER (guidance only):\n{discussion_order_text}\n" if discussion_order_text else ""
+        timeline_sec = f"\nAPPROXIMATE AGENDA TIMELINE (low-priority contextual guidance only):\n{timeline_guidance_text}\n" if timeline_guidance_text else ""
+
         prompt = (
             _get_prompt("rom_agenda_assign_batch")
             .replace("{agenda_reference}", agenda_reference_json)
+            .replace("{discussion_order_guidance}", order_sec)
+            .replace("{timeline_guidance}", timeline_sec)
             .replace("{batch_json}", batch_json)
         )
         raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_agenda_assign_batch")

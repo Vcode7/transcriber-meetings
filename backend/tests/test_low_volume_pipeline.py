@@ -97,7 +97,7 @@ def test_rejected_low_volume_region_detection():
 
 
 def test_user_settings_low_volume_defaults():
-    """Verify Pydantic settings defaults for low-volume features."""
+    """Verify Pydantic settings defaults for low-volume and missing segment features."""
     s = UserSettings(user_id="test_user")
     assert s.enable_vad is True
     assert s.enable_transcription_vad is True
@@ -113,3 +113,102 @@ def test_user_settings_low_volume_defaults():
     assert s.max_merge_silence_ms == 500
     assert s.enable_low_volume_recovery is True
     assert s.recovery_energy_threshold == -45.0
+    assert s.missing_segment_min_duration_sec == 2.0
+
+
+def test_missing_segment_min_duration_threshold_filtering():
+    """Verify that gaps shorter than the configured threshold are ignored, while gaps >= threshold are recovered."""
+    sr = 16000
+    duration = 10.0
+    audio = np.zeros(int(sr * duration), dtype=np.float32)
+
+    # Add signal energy across distinct quiet regions:
+    # Region A: [1.0s, 1.8s] (duration 0.8s) -> below 2.0s threshold
+    # Region B: [3.0s, 4.5s] (duration 1.5s) -> below 2.0s threshold
+    # Region C: [6.0s, 8.5s] (duration 2.5s) -> EQUAL/GREATER than 2.0s threshold
+    t_a = np.linspace(0, 0.8, int(0.8 * sr), dtype=np.float32)
+    audio[int(1.0 * sr):int(1.8 * sr)] = 0.05 * np.sin(2 * np.pi * 300 * t_a)
+
+    t_b = np.linspace(0, 1.5, int(1.5 * sr), dtype=np.float32)
+    audio[int(3.0 * sr):int(4.5 * sr)] = 0.05 * np.sin(2 * np.pi * 300 * t_b)
+
+    t_c = np.linspace(0, 2.5, int(2.5 * sr), dtype=np.float32)
+    audio[int(6.0 * sr):int(8.5 * sr)] = 0.05 * np.sin(2 * np.pi * 300 * t_c)
+
+    # Primary speech spans leaving gaps [0-1.0], [1.8-3.0], [4.5-6.0], [8.5-10.0]
+    speech_regions = [(0.0, 1.0), (1.8, 3.0), (4.5, 6.0), (8.5, 10.0)]
+
+    # Test 1: Default 2.0s threshold -> only gap [6.0s, 8.5s] (2.5s dur) qualifies
+    recovered_2s = detect_rejected_low_volume_regions(
+        audio, sr, speech_regions,
+        energy_threshold_db=-45.0,
+        min_duration_sec=2.0
+    )
+    assert len(recovered_2s) == 1
+    assert recovered_2s[0][0] == 6.0 and recovered_2s[0][1] == 8.5
+
+    # Test 2: Lower threshold 1.0s -> both [3.0s, 4.5s] (1.5s dur) and [6.0s, 8.5s] (2.5s dur) qualify
+    # Gap [1.0s, 1.8s] (0.8s dur) is still ignored (< 1.0s)
+    recovered_1s = detect_rejected_low_volume_regions(
+        audio, sr, speech_regions,
+        energy_threshold_db=-45.0,
+        min_duration_sec=1.0
+    )
+    assert len(recovered_1s) == 2
+    assert (3.0, 4.5) in recovered_1s
+    assert (6.0, 8.5) in recovered_1s
+
+    # Test 3: Higher threshold 3.0s -> no gaps qualify
+    recovered_3s = detect_rejected_low_volume_regions(
+        audio, sr, speech_regions,
+        energy_threshold_db=-45.0,
+        min_duration_sec=3.0
+    )
+    assert len(recovered_3s) == 0
+
+
+def test_user_settings_update_missing_segment_duration():
+    """Verify validation on UserSettingsUpdate for missing_segment_min_duration_sec."""
+    update = UserSettingsUpdate(missing_segment_min_duration_sec=3.5)
+    assert update.missing_segment_min_duration_sec == 3.5
+
+    # Negative / zero should raise ValidationError
+    with pytest.raises(Exception):
+        UserSettingsUpdate(missing_segment_min_duration_sec=-1.0)
+
+    with pytest.raises(Exception):
+        UserSettingsUpdate(missing_segment_min_duration_sec=0.0)
+
+
+def test_stage1_action_owner_normalization():
+    """Verify Stage 1 action owner extraction, normalization, and fallback heuristics."""
+    from services.rom_service import normalize_action_owner
+
+    # Direct valid string
+    assert normalize_action_owner("Bob Smith") == "Bob Smith"
+
+    # List of owners with duplicate deduplication
+    assert normalize_action_owner(["Alice", "Bob", "Alice"]) == "Alice, Bob"
+
+    # Null, None, undefined, vague pronouns
+    assert normalize_action_owner("null") is None
+    assert normalize_action_owner("none") is None
+    assert normalize_action_owner("we") is None
+    assert normalize_action_owner("my team") is None
+    assert normalize_action_owner("someone") is None
+    assert normalize_action_owner(None) is None
+
+    # Fallback from action_items array
+    act_items = [
+        {"task": "Prepare report", "assignee": "Charlie"},
+        {"task": "Review PR", "assignee": "David"}
+    ]
+    assert normalize_action_owner(None, action_items=act_items) == "Charlie, David"
+
+    # Fallback from discussion_point text with embedded pattern
+    text_with_owner = "Alice proposed the new feature. (Owner: Bob Johnson)"
+    assert normalize_action_owner(None, point_text=text_with_owner) == "Bob Johnson"
+
+    bracket_text = "Review security requirements [Assignee: Sarah Connor]"
+    assert normalize_action_owner(None, point_text=bracket_text) == "Sarah Connor"
+

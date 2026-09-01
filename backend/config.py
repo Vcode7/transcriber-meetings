@@ -204,6 +204,7 @@ class Settings(BaseSettings):
     ENABLE_LOW_VOLUME_RECOVERY: bool = True
     RECOVERY_ENERGY_THRESHOLD: float = -45.0
     RECOVERY_MIN_DURATION_MS: int = 300
+    MISSING_SEGMENT_MIN_DURATION_SEC: float = 2.0
 
 
     def __init__(self, **values):

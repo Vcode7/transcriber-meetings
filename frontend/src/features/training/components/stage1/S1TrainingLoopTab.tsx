@@ -623,6 +623,15 @@ function DiscussionPointsList({ output }: { output: Record<string, unknown> }) {
             {(dp.speakers || []).map((s: string) => (
               <Pill key={s} value={s} color="hsl(142 71% 45%)" />
             ))}
+            {(() => {
+              const owner = dp.action_owner || dp.action_owners || dp.owner || dp.assignee
+              const ownerText = Array.isArray(owner) ? owner.filter(Boolean).join(', ') : (owner && String(owner).trim() !== '' && String(owner).toLowerCase() !== 'null' && String(owner).toLowerCase() !== 'none' ? String(owner) : null)
+              return ownerText ? (
+                <Pill value={`Owner: ${ownerText}`} color="hsl(35 95% 45%)" />
+              ) : (
+                <Pill value="No action owner" color="hsl(var(--muted-foreground))" />
+              )
+            })()}
             {(dp.technical_terms || []).map((t: string) => (
               <Pill key={t} value={t} color="hsl(var(--accent))" />
             ))}

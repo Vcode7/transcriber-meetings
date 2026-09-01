@@ -80,7 +80,7 @@ export default function TranscriptReviewPanel({ recordingId, onResumed }: Transc
       const currentEnd = segments[i].end
       const nextStart = segments[i + 1].start
       const gapDuration = nextStart - currentEnd
-      if (gapDuration >= 2.5) {
+      if (gapDuration >= 2.0) {
         gaps.push({
           start: currentEnd,
           end: nextStart,
