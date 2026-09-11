@@ -19,6 +19,7 @@ import type { ProcessingResult } from '../types/recording'
 
 import AudioTrimmer from '../components/AudioTrimmer'
 import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+import ErrorBoundary from '../components/ErrorBoundary'
 
 type Stage = 'idle' | 'recording' | 'stopped' | 'uploading' | 'processing' | 'transcript_ready' | 'pending_transcript_review' | 'done' | 'error'
 
@@ -691,12 +692,49 @@ export default function RecordPage() {
             {/* AudioTrimmer on stopped stage */}
             {stage === 'stopped' && recorder.audioBlob && (
               <div style={{ width: '100%', maxWidth: '640px', marginTop: '1rem' }}>
-                <AudioTrimmer
-                  file={recorder.audioBlob}
-                  fileName={`Recording (${recorder.formattedDuration})`}
-                  onConfirm={(start, end, cutStart, cutEnd) => handleSubmit(start, end, cutStart, cutEnd)}
-                  onSkip={() => handleSubmit()}
-                />
+                <ErrorBoundary
+                  fallback={
+                    <div style={{
+                      padding: '1.25rem',
+                      borderRadius: '12px',
+                      background: 'hsl(var(--card))',
+                      border: '1.5px solid hsl(var(--border))',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                    }}>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'hsl(var(--foreground))' }}>
+                        Audio Trimmer Preview Unavailable
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))' }}>
+                        You can continue to submit and process the recorded audio.
+                      </div>
+                      <button
+                        onClick={() => handleSubmit()}
+                        style={{
+                          alignSelf: 'flex-start',
+                          padding: '0.55rem 1.1rem',
+                          borderRadius: '8px',
+                          background: 'hsl(var(--primary))',
+                          color: 'hsl(var(--primary-foreground))',
+                          fontWeight: 600,
+                          fontSize: '0.85rem',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Process Full Recording
+                      </button>
+                    </div>
+                  }
+                >
+                  <AudioTrimmer
+                    file={recorder.audioBlob}
+                    fileName={`Recording (${recorder.formattedDuration})`}
+                    onConfirm={(start, end, cutStart, cutEnd) => handleSubmit(start, end, cutStart, cutEnd)}
+                    onSkip={() => handleSubmit()}
+                  />
+                </ErrorBoundary>
               </div>
             )}
             {processing && (

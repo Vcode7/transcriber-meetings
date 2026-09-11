@@ -234,6 +234,13 @@ PROMPT_META: list[dict] = [
         "variables": ["{action_items_json}"],
     },
     {
+        "key": "mom_extract_actions",
+        "name": "Generate Action Point from Enhanced Point",
+        "category": "MoM",
+        "description": "Extracts action items, commitments, and deadlines from enhanced discussion points during MoM generation.",
+        "variables": ["{points_json}"],
+    },
+    {
         "key": "rom_polish",
         "name": "Stage 2: Polish & Merge Points",
         "category": "ROM",
@@ -289,6 +296,20 @@ PROMPT_META: list[dict] = [
         "description": "Extracts 2–5 factual, agenda-specific points from an uploaded supporting document.",
         "variables": ["{agenda_title}", "{agenda_description}", "{document_text}"],
     },
+    {
+        "key": "rom_version_short",
+        "name": "Short ROM Rewrite",
+        "category": "ROM",
+        "description": "Generates a Short ROM version per agenda. Processes all points for each agenda together. Focuses on action points and decisions only. Input fields: Point ID, Speaker, Discussion, Action Owner.",
+        "variables": ["{agenda_title}", "{points_json}", "{rules_section}"],
+    },
+    {
+        "key": "rom_version_medium",
+        "name": "Medium ROM Rewrite",
+        "category": "ROM",
+        "description": "Generates a Medium ROM version per agenda. Processes all points for each agenda together. Produces an aggregated version with key discussion details and action points. Input fields: Point ID, Speaker, Discussion, Action Owner.",
+        "variables": ["{agenda_title}", "{points_json}", "{rules_section}"],
+    },
 ]
 
 VALID_KEYS: frozenset[str] = frozenset(m["key"] for m in PROMPT_META)
@@ -327,6 +348,7 @@ def _defaults() -> dict[str, str]:
         ROM_ACTION_EXTRACTION_PROMPT,
         STAGE1_JSON_REPAIR_PROMPT,
         MOM_REGENERATE_ACTION_POINTS_PROMPT,
+        MOM_EXTRACT_ACTIONS_FROM_POINTS_PROMPT,
         ROM_POLISH_PROMPT,
         ROM_ENHANCE_WINDOW_PROMPT,
         ROM_ENHANCE_ALL_TOGETHER_PROMPT,
@@ -336,12 +358,15 @@ def _defaults() -> dict[str, str]:
         ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         ROM_AGENDA_DOC_POINTS_PROMPT,
         MOM_DEDUPLICATE_ACTION_POINTS_PROMPT,
+        ROM_VERSION_SHORT_PROMPT,
+        ROM_VERSION_MEDIUM_PROMPT,
     )
     return {
         "mom":                            MOM_PROMPT,
         "mom_merge":                      MOM_MERGE_PROMPT,
         "mom_action_dedup":               MOM_DEDUPLICATE_ACTION_POINTS_PROMPT,
         "mom_action_regen":               MOM_REGENERATE_ACTION_POINTS_PROMPT,
+        "mom_extract_actions":            MOM_EXTRACT_ACTIONS_FROM_POINTS_PROMPT,
         "agenda_compress":                AGENDA_COMPRESS_PROMPT,
         "agenda_compress_with_context":   AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
         "reference_compress":             REFERENCE_COMPRESS_PROMPT,
@@ -373,6 +398,8 @@ def _defaults() -> dict[str, str]:
         "rom_mom_expansion":              ROM_MOM_EXPANSION_PROMPT,
         "rom_agenda_assign_batch":        ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         "rom_agenda_doc_points":          ROM_AGENDA_DOC_POINTS_PROMPT,
+        "rom_version_short":              ROM_VERSION_SHORT_PROMPT,
+        "rom_version_medium":             ROM_VERSION_MEDIUM_PROMPT,
     }
 
 
@@ -391,6 +418,45 @@ async def _ensure_cache_loaded(db: AsyncSession) -> None:
     _cache_loaded = True
 
 
+def _load_cache_sync() -> None:
+    """Synchronously load all custom templates from SQLite into _cache if not yet loaded."""
+    global _cache_loaded
+    if _cache_loaded:
+        return
+    import os
+    import sqlite3
+    try:
+        from config import settings
+        db_url = getattr(settings, "DATABASE_URL", "")
+        db_path = None
+        if db_url.startswith("sqlite+aiosqlite:///"):
+            db_path = db_url[len("sqlite+aiosqlite:///"):]
+        elif db_url.startswith("sqlite:///"):
+            db_path = db_url[len("sqlite:///"):]
+        elif db_url:
+            db_path = db_url
+
+        if db_path and os.path.exists(db_path):
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prompt_templates'")
+                if cursor.fetchone():
+                    cursor.execute("SELECT key, template FROM prompt_templates")
+                    rows = cursor.fetchall()
+                    for r in rows:
+                        k = r["key"]
+                        t = r["template"]
+                        if k in VALID_KEYS and t and t.strip():
+                            _cache[k] = t
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.warning(f"[PromptService] Sync cache load failed: {e}")
+    _cache_loaded = True
+
+
 async def get_prompt(db: AsyncSession, key: str) -> str:
     """Return the active template for key (custom or default)."""
     await _ensure_cache_loaded(db)
@@ -401,12 +467,14 @@ async def get_prompt(db: AsyncSession, key: str) -> str:
 
 def get_prompt_sync(key: str) -> str:
     """
-    Synchronous cache-only lookup — used inside AI pipeline threads.
+    Synchronous cache-first lookup with sync DB fallback — used inside AI pipeline threads.
 
-    If the key is in the in-process cache, return it. Otherwise return
-    the hardcoded default. This never hits the DB, so it is safe to call
-    from synchronous worker threads.
+    If the in-process cache has not been loaded from the database yet, it will load
+    all custom templates synchronously via sqlite3 so saved settings are always respected,
+    even before any async endpoint has run.
     """
+    if not _cache_loaded:
+        _load_cache_sync()
     if key in _cache and _cache[key].strip():
         return _cache[key]
     return _defaults().get(key, "")

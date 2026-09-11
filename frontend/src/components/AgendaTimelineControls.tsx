@@ -25,6 +25,10 @@ interface AgendaTimelineControlsProps {
   onChangeOrder: (newOrder: string[]) => void
   onChangeTimeline: (newTimeline: Record<string, AgendaTimelineRange>) => void
   onReset?: () => void
+  enableOrder?: boolean
+  onChangeEnableOrder?: (enabled: boolean) => void
+  enableTimeline?: boolean
+  onChangeEnableTimeline?: (enabled: boolean) => void
 }
 
 const AGENDA_COLORS = [
@@ -71,6 +75,10 @@ export const AgendaTimelineControls: React.FC<AgendaTimelineControlsProps> = ({
   onChangeOrder,
   onChangeTimeline,
   onReset,
+  enableOrder = true,
+  onChangeEnableOrder,
+  enableTimeline = true,
+  onChangeEnableTimeline,
 }) => {
   const timelineBarRef = useRef<HTMLDivElement>(null)
   const [draggingBoundaryIdx, setDraggingBoundaryIdx] = useState<number | null>(null)
@@ -305,11 +313,31 @@ export const AgendaTimelineControls: React.FC<AgendaTimelineControlsProps> = ({
 
       {/* ── 1. DISCUSSION SEQUENCE CONTROLS ── */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '.4rem' }}>
-        <div style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>
-          1. Discussion Order Sequence
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+            <input
+              type="checkbox"
+              checked={enableOrder}
+              onChange={(e) => onChangeEnableOrder?.(e.target.checked)}
+              style={{ cursor: 'pointer', accentColor: 'hsl(140,70%,45%)' }}
+            />
+            <span style={{ fontSize: '.72rem', fontWeight: 700, color: enableOrder ? 'hsl(var(--ink))' : 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>
+              1. Discussion Order Sequence
+            </span>
+          </label>
+          {!enableOrder && (
+            <span style={{ fontSize: '.68rem', color: 'hsl(38,90%,40%)', background: 'hsl(38,90%,50%/.12)', padding: '2px 7px', borderRadius: 4, fontWeight: 600 }}>
+              Disabled — Omitted from LLM input
+            </span>
+          )}
         </div>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
+          opacity: enableOrder ? 1 : 0.45,
+          transition: 'opacity 0.2s ease',
+          pointerEvents: enableOrder ? 'auto' : 'none'
+        }}>
           {discussionOrder.map((aid, idx) => {
             const agenda = agendaMap.get(aid)
             const color = getColorForAgenda(aid)
@@ -395,11 +423,26 @@ export const AgendaTimelineControls: React.FC<AgendaTimelineControlsProps> = ({
       {/* ── 2. VISUAL MULTI-SEGMENT TIMELINE BAR WITH DRAGGABLE PARTITIONS ── */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '.4rem', marginTop: '.2rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>
-            2. Approximate Timeline Windows (Drag Partitions to Adjust)
-          </div>
-          <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace' }}>
-            00:00 ── {fmtTime(effectiveDuration)}
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+            <input
+              type="checkbox"
+              checked={enableTimeline}
+              onChange={(e) => onChangeEnableTimeline?.(e.target.checked)}
+              style={{ cursor: 'pointer', accentColor: 'hsl(140,70%,45%)' }}
+            />
+            <span style={{ fontSize: '.72rem', fontWeight: 700, color: enableTimeline ? 'hsl(var(--ink))' : 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em' }}>
+              2. Approximate Timeline Windows (Drag Partitions to Adjust)
+            </span>
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {!enableTimeline && (
+              <span style={{ fontSize: '.68rem', color: 'hsl(38,90%,40%)', background: 'hsl(38,90%,50%/.12)', padding: '2px 7px', borderRadius: 4, fontWeight: 600 }}>
+                Disabled — Omitted from LLM input
+              </span>
+            )}
+            <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace' }}>
+              00:00 ── {fmtTime(effectiveDuration)}
+            </div>
           </div>
         </div>
 
@@ -415,6 +458,9 @@ export const AgendaTimelineControls: React.FC<AgendaTimelineControlsProps> = ({
             background: 'hsl(var(--muted)/.3)',
             border: '1px solid hsl(var(--border)/.8)',
             userSelect: 'none',
+            opacity: enableTimeline ? 1 : 0.45,
+            transition: 'opacity 0.2s ease',
+            pointerEvents: enableTimeline ? 'auto' : 'none',
           }}
         >
           {discussionOrder.map((aid, idx) => {
@@ -536,7 +582,15 @@ export const AgendaTimelineControls: React.FC<AgendaTimelineControlsProps> = ({
       </div>
 
       {/* ── 3. DETAILED PER-AGENDA TIME WINDOW EDITORS ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '.6rem', marginTop: '.2rem' }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+        gap: '.6rem',
+        marginTop: '.2rem',
+        opacity: enableTimeline ? 1 : 0.45,
+        transition: 'opacity 0.2s ease',
+        pointerEvents: enableTimeline ? 'auto' : 'none'
+      }}>
         {discussionOrder.map((aid, idx) => {
           const range = agendaTimeline[aid] || { start_sec: 0, end_sec: effectiveDuration }
           const color = getColorForAgenda(aid)

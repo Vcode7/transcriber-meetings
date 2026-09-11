@@ -404,7 +404,7 @@ def _assign_speakers_to_words_manual(
         seg_end = seg["end"]
 
         # Find best segment match by time overlap
-        best_label = "Speaker 1"
+        best_label = "UNKNOWN"
         best_profile_id = None
         best_is_overlap = False
         best_overlap_regions: List[Dict[str, Any]] = []
@@ -606,10 +606,7 @@ async def _run_pipeline_impl(
     # ─────────────────────────────────────────────────────────────────────
 
     try:
-        # ── Stage 1: Transcription (WhisperX + alignment) ─────────────
-        logger.info(f"[Pipeline] {recording_id} — STAGE 1: Transcribing {file_path}")
-        await _update_status_safe(recording_id, "processing", {"progress": "transcribing"})
-
+        # ── Load user settings ────────────────────────────────────────
         user_settings_dict = {}
         try:
             async with get_db_context() as db:
@@ -623,19 +620,16 @@ async def _run_pipeline_impl(
         except Exception:
             pass
 
-        _t0_transcription = time.monotonic()
-
-        # ── Route to parallel or sequential transcription ─────────────────
         _whisper_workers = int(user_settings_dict.get("whisper_parallel_processing") or getattr(settings, "WHISPER_PARALLEL_PROCESSING", 1))
         _chunk_minutes = int(user_settings_dict.get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
-        logger.info(
-            f"[Pipeline] {recording_id} — Whisper workers={_whisper_workers} "
-            f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
-        )
-        try:
+        _parallel_td = bool(user_settings_dict.get("parallel_transcription_diarization", False))
+        _analytics["parallel_transcription_diarization"] = _parallel_td
+
+        # ── Helper: run transcription ─────────────────────────────────
+        async def _do_transcription():
             if _whisper_workers > 1:
                 from services.transcription import transcribe_parallel
-                t_result = await loop.run_in_executor(
+                return await loop.run_in_executor(
                     None,
                     lambda: transcribe_parallel(
                         file_path,
@@ -645,87 +639,187 @@ async def _run_pipeline_impl(
                         chunk_minutes=_chunk_minutes,
                     ),
                 )
-
             else:
-                t_result = await loop.run_in_executor(
+                return await loop.run_in_executor(
                     None,
                     lambda: transcribe(file_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
                 )
-        except Exception as e:
-            logger.error(f"[Pipeline] {recording_id} — Transcription FAILED: {e}", exc_info=True)
-            _analytics["error_stage"] = "transcription"
-            _analytics["error_message"] = str(e)
-            _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
-            await _emit_analytics(_analytics)
-            await _update_status_safe(recording_id, "error", {"error_message": f"Transcription failed: {str(e)}"})
-            unload_all_models()
-            return
-        _analytics["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
-        _analytics["whisper_workers"] = _whisper_workers
+
+        # ── Helper: run diarization ───────────────────────────────────
+        async def _do_diarization():
+            return await loop.run_in_executor(None, diarize, file_path)
+
+        if _parallel_td:
+            # ══════════════════════════════════════════════════════════
+            # PARALLEL MODE: Transcription + Diarization simultaneously
+            # ══════════════════════════════════════════════════════════
+            logger.info(
+                f"[Pipeline] {recording_id} — PARALLEL MODE: Running transcription + diarization "
+                f"simultaneously on GPU (workers={_whisper_workers})"
+            )
+            await _update_status_safe(recording_id, "processing", {"progress": "transcribing_and_diarizing"})
+
+            _t0_parallel = time.monotonic()
+            try:
+                t_result, diar_segs = await asyncio.gather(
+                    _do_transcription(),
+                    _do_diarization(),
+                )
+            except Exception as e:
+                logger.error(f"[Pipeline] {recording_id} — Parallel transcription+diarization FAILED: {e}", exc_info=True)
+                _analytics["error_stage"] = "parallel_transcription_diarization"
+                _analytics["error_message"] = str(e)
+                _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
+                await _emit_analytics(_analytics)
+                await _update_status_safe(recording_id, "error", {"error_message": f"Parallel transcription+diarization failed: {str(e)}"})
+                unload_all_models()
+                return
+            _t_parallel_elapsed = round(time.monotonic() - _t0_parallel, 3)
+            _analytics["transcription_sec"] = _t_parallel_elapsed
+            _analytics["diarization_sec"] = _t_parallel_elapsed
+            _analytics["whisper_workers"] = _whisper_workers
+            logger.info(f"[Pipeline] {recording_id} — Parallel transcription+diarization completed in {_t_parallel_elapsed}s")
+
+            # Unload BOTH models immediately after parallel completion
+            try:
+                from services.transcription import unload_whisperx_model, unload_align_model
+                unload_whisperx_model()
+                unload_align_model()
+            except Exception as e:
+                logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
+            try:
+                from services.diarization import unload_diarization_pipeline
+                unload_diarization_pipeline()
+            except Exception as e:
+                logger.warning(f"[Pipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
+
+            # Process transcription result
+            transcript_segs = t_result["segments"]
+            raw_text = t_result["raw_text"]
+            language = t_result.get("language", "en")
+            aligned_result = t_result.get("aligned_result", {"segments": transcript_segs})
+            _alignment_used = aligned_result is not t_result and aligned_result != {"segments": transcript_segs}
+            _avg_conf, _min_conf, _word_cnt = _word_confidence_stats(transcript_segs)
+            _analytics.update({
+                "language_detected": language,
+                "transcript_segment_count": len(transcript_segs),
+                "transcript_word_count": _word_cnt or _count_total_words(transcript_segs),
+                "avg_word_confidence": _avg_conf,
+                "min_word_confidence": _min_conf,
+                "alignment_used": _alignment_used,
+            })
+            logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
+
+            # Sanitize and merge
+            from services.transcript_normalizer import sanitize_and_merge_segments
+            transcript_segs = sanitize_and_merge_segments(transcript_segs)
+            aligned_result = {"segments": transcript_segs}
+            _raw_segs_json = to_json(transcript_segs)
+
+            await _update_status_safe(recording_id, "processing", {
+                "raw_transcript": _raw_segs_json,
+                "progress": "identifying_speakers",
+            })
+
+            # Diarization analytics
+            _analytics["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
+            _analytics["diar_raw_segment_count"] = len(diar_segs)
+            _analytics["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
+            _analytics["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
+            logger.info(f"[Pipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
+
+        else:
+            # ══════════════════════════════════════════════════════════
+            # SEQUENTIAL MODE: Transcription → Diarization (existing)
+            # ══════════════════════════════════════════════════════════
+
+            # ── Stage 1: Transcription (WhisperX + alignment) ─────────────
+            logger.info(f"[Pipeline] {recording_id} — STAGE 1: Transcribing {file_path}")
+            await _update_status_safe(recording_id, "processing", {"progress": "transcribing"})
+
+            _t0_transcription = time.monotonic()
+
+            logger.info(
+                f"[Pipeline] {recording_id} — Whisper workers={_whisper_workers} "
+                f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
+            )
+            try:
+                t_result = await _do_transcription()
+            except Exception as e:
+                logger.error(f"[Pipeline] {recording_id} — Transcription FAILED: {e}", exc_info=True)
+                _analytics["error_stage"] = "transcription"
+                _analytics["error_message"] = str(e)
+                _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
+                await _emit_analytics(_analytics)
+                await _update_status_safe(recording_id, "error", {"error_message": f"Transcription failed: {str(e)}"})
+                unload_all_models()
+                return
+            _analytics["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+            _analytics["whisper_workers"] = _whisper_workers
 
 
-        transcript_segs = t_result["segments"]
-        raw_text = t_result["raw_text"]
-        language = t_result.get("language", "en")
-        aligned_result = t_result.get("aligned_result", {"segments": transcript_segs})
-        # Check whether forced alignment actually ran (aligned_result differs from raw segments)
-        _alignment_used = aligned_result is not t_result and aligned_result != {"segments": transcript_segs}
-        _avg_conf, _min_conf, _word_cnt = _word_confidence_stats(transcript_segs)
-        _analytics.update({
-            "language_detected": language,
-            "transcript_segment_count": len(transcript_segs),
-            "transcript_word_count": _word_cnt or _count_total_words(transcript_segs),
-            "avg_word_confidence": _avg_conf,
-            "min_word_confidence": _min_conf,
-            "alignment_used": _alignment_used,
-        })
-        logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
+            transcript_segs = t_result["segments"]
+            raw_text = t_result["raw_text"]
+            language = t_result.get("language", "en")
+            aligned_result = t_result.get("aligned_result", {"segments": transcript_segs})
+            # Check whether forced alignment actually ran (aligned_result differs from raw segments)
+            _alignment_used = aligned_result is not t_result and aligned_result != {"segments": transcript_segs}
+            _avg_conf, _min_conf, _word_cnt = _word_confidence_stats(transcript_segs)
+            _analytics.update({
+                "language_detected": language,
+                "transcript_segment_count": len(transcript_segs),
+                "transcript_word_count": _word_cnt or _count_total_words(transcript_segs),
+                "avg_word_confidence": _avg_conf,
+                "min_word_confidence": _min_conf,
+                "alignment_used": _alignment_used,
+            })
+            logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
 
-        # Unload transcription model immediately to free GPU memory
-        try:
-            from services.transcription import unload_whisperx_model, unload_align_model
-            unload_whisperx_model()
-            unload_align_model()
-        except Exception as e:
-            logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
+            # Unload transcription model immediately to free GPU memory
+            try:
+                from services.transcription import unload_whisperx_model, unload_align_model
+                unload_whisperx_model()
+                unload_align_model()
+            except Exception as e:
+                logger.warning(f"[Pipeline] {recording_id} — Failed to unload transcription models: {e}")
 
-        # ── Missing Transcription Recovery & Non-Overlapping Merge ───────────
-        # Ensure all segments (from primary pass and any recovery passes) are strictly
-        # sanitized, deduplicated, and non-overlapping before proceeding to Diarization.
-        from services.transcript_normalizer import sanitize_and_merge_segments
-        transcript_segs = sanitize_and_merge_segments(transcript_segs)
-        aligned_result = {"segments": transcript_segs}
-        _raw_segs_json = to_json(transcript_segs)
+            # ── Missing Transcription Recovery & Non-Overlapping Merge ───────────
+            # Ensure all segments (from primary pass and any recovery passes) are strictly
+            # sanitized, deduplicated, and non-overlapping before proceeding to Diarization.
+            from services.transcript_normalizer import sanitize_and_merge_segments
+            transcript_segs = sanitize_and_merge_segments(transcript_segs)
+            aligned_result = {"segments": transcript_segs}
+            _raw_segs_json = to_json(transcript_segs)
 
-        # Save raw transcript snapshot in DB and set progress to diarizing
-        await _update_status_safe(recording_id, "processing", {
-            "raw_transcript": _raw_segs_json,
-            "progress": "diarizing",
-        })
-        logger.info(
-            f"[Pipeline] {recording_id} — Missing transcription retrieval / transcription phase completed: "
-            f"{len(transcript_segs)} non-overlapping segments; continuing pipeline directly to Stage 2 (Diarization)"
-        )
+            # Save raw transcript snapshot in DB and set progress to diarizing
+            await _update_status_safe(recording_id, "processing", {
+                "raw_transcript": _raw_segs_json,
+                "progress": "diarizing",
+            })
+            logger.info(
+                f"[Pipeline] {recording_id} — Missing transcription retrieval / transcription phase completed: "
+                f"{len(transcript_segs)} non-overlapping segments; continuing pipeline directly to Stage 2 (Diarization)"
+            )
 
-        # ── Stage 2: Diarization ──────────────────────────────────────
-        logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
-        await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
-        _t0_diarization = time.monotonic()
-        diar_segs = await loop.run_in_executor(None, diarize, file_path)
+            # ── Stage 2: Diarization ──────────────────────────────────────
+            logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
+            await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
+            _t0_diarization = time.monotonic()
+            diar_segs = await loop.run_in_executor(None, diarize, file_path)
 
-        _analytics["diarization_sec"] = round(time.monotonic() - _t0_diarization, 3)
-        _analytics["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
-        _analytics["diar_raw_segment_count"] = len(diar_segs)
-        _analytics["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
-        _analytics["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
-        logger.info(f"[Pipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
+            _analytics["diarization_sec"] = round(time.monotonic() - _t0_diarization, 3)
+            _analytics["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
+            _analytics["diar_raw_segment_count"] = len(diar_segs)
+            _analytics["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
+            _analytics["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
+            logger.info(f"[Pipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
 
-        # Unload diarization pipeline immediately to free VRAM
-        try:
-            from services.diarization import unload_diarization_pipeline
-            unload_diarization_pipeline()
-        except Exception as e:
-            logger.warning(f"[Pipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
+            # Unload diarization pipeline immediately to free VRAM
+            try:
+                from services.diarization import unload_diarization_pipeline
+                unload_diarization_pipeline()
+            except Exception as e:
+                logger.warning(f"[Pipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
 
         # ── Stage 3: Load voice profiles ──────────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 3: Loading voice profiles for user {user_id}")
@@ -1282,7 +1376,7 @@ def _post_process_whisperx_segments(
                     best_ov = ov
                     best_id_label = s.get("speaker_label") or s.get("speaker")
                     best_id_profile = s.get("speaker_profile_id")
-            label = best_id_label or seg.get("speaker") or _fallback_label(raw_id, seg_idx)
+            label = best_id_label or seg.get("speaker") or "UNKNOWN"
             profile_id = best_id_profile or profile_id
 
         enriched_words = []
@@ -1825,6 +1919,8 @@ async def _run_finalize_pipeline_impl(
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to fetch language from DB: {e}")
 
     has_usable_chunks = len(merged_segments) > 0
+    _parallel_td = False
+    diar_segs: List[Dict[str, Any]] = []
 
     if has_usable_chunks:
         logger.info(f"[FinalPipeline] {recording_id} — Using merged chunk results (skipping full audio transcription)")
@@ -1904,14 +2000,14 @@ async def _run_finalize_pipeline_impl(
         # ── Route to parallel or sequential transcription ─────────────────
         _whisper_workers = int(user_settings_dict.get("whisper_parallel_processing") or getattr(settings, "WHISPER_PARALLEL_PROCESSING", 1))
         _chunk_minutes = int(user_settings_dict.get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
-        logger.info(
-            f"[FinalPipeline] {recording_id} — Whisper workers={_whisper_workers} "
-            f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
-        )
-        try:
+        _parallel_td = bool(user_settings_dict.get("parallel_transcription_diarization", False))
+        _analytics_fin["parallel_transcription_diarization"] = _parallel_td
+
+        # ── Helper: run transcription ─────────────────────────────────
+        async def _do_transcription_fin():
             if _whisper_workers > 1:
                 from services.transcription import transcribe_parallel
-                t_result = await loop.run_in_executor(
+                return await loop.run_in_executor(
                     None,
                     lambda: transcribe_parallel(
                         full_wav_path,
@@ -1922,15 +2018,64 @@ async def _run_finalize_pipeline_impl(
                         chunk_minutes=_chunk_minutes,
                     ),
                 )
-
             else:
-                t_result = await loop.run_in_executor(
+                return await loop.run_in_executor(
                     None,
                     lambda: transcribe(full_wav_path, initial_prompt=initial_prompt, language=detected_language, user_settings=user_settings_dict),
                 )
+
+        # ── Helper: run diarization ───────────────────────────────────
+        async def _do_diarization_fin():
+            return await loop.run_in_executor(None, diarize, full_wav_path)
+
+        if _parallel_td:
+            # ══════════════════════════════════════════════════════════
+            # PARALLEL MODE: Transcription + Diarization simultaneously
+            # ══════════════════════════════════════════════════════════
+            logger.info(
+                f"[FinalPipeline] {recording_id} — PARALLEL MODE: Running transcription + diarization "
+                f"simultaneously on GPU (workers={_whisper_workers})"
+            )
+            await _update_status_safe(recording_id, "processing", {"progress": "transcribing_and_diarizing"})
+
+            _t0_parallel = time.monotonic()
+            try:
+                t_result, diar_segs = await asyncio.gather(
+                    _do_transcription_fin(),
+                    _do_diarization_fin(),
+                )
+            except Exception as e:
+                logger.error(f"[FinalPipeline] {recording_id} — Parallel transcription+diarization FAILED: {e}", exc_info=True)
+                _analytics_fin["error_stage"] = "parallel_transcription_diarization"
+                _analytics_fin["error_message"] = str(e)
+                _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
+                await _emit_analytics(_analytics_fin)
+                await _update_status_safe(recording_id, "error", {"error_message": f"Parallel transcription+diarization failed: {str(e)}"})
+                unload_all_models()
+                return
+            _t_parallel_elapsed = round(time.monotonic() - _t0_parallel, 3)
+            _analytics_fin["transcription_sec"] = _t_parallel_elapsed
+            _analytics_fin["diarization_sec"] = _t_parallel_elapsed
+            _analytics_fin["whisper_workers"] = _whisper_workers
+            logger.info(f"[FinalPipeline] {recording_id} — Parallel transcription+diarization completed in {_t_parallel_elapsed}s")
+
+            # Unload BOTH models immediately after parallel completion
+            try:
+                from services.transcription import unload_whisperx_model, unload_align_model
+                unload_whisperx_model()
+                unload_align_model()
+            except Exception as e:
+                logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
+            try:
+                from services.diarization import unload_diarization_pipeline
+                unload_diarization_pipeline()
+            except Exception as e:
+                logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
+            log_gpu_memory("Post-parallel Unload")
+
+            # Process transcription result
             full_raw_text = t_result.get("raw_text", "")
             language = t_result.get("language", "en")
-            # Use full-audio aligned result for speaker assignment (most accurate timestamps)
             aligned_result = t_result.get("aligned_result", {"segments": t_result.get("segments", [])})
             _t_segs = t_result.get("segments", [])
             _avg_conf_f, _min_conf_f, _wc_f = _word_confidence_stats(_t_segs)
@@ -1944,61 +2089,97 @@ async def _run_finalize_pipeline_impl(
             })
             logger.info(
                 f"[FinalPipeline] {recording_id} — Full audio transcription OK: "
-                f"{len(t_result.get('segments', []))} segments, lang={language}"
+                f"{len(_t_segs)} segments, lang={language}"
             )
-        except Exception as e:
-            logger.error(f"[FinalPipeline] {recording_id} — Full audio transcription FAILED: {e}", exc_info=True)
-            _analytics_fin["error_stage"] = "transcription"
-            _analytics_fin["error_message"] = str(e)
-            _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
-            await _emit_analytics(_analytics_fin)
-            await _update_status_safe(recording_id, "error", {"error_message": f"Transcription failed: {str(e)}"})
-            unload_all_models()
-            return
-        _analytics_fin["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
-        _analytics_fin["whisper_workers"] = _whisper_workers
 
+            # Diarization analytics
+            _analytics_fin["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
+            _analytics_fin["diar_raw_segment_count"] = len(diar_segs)
+            _analytics_fin["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
+            _analytics_fin["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
+            logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
 
-        # Unload transcription models immediately to free VRAM
-        try:
-            from services.transcription import unload_whisperx_model, unload_align_model
-            unload_whisperx_model()
-            unload_align_model()
-        except Exception as e:
-            logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
-        log_gpu_memory("Post-transcription Unload")
+        else:
+            # ══════════════════════════════════════════════════════════
+            # SEQUENTIAL MODE: Transcription → Diarization (existing)
+            # ══════════════════════════════════════════════════════════
+            logger.info(
+                f"[FinalPipeline] {recording_id} — Whisper workers={_whisper_workers} "
+                f"({'parallel (~' + str(_chunk_minutes) + 'm chunks)' if _whisper_workers > 1 else 'sequential'})"
+            )
+            try:
+                t_result = await _do_transcription_fin()
+                full_raw_text = t_result.get("raw_text", "")
+                language = t_result.get("language", "en")
+                # Use full-audio aligned result for speaker assignment (most accurate timestamps)
+                aligned_result = t_result.get("aligned_result", {"segments": t_result.get("segments", [])})
+                _t_segs = t_result.get("segments", [])
+                _avg_conf_f, _min_conf_f, _wc_f = _word_confidence_stats(_t_segs)
+                _analytics_fin.update({
+                    "language_detected": language,
+                    "transcript_segment_count": len(_t_segs),
+                    "transcript_word_count": _wc_f or _count_total_words(_t_segs),
+                    "avg_word_confidence": _avg_conf_f,
+                    "min_word_confidence": _min_conf_f,
+                    "alignment_used": aligned_result is not t_result,
+                })
+                logger.info(
+                    f"[FinalPipeline] {recording_id} — Full audio transcription OK: "
+                    f"{len(t_result.get('segments', []))} segments, lang={language}"
+                )
+            except Exception as e:
+                logger.error(f"[FinalPipeline] {recording_id} — Full audio transcription FAILED: {e}", exc_info=True)
+                _analytics_fin["error_stage"] = "transcription"
+                _analytics_fin["error_message"] = str(e)
+                _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
+                await _emit_analytics(_analytics_fin)
+                await _update_status_safe(recording_id, "error", {"error_message": f"Transcription failed: {str(e)}"})
+                unload_all_models()
+                return
+            _analytics_fin["transcription_sec"] = round(time.monotonic() - _t0_transcription, 3)
+            _analytics_fin["whisper_workers"] = _whisper_workers
+
+            # Unload transcription models immediately to free VRAM
+            try:
+                from services.transcription import unload_whisperx_model, unload_align_model
+                unload_whisperx_model()
+                unload_align_model()
+            except Exception as e:
+                logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload transcription models: {e}")
+            log_gpu_memory("Post-transcription Unload")
 
     raw_text = full_raw_text or " ".join(merged_raw_parts)
 
-    # ── Step 4: Diarization (once on full audio) ─────────────────────────
-    # Chunk summaries are generated AFTER speaker identification (Step 7c)
-    # so they can include speaker names in the LLM input.
-    logger.info(f"[FinalPipeline] {recording_id} — Running diarization on full audio")
-    await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
-    _t0_diar = time.monotonic()
-    try:
-        # Note: chunk summary generation now runs AFTER speaker identification
-        # so it can use speaker-attributed text instead of raw transcript.
-        log_gpu_memory("Pre-diarization")
-        diar_segs = await loop.run_in_executor(None, diarize, full_wav_path)
+    if not _parallel_td:
+        # ── Step 4: Diarization (once on full audio) ─────────────────────────
+        # Chunk summaries are generated AFTER speaker identification (Step 7c)
+        # so they can include speaker names in the LLM input.
+        logger.info(f"[FinalPipeline] {recording_id} — Running diarization on full audio")
+        await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
+        _t0_diar = time.monotonic()
+        try:
+            # Note: chunk summary generation now runs AFTER speaker identification
+            # so it can use speaker-attributed text instead of raw transcript.
+            log_gpu_memory("Pre-diarization")
+            diar_segs = await loop.run_in_executor(None, diarize, full_wav_path)
 
-        logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
-    except Exception as e:
-        logger.error(f"[FinalPipeline] {recording_id} — Diarization FAILED: {e}", exc_info=True)
-        diar_segs = []
-    _analytics_fin["diarization_sec"] = round(time.monotonic() - _t0_diar, 3)
-    _analytics_fin["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
-    _analytics_fin["diar_raw_segment_count"] = len(diar_segs)
-    _analytics_fin["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
-    _analytics_fin["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
+            logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
+        except Exception as e:
+            logger.error(f"[FinalPipeline] {recording_id} — Diarization FAILED: {e}", exc_info=True)
+            diar_segs = []
+        _analytics_fin["diarization_sec"] = round(time.monotonic() - _t0_diar, 3)
+        _analytics_fin["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
+        _analytics_fin["diar_raw_segment_count"] = len(diar_segs)
+        _analytics_fin["diar_overlap_segment_count"] = sum(1 for s in diar_segs if s.get("is_overlap"))
+        _analytics_fin["diar_unique_speakers"] = len({s["speaker"] for s in diar_segs})
 
-    # Unload diarization pipeline immediately to free VRAM
-    try:
-        from services.diarization import unload_diarization_pipeline
-        unload_diarization_pipeline()
-    except Exception as e:
-        logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
-    log_gpu_memory("Post-diarization Unload")
+        # Unload diarization pipeline immediately to free VRAM
+        try:
+            from services.diarization import unload_diarization_pipeline
+            unload_diarization_pipeline()
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload diarization pipeline: {e}")
+        log_gpu_memory("Post-diarization Unload")
 
     # ── Step 5: Load voice profiles ──────────────────────────────────────
     logger.info(f"[FinalPipeline] {recording_id} — Loading voice profiles")

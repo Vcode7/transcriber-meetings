@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Electron main process — AI Meeting Transcriber frontend wrapper
  *
  * Wraps the Vite/React frontend in an Electron window.
@@ -10,6 +10,16 @@
 const { app, BrowserWindow, shell, Menu, session, desktopCapturer } = require('electron')
 const path = require('path')
 const fs = require('fs')
+
+// ============================================================================
+// FIX: Disable GPU hardware acceleration & media flags to prevent 0xC0000005 crash
+// ============================================================================
+app.disableHardwareAcceleration()
+app.commandLine.appendSwitch('disable-gpu')
+app.commandLine.appendSwitch('disable-software-rasterizer')
+app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling,MediaSessionService')
+app.commandLine.appendSwitch('no-sandbox')
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 // Log path: Application/frontend.log (when packaged) or local folder (dev)
 let logPath = path.join(__dirname, 'frontend.log')
@@ -74,7 +84,9 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      webSecurity: true,
+      webSecurity: false,
+      sandbox: false,
+      backgroundThrottling: false,
     },
     // Icon
     // icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
@@ -102,6 +114,28 @@ function createWindow() {
     console.error('Page failed to load:', errorCode, errorDescription, validatedURL)
   })
 
+  // Capture renderer console messages to frontend.log
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    if (level >= 2) { // 2 = warning, 3 = error
+      writeLog(`[Renderer] [${level === 3 ? 'ERROR' : 'WARN'}] ${message} (${sourceId}:${line})`)
+    }
+  })
+
+  // Detect and log if the renderer process crashes or runs out of memory, and recover
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('Render process crashed/gone:', details.reason, 'exitCode:', details.exitCode)
+    writeLog(`[Renderer] [CRASH] Render process gone. Reason: ${details.reason}, exitCode: ${details.exitCode}`)
+    if (details.reason === 'crashed' || details.reason === 'abnormal-exit' || details.reason === 'oom') {
+      console.log('Reloading mainWindow after renderer crash...')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (SERVE_LOCAL) {
+          mainWindow.loadFile(LOCAL_DIST)
+        } else {
+          mainWindow.loadURL(FRONTEND_URL)
+        }
+      }
+    }
+  })
 
   // Open external links in browser (not Electron)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

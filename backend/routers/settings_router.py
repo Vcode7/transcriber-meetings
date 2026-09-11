@@ -114,9 +114,11 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "whisper_batch_size": 8,
         "whisper_parallel_processing": 1,
         "whisper_parallel_chunk_minutes": 10,
+        "parallel_transcription_diarization": False,
         "rom_parallel_window_processing": 2,
 
         "rom_separate_action_extraction": False,
+        "rom_action_generation_chunk_size": 10,
         "rom_stage2_process_all_together": False,
         "rom_pipeline_mode": "base",
         "missing_transcript_recovery_enabled": False,
@@ -124,6 +126,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "max_tokens_rom_discussion": 4096,
         "max_tokens_rom_discussion_no_actions": 4096,
         "max_tokens_rom_action_extraction": 2048,
+        "max_tokens_mom_extract_actions": 4096,
         "max_tokens_stage1_json_repair": 4548,
         "max_tokens_mom_action_regen": 4048,
         "max_tokens_rom_polish": 4096,
@@ -156,6 +159,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["enable_low_volume_recovery"] = bool(res["enable_low_volume_recovery"])
     res["enable_audio_validation"] = bool(res["enable_audio_validation"])
     res["rom_separate_action_extraction"] = bool(res.get("rom_separate_action_extraction", 0))
+    res["rom_action_generation_chunk_size"] = int(res.get("rom_action_generation_chunk_size") or 10)
     res["rom_stage2_process_all_together"] = bool(res.get("rom_stage2_process_all_together", 0))
     res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
     res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
@@ -215,6 +219,12 @@ async def update_settings(
         patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
     if "rom_separate_action_extraction" in patch:
         patch["rom_separate_action_extraction"] = 1 if patch["rom_separate_action_extraction"] else 0
+    if "rom_action_generation_chunk_size" in patch:
+        try:
+            val = int(patch["rom_action_generation_chunk_size"])
+            patch["rom_action_generation_chunk_size"] = max(1, min(val, 100))
+        except (ValueError, TypeError):
+            patch["rom_action_generation_chunk_size"] = 10
     if "rom_stage2_process_all_together" in patch:
         patch["rom_stage2_process_all_together"] = 1 if patch["rom_stage2_process_all_together"] else 0
     if "missing_transcript_recovery_enabled" in patch:

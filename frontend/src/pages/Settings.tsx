@@ -59,6 +59,7 @@ interface UserSettings {
   rom_windows_per_batch?: number
   rom_parallel_window_processing?: number
   rom_separate_action_extraction?: boolean
+  rom_action_generation_chunk_size?: number
   rom_pipeline_mode?: string
 
   // Whisper Settings
@@ -67,6 +68,7 @@ interface UserSettings {
   max_tokens_rom_discussion?: number
   max_tokens_rom_discussion_no_actions?: number
   max_tokens_rom_action_extraction?: number
+  max_tokens_mom_extract_actions?: number
   max_tokens_stage1_json_repair?: number
   max_tokens_mom_action_regen?: number
   max_tokens_rom_polish?: number
@@ -104,6 +106,7 @@ interface UserSettings {
   // Whisper & Parallel Pipeline Settings
   whisper_parallel_processing?: number
   whisper_parallel_chunk_minutes?: number
+  parallel_transcription_diarization?: boolean
 
   // Low-Volume Speech Transcription Pipeline Enhancements
   enable_vad?: boolean
@@ -378,6 +381,7 @@ export default function SettingsPage() {
     try {
       await api.put(`/prompt-templates/${key}`, { template })
       setPrompts(prev => prev.map(p => p.key === key ? { ...p, template, is_modified: true } : p))
+      setEditingTemplates(prev => ({ ...prev, [key]: template }))
       setSavedKeys(prev => {
         const next = new Set(prev)
         next.add(key)
@@ -413,6 +417,11 @@ export default function SettingsPage() {
         is_modified: false,
         updated_at: null
       } : p))
+      setEditingTemplates(prev => {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
       toast.success('Prompt template reset to default')
     } catch (err: any) {
       toast.error('Failed to reset prompt template')
@@ -425,6 +434,7 @@ export default function SettingsPage() {
       await api.delete('/prompt-templates')
       const ptRes = await api.get('/prompt-templates')
       setPrompts(ptRes.data)
+      setEditingTemplates({})
       toast.success('All prompt templates reset to defaults')
     } catch (err) {
       toast.error('Failed to reset all prompt templates')
@@ -892,6 +902,13 @@ export default function SettingsPage() {
                       min={1} max={5} step={1}
                       onChange={v => setSettings({ ...settings, rom_parallel_window_processing: Math.round(v) })}
                     />
+                    <SettingCard
+                      title="Action Extraction Chunk Size (MOM)"
+                      description="Number of Stage 2 discussion points passed per LLM call when generating action points for MoM (default 10)."
+                      value={settings.rom_action_generation_chunk_size ?? 10}
+                      min={1} max={50} step={1}
+                      onChange={v => setSettings({ ...settings, rom_action_generation_chunk_size: Math.round(v) })}
+                    />
                   </div>
                 )}
 
@@ -975,6 +992,7 @@ export default function SettingsPage() {
                     <TokenInput label="Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
                     <TokenInput label="Stage 1 Discussion Only (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
                     <TokenInput label="Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
+                    <TokenInput label="MoM Extract Action Points from ROM" val={settings.max_tokens_mom_extract_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_mom_extract_actions: v })} />
                     <TokenInput label="Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 5048} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
                     <TokenInput label="Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
                     <TokenInput label="Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />
@@ -1448,6 +1466,23 @@ export default function SettingsPage() {
                 </div>
               </div>
 
+              {/* ⚡ Parallel Transcription + Diarization (High VRAM GPU) */}
+              <div style={{ borderRadius: 12, border: '1.5px solid hsl(280 70% 55% / .35)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '.35rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Zap size={16} style={{ color: 'hsl(280 70% 55%)' }} /> Parallel Transcription &amp; Diarization (High VRAM)
+                </h3>
+                <div style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', marginBottom: '1rem' }}>
+                  Run Whisper transcription and Pyannote diarization simultaneously on the GPU. Requires 16GB+ VRAM. Default: OFF (sequential processing for lower VRAM usage).
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
+                  <SettingToggle
+                    label="Run Transcription & Diarization in Parallel"
+                    checked={settings.parallel_transcription_diarization ?? false}
+                    onChange={v => setSettings({ ...settings, parallel_transcription_diarization: v })}
+                  />
+                </div>
+              </div>
+
 
               {/* Audio Validation & Pre-Check Settings */}
               <div style={{ borderRadius: 12, border: '1.5px solid hsl(205,90%,55%/.3)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
@@ -1538,6 +1573,7 @@ export default function SettingsPage() {
                   <TokenInput label="ROM Stage 1 Discussion Extraction" val={settings.max_tokens_rom_discussion ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion: v })} />
                   <TokenInput label="ROM Stage 1 Discussion (No Actions)" val={settings.max_tokens_rom_discussion_no_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_discussion_no_actions: v })} />
                   <TokenInput label="ROM Stage 1 Separate Action Extraction" val={settings.max_tokens_rom_action_extraction ?? 2048} onChange={v => setSettings({ ...settings, max_tokens_rom_action_extraction: v })} />
+                  <TokenInput label="MoM Extract Action Points from ROM" val={settings.max_tokens_mom_extract_actions ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_mom_extract_actions: v })} />
                   <TokenInput label="ROM Stage 1 JSON Repair" val={settings.max_tokens_stage1_json_repair ?? 5048} onChange={v => setSettings({ ...settings, max_tokens_stage1_json_repair: v })} />
                   <TokenInput label="ROM Stage 2 Polish & Merge" val={settings.max_tokens_rom_polish ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_polish: v })} />
                   <TokenInput label="ROM Stage 2 Enhance Window" val={settings.max_tokens_rom_enhance_window ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_enhance_window: v })} />

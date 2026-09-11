@@ -16,6 +16,7 @@ import { useJobsStore } from '../store/jobs'
 
 import AudioTrimmer from '../components/AudioTrimmer'
 import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+import ErrorBoundary from '../components/ErrorBoundary'
 
 interface OcrBlock {
   start: number
@@ -639,12 +640,49 @@ export default function VideoUploadPage() {
 
             {file && !recordingId && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
-                <AudioTrimmer
-                  file={file}
-                  fileName={file.name}
-                  onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
-                  onSkip={() => handleUpload()}
-                />
+                <ErrorBoundary
+                  fallback={
+                    <div style={{
+                      padding: '1.25rem',
+                      borderRadius: '12px',
+                      background: 'hsl(var(--card))',
+                      border: '1.5px solid hsl(var(--border))',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                    }}>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'hsl(var(--foreground))' }}>
+                        Video Trimmer Unavailable for this file format
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))' }}>
+                        You can continue to upload and process the complete video recording.
+                      </div>
+                      <button
+                        onClick={() => handleUpload()}
+                        style={{
+                          alignSelf: 'flex-start',
+                          padding: '0.55rem 1.1rem',
+                          borderRadius: '8px',
+                          background: 'hsl(var(--primary))',
+                          color: 'hsl(var(--primary-foreground))',
+                          fontWeight: 600,
+                          fontSize: '0.85rem',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Process Full Video
+                      </button>
+                    </div>
+                  }
+                >
+                  <AudioTrimmer
+                    file={file}
+                    fileName={file.name}
+                    onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
+                    onSkip={() => handleUpload()}
+                  />
+                </ErrorBoundary>
                 <AdvancedOptionsPanel onChange={setAdvancedOpts} />
               </div>
             )}

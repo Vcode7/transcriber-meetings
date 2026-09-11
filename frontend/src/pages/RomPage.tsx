@@ -7,7 +7,7 @@ import {
   ChevronUp, ChevronDown, ArrowRightLeft, Tag, Trash2, Sliders,
   RotateCcw, RotateCw, WandSparkles, FileUp, Search, Replace, History,
   Merge, Scissors, Check, CornerDownRight, GitMerge,
-  BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks
+  BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks, Zap
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -261,14 +261,55 @@ interface RomData {
     agenda_doc_points: Record<string, AgendaDocEntry>
     discussion_order?: string[]
     agenda_timeline?: Record<string, AgendaTimelineRange>
+    enable_agenda_order?: boolean
+    enable_agenda_timeline?: boolean
     completed_at: string | null
   } | null
   final_rom: {
     agendas: FinalRomAgenda[]
-    speaker_mappings: Record<string, string>
-    last_edited_at: string | null
-    include_agenda_doc_points: boolean
+    speaker_mappings?: Record<string, string>
+    last_edited_at?: string | null
+    include_agenda_doc_points?: boolean
+    date?: string
+    time?: string
+    members_present?: string[]
   } | null
+  final_rom_versions?: {
+    long?: {
+      agendas: FinalRomAgenda[]
+      speaker_mappings?: Record<string, string>
+      last_edited_at?: string | null
+      include_agenda_doc_points?: boolean
+      date?: string
+      time?: string
+      members_present?: string[]
+    }
+    short?: {
+      agendas: FinalRomAgenda[]
+      speaker_mappings?: Record<string, string>
+      last_edited_at?: string | null
+      include_agenda_doc_points?: boolean
+      date?: string
+      time?: string
+      members_present?: string[]
+    }
+    medium?: {
+      agendas: FinalRomAgenda[]
+      speaker_mappings?: Record<string, string>
+      last_edited_at?: string | null
+      include_agenda_doc_points?: boolean
+      date?: string
+      time?: string
+      members_present?: string[]
+    }
+  }
+  final_rom_active_version?: 'long' | 'short' | 'medium'
+  outdated_warnings?: {
+    stage1?: string
+    stage2?: string
+    stage3?: string
+    final_rom?: string
+  }
 }
 
 type ProcessState = 'idle' | 'processing' | 'done' | 'error'
@@ -1012,9 +1053,18 @@ export default function RomPage() {
   // Stage 3 – include agenda doc points toggle
   const [includeAgendaDocPoints, setIncludeAgendaDocPoints] = useState(false)
 
-  // Stage 3 – Agenda Discussion Order & Approximate Timeline
+  // Stage 3 – Skip agenda tracking: { [agendaId]: { skipped: boolean, note: string } }
+  const [skippedAgendas, setSkippedAgendas] = useState<Record<string, { skipped: boolean; note: string }>>({})
+
+  // Final ROM – Include Action Points toggle
+  const [includeActionPointsInRom, setIncludeActionPointsInRom] = useState(false)
+  const [togglingActionPoints, setTogglingActionPoints] = useState(false)
+
+  // Stage 3 – Agenda Discussion Order & Approximate Timeline Optional Controls
   const [discussionOrder, setDiscussionOrder] = useState<string[]>([])
   const [agendaTimeline, setAgendaTimeline] = useState<Record<string, AgendaTimelineRange>>({})
+  const [enableAgendaOrder, setEnableAgendaOrder] = useState<boolean>(false)
+  const [enableAgendaTimeline, setEnableAgendaTimeline] = useState<boolean>(false)
 
   // Compute effective meeting duration
   const effectiveMeetingDuration = Math.max(
@@ -1028,8 +1078,15 @@ export default function RomPage() {
     60
   )
 
-  // Synchronize discussionOrder and agendaTimeline with romData.stage3
+  // Synchronize discussionOrder, agendaTimeline, and enable flags with romData.stage3
   useEffect(() => {
+    if (typeof romData?.stage3?.enable_agenda_order === 'boolean') {
+      setEnableAgendaOrder(romData.stage3.enable_agenda_order)
+    }
+    if (typeof romData?.stage3?.enable_agenda_timeline === 'boolean') {
+      setEnableAgendaTimeline(romData.stage3.enable_agenda_timeline)
+    }
+
     const s3Agendas = romData?.stage3?.agendas || []
     if (s3Agendas.length === 0) {
       setDiscussionOrder([])
@@ -1067,7 +1124,29 @@ export default function RomPage() {
       })
       setAgendaTimeline(initialTimeline)
     }
-  }, [romData?.stage3?.agendas, romData?.stage3?.discussion_order, romData?.stage3?.agenda_timeline, effectiveMeetingDuration])
+
+    // Synchronize skipped agendas from saved data
+    const savedSkipped = romData?.stage3?.skipped_agendas
+    if (savedSkipped && typeof savedSkipped === 'object') {
+      const restored: Record<string, { skipped: boolean; note: string }> = {}
+      for (const [aid, info] of Object.entries(savedSkipped)) {
+        const noteVal = typeof info === 'object' && info !== null ? (info as any).note || 'Keep this agenda if forward to next meeting' : 'Keep this agenda if forward to next meeting'
+        restored[aid] = { skipped: true, note: noteVal }
+      }
+      setSkippedAgendas(prev => {
+        // Only update if different to avoid infinite loops
+        const prevKeys = Object.keys(prev).filter(k => prev[k].skipped).sort().join(',')
+        const newKeys = Object.keys(restored).sort().join(',')
+        if (prevKeys !== newKeys) return restored
+        return prev
+      })
+    }
+
+    // Synchronize include_action_points from final_rom
+    if (typeof romData?.final_rom?.include_action_points === 'boolean') {
+      setIncludeActionPointsInRom(romData.final_rom.include_action_points)
+    }
+  }, [romData?.stage3?.agendas, romData?.stage3?.discussion_order, romData?.stage3?.agenda_timeline, romData?.stage3?.enable_agenda_order, romData?.stage3?.enable_agenda_timeline, romData?.stage3?.skipped_agendas, romData?.final_rom?.include_action_points, effectiveMeetingDuration])
 
   const resetAgendaOrderAndTimeline = () => {
     const s3Agendas = romData?.stage3?.agendas || []
@@ -1135,25 +1214,110 @@ export default function RomPage() {
   const [writingRules, setWritingRules] = useState('')
   const [extractingRules, setExtractingRules] = useState(false)
   const referenceFileInputRef = useRef<HTMLInputElement>(null)
+  // ROM Version (Short / Medium / Long)
+  const [romVersion, setRomVersion] = useState<'short' | 'medium' | 'long'>('long')
+  const DEFAULT_SHORT_PROMPT = "Process ALL points for this agenda together. Produce a SHORT version focused ONLY on action points, decisions, and commitments. Omit background discussions with no actionable outcome. Aim for 2-5 points. Preserve speaker attribution, action owners, dates, numbers. Return a valid JSON array of point strings: [\"point 1\", \"point 2\", ...]"
+  const DEFAULT_MEDIUM_PROMPT = "Process ALL points for this agenda together. Produce a MEDIUM version: aggregated, retaining key discussion details alongside all action points and decisions. Merge related/redundant points. Aim for 4-8 points. Preserve speaker attribution, action owners, dates, numbers. Return a valid JSON array of point strings: [\"point 1\", \"point 2\", ...]"
+  const [shortRomPrompt, setShortRomPrompt] = useState(DEFAULT_SHORT_PROMPT)
+  const [mediumRomPrompt, setMediumRomPrompt] = useState(DEFAULT_MEDIUM_PROMPT)
+
+  // Stage 3 Add Agenda state
+  const [showAddAgendaForm, setShowAddAgendaForm] = useState(false)
+  const [newAgendaTitle, setNewAgendaTitle] = useState('')
+  const [newAgendaDesc, setNewAgendaDesc] = useState('')
+  const [newAgendaPresenter, setNewAgendaPresenter] = useState('')
+  const [creatingAgenda, setCreatingAgenda] = useState(false)
 
   // Save edited Stage 3 Agendas to backend
   const saveStage3Agendas = async (updatedAgendas: any[]) => {
     if (!id) return
     setSavingAgendas(true)
     try {
-      await api.put(`/rom/${id}/stage3/agendas`, { agendas: updatedAgendas })
-      setRomData(prev => {
-        if (!prev?.stage3) return prev
-        return {
-          ...prev,
-          stage3: { ...prev.stage3, agendas: updatedAgendas }
-        }
-      })
+      const res = await api.put(`/rom/${id}/stage3/agendas`, { agendas: updatedAgendas })
+      const fullData = res.data.rom_data || res.data
+      if (fullData) {
+        setRomData(fullData)
+      } else {
+        setRomData(prev => {
+          if (!prev?.stage3) return prev
+          return {
+            ...prev,
+            stage3: { ...prev.stage3, agendas: updatedAgendas }
+          }
+        })
+      }
       toast.success('Agenda updated')
     } catch (e) {
       toast.error(getApiErrorDetail(e) || 'Failed to save agenda')
     } finally {
       setSavingAgendas(false)
+    }
+  }
+
+  // Create a new Agenda item in Stage 3
+  const handleCreateAgenda = async () => {
+    if (!newAgendaTitle.trim() || !id) {
+      toast.error('Please enter an agenda title')
+      return
+    }
+    setCreatingAgenda(true)
+    try {
+      const res = await api.post(`/rom/${id}/stage3/agenda`, {
+        title: newAgendaTitle.trim(),
+        description: newAgendaDesc.trim(),
+        presenter: newAgendaPresenter.trim() || undefined,
+      })
+      const fullData = res.data.rom_data || res.data
+      if (fullData) {
+        setRomData(fullData)
+      } else if (res.data.agenda) {
+        setRomData(prev => {
+          if (!prev) return prev
+          const s3Agendas = [...(prev.stage3?.agendas || []), res.data.agenda]
+          return {
+            ...prev,
+            stage3: { ...(prev.stage3 || {}), agendas: s3Agendas }
+          }
+        })
+      }
+      setShowAddAgendaForm(false)
+      setNewAgendaTitle('')
+      setNewAgendaDesc('')
+      setNewAgendaPresenter('')
+      toast.success('Agenda item added successfully')
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to add agenda')
+    } finally {
+      setCreatingAgenda(false)
+    }
+  }
+
+  // Delete an Agenda item from Stage 3
+  const handleDeleteAgenda = async (agendaId: string, title: string) => {
+    if (!id) return
+    if (!window.confirm(`Are you sure you want to delete agenda "${title}" (${agendaId})? Any discussion points assigned to it will be reassigned to General Discussion.`)) {
+      return
+    }
+    try {
+      const res = await api.delete(`/rom/${id}/stage3/agenda/${agendaId}`)
+      const fullData = res.data.rom_data || res.data
+      if (fullData) {
+        setRomData(fullData)
+      } else {
+        setRomData(prev => {
+          if (!prev?.stage3) return prev
+          return {
+            ...prev,
+            stage3: {
+              ...prev.stage3,
+              agendas: prev.stage3.agendas.filter((a: any) => a.agenda_id !== agendaId)
+            }
+          }
+        })
+      }
+      toast.success(`Agenda ${agendaId} deleted`)
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to delete agenda')
     }
   }
 
@@ -1395,8 +1559,21 @@ export default function RomPage() {
         batch_size: stage3BatchSize,
         include_agenda_doc_points: includeAgendaDocPoints,
         agendas: romData?.stage3?.agendas || undefined,
-        discussion_order: discussionOrder.length > 0 ? discussionOrder : undefined,
-        agenda_timeline: Object.keys(agendaTimeline).length > 0 ? agendaTimeline : undefined,
+        enable_discussion_order: enableAgendaOrder,
+        enable_agenda_timeline: enableAgendaTimeline,
+        discussion_order: enableAgendaOrder && discussionOrder.length > 0 ? discussionOrder : undefined,
+        agenda_timeline: enableAgendaTimeline && Object.keys(agendaTimeline).length > 0 ? agendaTimeline : undefined,
+        // Build skipped_agendas map: { agendaId: { note: "..." } } for agendas that are marked as skipped
+        skipped_agendas: (() => {
+          const skipped: Record<string, { note: string }> = {}
+          for (const [aid, info] of Object.entries(skippedAgendas)) {
+            if (info.skipped) {
+              skipped[aid] = { note: info.note }
+            }
+          }
+          return Object.keys(skipped).length > 0 ? skipped : undefined
+        })(),
+        include_action_points: includeActionPointsInRom,
       })
       const fullData = res.data.rom_data || {
         ...(romData || {} as RomData),
@@ -1422,22 +1599,6 @@ export default function RomPage() {
     }
   }
 
-
-  // Delete an agenda item (points move to General Discussion)
-  const handleDeleteAgenda = async (agendaId: string, agendaTitle: string) => {
-    if (!id) return
-    if (!window.confirm(`Are you sure you want to delete agenda "${agendaTitle}"? All mapped discussion points will be moved to General Discussion.`)) {
-      return
-    }
-    try {
-      const res = await api.delete(`/rom/${id}/stage3/agenda/${agendaId}`)
-      const fullData = res.data.rom_data || res.data
-      setRomData(fullData)
-      toast.success('Agenda deleted. Points remapped to General Discussion.')
-    } catch (e) {
-      toast.error(getApiErrorDetail(e) || 'Failed to delete agenda')
-    }
-  }
 
   // Delete an individual enhanced discussion point
   const handleDeletePoint = async (pointId: string) => {
@@ -1491,20 +1652,59 @@ export default function RomPage() {
 
   // Move a discussion point to a different agenda in the final ROM
   const movePointToAgenda = (fromAgendaIdx: number, pointIdx: number, toAgendaId: string) => {
-    if (!romData?.final_rom) return
-    const newFinal = JSON.parse(JSON.stringify(romData.final_rom))
-    const point = newFinal.agendas[fromAgendaIdx].discussion_points.splice(pointIdx, 1)[0]
+    const currentRom = (
+      romVersion === 'long'
+        ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+        : (romData?.final_rom_versions?.[romVersion] || romData?.final_rom)
+    )
+    if (!currentRom) return
+    const newFinal = JSON.parse(JSON.stringify(currentRom))
+    if (!newFinal.agendas) newFinal.agendas = []
+
+    // Ensure all agendas from stage3 exist in newFinal
+    if (romData?.stage3?.agendas) {
+      const existingIds = new Set(newFinal.agendas.map((a: any) => a.agenda_id))
+      for (const s3a of romData.stage3.agendas) {
+        if (!existingIds.has(s3a.agenda_id)) {
+          newFinal.agendas.push({ ...s3a, discussion_points: [] })
+        }
+      }
+    }
+
+    const fromAgenda = newFinal.agendas[fromAgendaIdx]
     const toAgenda = newFinal.agendas.find((a: any) => a.agenda_id === toAgendaId)
-    if (toAgenda) toAgenda.discussion_points.push(point)
-    setRomData(prev => ({ ...prev as RomData, final_rom: newFinal }))
-    toast.success('Point moved')
+    if (fromAgenda && toAgenda && fromAgenda.discussion_points) {
+      const point = fromAgenda.discussion_points.splice(pointIdx, 1)[0]
+      if (point) {
+        if (!toAgenda.discussion_points) toAgenda.discussion_points = []
+        toAgenda.discussion_points.push(point)
+        setRomData(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            final_rom: newFinal,
+            final_rom_versions: {
+              ...(prev.final_rom_versions || {}),
+              [romVersion]: newFinal,
+            }
+          }
+        })
+        toast.success(`Point moved to ${toAgenda.title || toAgendaId}`)
+      }
+    }
   }
 
   // Reorder a discussion point within an agenda
   const reorderPoint = (agendaIdx: number, pointIdx: number, direction: 'up' | 'down') => {
-    if (!romData?.final_rom) return
-    const newFinal = JSON.parse(JSON.stringify(romData.final_rom))
-    const pts = newFinal.agendas[agendaIdx].discussion_points
+    const currentRom = (
+      romVersion === 'long'
+        ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+        : (romData?.final_rom_versions?.[romVersion] || romData?.final_rom)
+    )
+    if (!currentRom?.agendas) return
+    const newFinal = JSON.parse(JSON.stringify(currentRom))
+    const pts = newFinal.agendas[agendaIdx]?.discussion_points
+    if (!pts) return
     if (direction === 'up' && pointIdx === 0) return
     if (direction === 'down' && pointIdx === pts.length - 1) return
     const swapIdx = direction === 'up' ? pointIdx - 1 : pointIdx + 1
@@ -2044,32 +2244,51 @@ export default function RomPage() {
     }
   }
 
+  const [generatingVersion, setGeneratingVersion] = useState(false)
+
   const downloadDocx = async (stage: string) => {
     try {
-      const res = await api.get(`/rom/${id}/${stage}/download/docx`, { responseType: 'blob' })
+      const queryParam = stage === 'final'
+        ? `?version=${romVersion}&include_action_points=${includeActionPointsInRom}`
+        : ''
+      const res = await api.get(`/rom/${id}/${stage}/download/docx${queryParam}`, { responseType: 'blob' })
       const url = URL.createObjectURL(new Blob([res.data]))
       const a = document.createElement('a')
       a.href = url
-      a.download = `rom_${stage}_${id}.docx`
+      a.download = stage === 'final' ? `rom_final_${romVersion}_${id}.docx` : `rom_${stage}_${id}.docx`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      toast.success(`ROM ${stage.toUpperCase()} DOCX downloaded`)
+      toast.success(`ROM ${stage.toUpperCase()} (${romVersion}) DOCX downloaded`)
     } catch {
       toast.error('Download failed')
     }
   }
 
   const saveFinalRom = async (updatedFinalRom: any) => {
+    if (!id || !updatedFinalRom) return
     setSavingRom(true)
     try {
-      await api.put(`/rom/${id}/final`, { final_rom: updatedFinalRom })
-      setRomData(prev => ({
-        ...(prev as RomData),
-        final_rom: updatedFinalRom
-      }))
-      toast.success('Final ROM saved to database')
+      const res = await api.put(`/rom/${id}/final`, {
+        final_rom: updatedFinalRom,
+        version: romVersion
+      })
+      const serverVersions = res.data?.final_rom_versions
+      setRomData(prev => {
+        if (!prev) return prev
+        const existingVersions = prev.final_rom_versions || {}
+        return {
+          ...prev,
+          final_rom: updatedFinalRom,
+          final_rom_versions: serverVersions || {
+            ...existingVersions,
+            [romVersion]: updatedFinalRom,
+          },
+          final_rom_active_version: romVersion
+        }
+      })
+      toast.success(`${romVersion.toUpperCase()} ROM saved to database`)
     } catch (e) {
       toast.error(getApiErrorDetail(e) || 'Save failed')
     } finally {
@@ -2077,13 +2296,102 @@ export default function RomPage() {
     }
   }
 
-  // Rewrite ROM using LLM (style-only, no content changes)
+  // Final ROM – Toggle Include Action Points handler
+  const handleToggleActionPoints = async (enabled: boolean) => {
+    setIncludeActionPointsInRom(enabled)
+    if (!id) return
+    setTogglingActionPoints(true)
+    try {
+      const res = await api.post(`/rom/${id}/final/action-points`, {
+        include_action_points: enabled,
+      })
+      if (res.data?.rom_data) {
+        setRomData(res.data.rom_data)
+      } else if (res.data?.final_rom) {
+        setRomData(prev => prev ? { ...prev, final_rom: res.data.final_rom } : prev)
+      }
+      toast.success(enabled ? 'Action points enabled in Final ROM' : 'Action points disabled in Final ROM')
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to update Action Points setting')
+    } finally {
+      setTogglingActionPoints(false)
+    }
+  }
+
+  // Generate a Short or Medium version of the Final ROM
+  const runGenerateRomVersion = async (targetVersion: 'short' | 'medium') => {
+    if (!id || !romData?.final_rom) return
+    setGeneratingVersion(true)
+    // Base is always the Long / Stage 2 points
+    const baseRom = romData.final_rom_versions?.long || originalFinalRom || JSON.parse(JSON.stringify(romData.final_rom))
+    if (!originalFinalRom) {
+      setOriginalFinalRom(baseRom)
+    }
+
+    try {
+      const res = await api.post(`/rom/${id}/final/generate-version`, {
+        version: targetVersion,
+        writing_rules: writingRules || '',
+        base_final_rom: baseRom,
+      })
+      const rewrittenFinalRom = res.data.rewritten_final_rom || res.data.final_rom
+      if (rewrittenFinalRom && rewrittenFinalRom.agendas?.length) {
+        const updatedVersions = res.data.final_rom_versions || {
+          ...(romData.final_rom_versions || {}),
+          long: baseRom,
+          [targetVersion]: rewrittenFinalRom,
+        }
+        setRomData(prev => ({
+          ...(prev as RomData),
+          final_rom: rewrittenFinalRom,
+          final_rom_versions: updatedVersions,
+          final_rom_active_version: targetVersion,
+        }))
+        setRomVersion(targetVersion)
+        const versionLabel = targetVersion === 'short' ? 'Short' : 'Medium'
+        toast.success(`${versionLabel} ROM generated and saved successfully!`)
+      } else {
+        throw new Error('Server returned empty or invalid ROM points')
+      }
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || `Failed to generate ${targetVersion} ROM`)
+    } finally {
+      setGeneratingVersion(false)
+    }
+  }
+
+  // Switch between Long, Short, and Medium without overwriting
+  const handleSelectVersion = async (targetVer: 'long' | 'short' | 'medium') => {
+    setRomVersion(targetVer)
+    const targetRom = targetVer === 'long'
+      ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+      : romData?.final_rom_versions?.[targetVer]
+
+    if (targetRom && id) {
+      try {
+        await api.post(`/rom/${id}/final/select-version`, { version: targetVer })
+        setRomData(prev => prev ? ({
+          ...prev,
+          final_rom: targetRom,
+          final_rom_active_version: targetVer
+        }) : prev)
+      } catch {
+        // Non-fatal, local UI already updated
+      }
+    }
+  }
+
+  // Style Rewrite ROM using LLM
   const runRewriteRom = async () => {
     if (!id || !romData?.final_rom) return
     setRewriteStatus('processing')
-    // Snapshot the original before rewriting (only once)
+    const currentRom = (
+      romVersion === 'long'
+        ? (romData.final_rom_versions?.long || originalFinalRom || romData.final_rom)
+        : (romData.final_rom_versions?.[romVersion] || romData.final_rom)
+    )
     if (!originalFinalRom) {
-      setOriginalFinalRom(JSON.parse(JSON.stringify(romData.final_rom)))
+      setOriginalFinalRom(JSON.parse(JSON.stringify(currentRom)))
     }
     try {
       const res = await api.post(`/rom/${id}/final/rewrite`, {
@@ -2094,16 +2402,26 @@ export default function RomPage() {
       })
       const rewrittenFinalRom = res.data.rewritten_final_rom
       if (rewrittenFinalRom) {
-        setRomData(prev => ({ ...(prev as RomData), final_rom: rewrittenFinalRom }))
+        setRomData(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            final_rom: rewrittenFinalRom,
+            final_rom_versions: {
+              ...(prev.final_rom_versions || {}),
+              [romVersion]: rewrittenFinalRom,
+            },
+          }
+        })
         setIsRewritten(true)
         setRewriteStatus('done')
-        toast.success('ROM rewritten successfully. Review the changes and Save if satisfied.')
+        toast.success(`Rewritten ${romVersion.toUpperCase()} ROM ready. Review and click Save Changes to persist.`)
       } else {
         throw new Error('No rewritten ROM returned from server')
       }
     } catch (e) {
       setRewriteStatus('error')
-      toast.error(getApiErrorDetail(e) || 'Rewrite ROM failed')
+      toast.error(getApiErrorDetail(e) || 'Rewrite failed')
     }
   }
 
@@ -2730,15 +3048,34 @@ export default function RomPage() {
               <input type="range" min={5} max={50} step={5} value={stage3BatchSize} onChange={e => setStage3BatchSize(Number(e.target.value))} style={{ width: '100%', accentColor: 'hsl(45,90%,55%)' }} />
             </div>
 
-            {/* Discussion Order & Timeline Info */}
-            {discussionOrder.length > 0 && (
-              <div style={{ padding: '.35rem .5rem', borderRadius: 6, background: 'hsl(140,70%,45%/.06)', border: '1px solid hsl(140,70%,45%/.2)', fontSize: '.66rem', color: 'hsl(var(--ink))' }}>
-                <div style={{ fontWeight: 700, color: 'hsl(140,70%,40%)', marginBottom: 2 }}>Order &amp; Timeline Guidance:</div>
-                <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '.63rem', color: 'hsl(var(--pencil))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {/* Discussion Order & Timeline Guidance Controls */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '.45rem .6rem', borderRadius: 7, background: 'hsl(var(--muted)/.25)', border: '1px solid hsl(var(--border)/.5)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.71rem', color: 'hsl(var(--ink))', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={enableAgendaOrder}
+                  onChange={e => setEnableAgendaOrder(e.target.checked)}
+                  style={{ accentColor: 'hsl(140,70%,45%)', width: 13, height: 13 }}
+                />
+                <span style={{ fontWeight: 600 }}>Include Discussion Order in LLM</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.71rem', color: 'hsl(var(--ink))', userSelect: 'none' }}>
+                <input
+                  type="checkbox"
+                  checked={enableAgendaTimeline}
+                  onChange={e => setEnableAgendaTimeline(e.target.checked)}
+                  style={{ accentColor: 'hsl(140,70%,45%)', width: 13, height: 13 }}
+                />
+                <span style={{ fontWeight: 600 }}>Include Timeline Windows in LLM</span>
+              </label>
+
+              {discussionOrder.length > 0 && enableAgendaOrder && (
+                <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '.62rem', color: 'hsl(var(--pencil))', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingTop: 2, borderTop: '1px solid hsl(var(--border)/.3)' }}>
                   {discussionOrder.join(' → ')}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             {/* Include Agenda Document Points checkbox */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: 'hsl(var(--ink))', padding: '.3rem .4rem', borderRadius: 6, background: includeAgendaDocPoints ? 'hsl(280,75%,60%/.08)' : 'transparent', border: `1px solid ${includeAgendaDocPoints ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.3)'}`, transition: 'all .15s' }}>
@@ -2749,6 +3086,17 @@ export default function RomPage() {
                 style={{ accentColor: 'hsl(280,75%,60%)', width: 12, height: 12 }}
               />
               <span style={{ fontWeight: 600 }}>Include Agenda Document Points</span>
+            </label>
+
+            {/* Include Action Points in Final ROM checkbox */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: 'hsl(var(--ink))', padding: '.3rem .4rem', borderRadius: 6, background: includeActionPointsInRom ? 'hsl(30,90%,55%/.08)' : 'transparent', border: `1px solid ${includeActionPointsInRom ? 'hsl(30,90%,55%/.3)' : 'hsl(var(--border)/.3)'}`, transition: 'all .15s' }}>
+              <input
+                type="checkbox"
+                checked={includeActionPointsInRom}
+                onChange={e => setIncludeActionPointsInRom(e.target.checked)}
+                style={{ accentColor: 'hsl(30,90%,55%)', width: 12, height: 12 }}
+              />
+              <span style={{ fontWeight: 600 }}>Include Action Points</span>
             </label>
 
             <button
@@ -2833,6 +3181,10 @@ export default function RomPage() {
               { id: 'final', label: 'Final ROM', count: finalCount, color: 'hsl(30,90%,55%)' },
             ].map(tab => {
               const isActive = activeTab === tab.id
+              const hasWarning =
+                (tab.id === 'stage2' && !!romData?.outdated_warnings?.stage2) ||
+                (tab.id === 'stage3' && !!romData?.outdated_warnings?.stage3) ||
+                (tab.id === 'final' && !!romData?.outdated_warnings?.final_rom)
               return (
                 <button
                   key={tab.id}
@@ -2846,6 +3198,11 @@ export default function RomPage() {
                   }}
                 >
                   {tab.label}
+                  {hasWarning && (
+                    <span title="Previous stage data changed. This stage may be outdated." style={{ display: 'inline-flex', alignItems: 'center' }}>
+                      <AlertTriangle size={13} style={{ color: 'hsl(38,90%,48%)' }} />
+                    </span>
+                  )}
                   {tab.count > 0 && (
                     <span style={{
                       fontSize: '.66rem', fontWeight: 700, padding: '1px 6px', borderRadius: 999,
@@ -3167,6 +3524,39 @@ export default function RomPage() {
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <SectionHeader icon={<Target size={14} />} label="Stage 2: RAG Enhanced & Merged Points" count={stage2Count} color="hsl(205,90%,55%)" />
+
+                  {/* Outdated Data Warning Card */}
+                  {romData?.outdated_warnings?.stage2 && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      gap: 12, padding: '.75rem 1rem', borderRadius: 9,
+                      border: '1.5px solid hsl(38,90%,50%/.5)', background: 'hsl(38,90%,50%/.1)',
+                      color: 'hsl(38,90%,32%)', marginBottom: '.3rem'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <AlertTriangle size={18} style={{ color: 'hsl(38,90%,45%)', flexShrink: 0 }} />
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '.84rem' }}>Previous Stage Changed (Stage 2 Data May Be Outdated)</div>
+                          <div style={{ fontSize: '.75rem', marginTop: 2, opacity: 0.9 }}>
+                            {romData.outdated_warnings.stage2} You can continue reviewing existing points or click Regenerate to update.
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => runGenerateStage2(true)}
+                        disabled={stage2Status === 'processing'}
+                        style={{
+                          padding: '.4rem .9rem', borderRadius: 7, border: 'none',
+                          background: 'hsl(38,90%,45%)', color: 'white', fontWeight: 700,
+                          fontSize: '.75rem', cursor: stage2Status === 'processing' ? 'not-allowed' : 'pointer',
+                          flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter'
+                        }}
+                      >
+                        <RefreshCw size={12} className={stage2Status === 'processing' ? 'spin' : ''} />
+                        Regenerate Stage 2
+                      </button>
+                    </div>
+                  )}
 
                   {/* ── Reference Example Points (Writing Style Only) ── */}
                   <Stage2ReferenceExamplesPanel
@@ -3529,9 +3919,54 @@ export default function RomPage() {
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                  {/* Outdated Data Warning Card */}
+                  {romData?.outdated_warnings?.stage3 && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      gap: 12, padding: '.75rem 1rem', borderRadius: 9,
+                      border: '1.5px solid hsl(38,90%,50%/.5)', background: 'hsl(38,90%,50%/.1)',
+                      color: 'hsl(38,90%,32%)', marginBottom: '.3rem'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <AlertTriangle size={18} style={{ color: 'hsl(38,90%,45%)', flexShrink: 0 }} />
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '.84rem' }}>Previous Stage Changed (Stage 3 Data May Be Outdated)</div>
+                          <div style={{ fontSize: '.75rem', marginTop: 2, opacity: 0.9 }}>
+                            {romData.outdated_warnings.stage3} You can continue working with existing agendas or click Regenerate.
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => runCreateAgenda(true)}
+                        disabled={stage3AgendaStatus === 'processing'}
+                        style={{
+                          padding: '.4rem .9rem', borderRadius: 7, border: 'none',
+                          background: 'hsl(38,90%,45%)', color: 'white', fontWeight: 700,
+                          fontSize: '.75rem', cursor: stage3AgendaStatus === 'processing' ? 'not-allowed' : 'pointer',
+                          flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter'
+                        }}
+                      >
+                        <RefreshCw size={12} className={stage3AgendaStatus === 'processing' ? 'spin' : ''} />
+                        Regenerate Agendas
+                      </button>
+                    </div>
+                  )}
+
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <SectionHeader icon={<List size={14} />} label="Agenda Items" count={romData.stage3.agendas.length} color="hsl(140,70%,50%)" />
                     <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        onClick={() => setShowAddAgendaForm(prev => !prev)}
+                        style={{
+                          padding: '.3rem .75rem', borderRadius: 7,
+                          border: '1.5px solid hsl(140,70%,45%/.5)',
+                          background: showAddAgendaForm ? 'hsl(140,70%,45%/.2)' : 'hsl(140,70%,45%/.1)',
+                          color: 'hsl(140,70%,35%)', fontSize: '.74rem', fontWeight: 700,
+                          display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontFamily: 'Inter'
+                        }}
+                      >
+                        <Plus size={12} /> {showAddAgendaForm ? 'Cancel Add' : 'Add Agenda'}
+                      </button>
                       <button onClick={() => runCreateAgenda(true)} disabled={stage3AgendaStatus === 'processing'} style={{ padding: '.3rem .65rem', borderRadius: 7, border: '1px solid hsl(140,70%,45%/.4)', background: 'hsl(140,70%,45%/.08)', color: 'hsl(140,70%,45%)', fontSize: '.72rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontFamily: 'Inter' }}>
                         {stage3AgendaStatus === 'processing' ? <Loader size={11} className="spin" /> : <RefreshCw size={11} />}
                         Regenerate
@@ -3542,6 +3977,101 @@ export default function RomPage() {
                     </div>
                   </div>
 
+                  {/* ── Add New Agenda Form (Collapsible) ── */}
+                  {showAddAgendaForm && (
+                    <div style={{
+                      borderRadius: 10,
+                      border: '2px solid hsl(140,70%,45%/.5)',
+                      background: 'hsl(140,70%,45%/.04)',
+                      padding: '1rem 1.15rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.05)'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ fontSize: '.84rem', fontWeight: 800, color: 'hsl(140,70%,35%)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Plus size={14} /> Add New Agenda Item
+                        </div>
+                        <button
+                          onClick={() => setShowAddAgendaForm(false)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div>
+                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
+                            Agenda Title <span style={{ color: 'hsl(var(--destructive))' }}>*</span>
+                          </label>
+                          <input
+                            value={newAgendaTitle}
+                            onChange={e => setNewAgendaTitle(e.target.value)}
+                            placeholder="e.g. Budget Review & Next Quarter Planning"
+                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.82rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))' }}
+                          />
+                        </div>
+
+                        <div>
+                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
+                            Description / Discussion Details
+                          </label>
+                          <textarea
+                            value={newAgendaDesc}
+                            onChange={e => setNewAgendaDesc(e.target.value)}
+                            rows={2}
+                            placeholder="Optional overview of topics, context, or expected discussions..."
+                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.8rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))', resize: 'vertical' }}
+                          />
+                        </div>
+
+                        <div>
+                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
+                            Presenter / Speaker (Optional)
+                          </label>
+                          <input
+                            value={newAgendaPresenter}
+                            onChange={e => setNewAgendaPresenter(e.target.value)}
+                            placeholder="e.g. Alice or Speaker_1"
+                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.82rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))' }}
+                          />
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+                          <button
+                            onClick={() => setShowAddAgendaForm(false)}
+                            style={{ padding: '.4rem .9rem', borderRadius: 7, border: '1px solid hsl(var(--border))', background: 'transparent', fontSize: '.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter' }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleCreateAgenda}
+                            disabled={creatingAgenda || !newAgendaTitle.trim()}
+                            style={{
+                              padding: '.4rem 1.1rem',
+                              borderRadius: 7,
+                              border: 'none',
+                              background: 'hsl(140,70%,45%)',
+                              color: 'white',
+                              fontSize: '.76rem',
+                              fontWeight: 700,
+                              cursor: creatingAgenda || !newAgendaTitle.trim() ? 'not-allowed' : 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              fontFamily: 'Inter'
+                            }}
+                          >
+                            {creatingAgenda ? <Loader size={12} className="spin" /> : <Plus size={12} />}
+                            {creatingAgenda ? 'Adding...' : 'Add Agenda'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* ── Stage 3 Interactive Agenda Discussion Sequence & Approximate Timeline ── */}
                   <AgendaTimelineControls
                     agendas={romData.stage3.agendas}
@@ -3551,6 +4081,10 @@ export default function RomPage() {
                     onChangeOrder={(newOrder) => setDiscussionOrder(newOrder)}
                     onChangeTimeline={(newTimeline) => setAgendaTimeline(newTimeline)}
                     onReset={resetAgendaOrderAndTimeline}
+                    enableOrder={enableAgendaOrder}
+                    onChangeEnableOrder={(enabled) => setEnableAgendaOrder(enabled)}
+                    enableTimeline={enableAgendaTimeline}
+                    onChangeEnableTimeline={(enabled) => setEnableAgendaTimeline(enabled)}
                   />
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -3621,6 +4155,13 @@ export default function RomPage() {
                                     >
                                       <Pencil size={12} />
                                     </button>
+                                    <button
+                                      onClick={() => handleDeleteAgenda(agendaId, agenda.title)}
+                                      title="Delete Agenda Item"
+                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '2px', display: 'flex', alignItems: 'center' }}
+                                    >
+                                      <Trash2 size={12} />
+                                    </button>
                                   </div>
                                   {agenda.description && <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', marginTop: 2, lineHeight: 1.35 }}>{agenda.description}</div>}
                                   <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
@@ -3640,7 +4181,55 @@ export default function RomPage() {
                             </div>
                           </div>
 
-                          <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.75rem' }}>
+                          {/* Skip Agenda Toggle */}
+                          <div style={{ padding: '.5rem 1rem', borderBottom: '1px solid hsl(var(--border)/.2)', display: 'flex', alignItems: 'center', gap: 10, background: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,50%/.08)' : 'transparent' }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,40%)' : 'hsl(var(--pencil))', userSelect: 'none', fontWeight: 600 }}>
+                              <input
+                                type="checkbox"
+                                checked={skippedAgendas[agendaId]?.skipped || false}
+                                onChange={e => {
+                                  const checked = e.target.checked
+                                  setSkippedAgendas(prev => ({
+                                    ...prev,
+                                    [agendaId]: {
+                                      skipped: checked,
+                                      note: prev[agendaId]?.note || 'Keep this agenda if forward to next meeting'
+                                    }
+                                  }))
+                                }}
+                                style={{ accentColor: 'hsl(38,90%,50%)', width: 13, height: 13 }}
+                              />
+                              Skip this agenda
+                            </label>
+                            {skippedAgendas[agendaId]?.skipped && (
+                              <input
+                                value={skippedAgendas[agendaId]?.note || ''}
+                                onChange={e => {
+                                  const val = e.target.value
+                                  setSkippedAgendas(prev => ({
+                                    ...prev,
+                                    [agendaId]: { ...prev[agendaId], note: val }
+                                  }))
+                                }}
+                                placeholder="Note (e.g. Forward to next meeting)"
+                                style={{
+                                  flex: 1, padding: '3px 8px', borderRadius: 6,
+                                  border: '1px solid hsl(38,90%,50%/.4)',
+                                  background: 'hsl(38,90%,50%/.06)',
+                                  fontSize: '.72rem', fontFamily: 'Inter',
+                                  color: 'hsl(38,90%,35%)',
+                                  fontStyle: 'italic'
+                                }}
+                              />
+                            )}
+                            {skippedAgendas[agendaId]?.skipped && (
+                              <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(38,90%,50%/.15)', color: 'hsl(38,90%,40%)', fontWeight: 700, border: '1px solid hsl(38,90%,50%/.35)', whiteSpace: 'nowrap' }}>
+                                ⏩ Skipped
+                              </span>
+                            )}
+                          </div>
+
+                          <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.75rem', opacity: skippedAgendas[agendaId]?.skipped ? 0.45 : 1, pointerEvents: skippedAgendas[agendaId]?.skipped ? 'none' : 'auto', transition: 'opacity .2s' }}>
 
                             {/* Context Chips from RAG */}
                             {expanded?.meeting_context_snippet && (
@@ -3790,31 +4379,138 @@ export default function RomPage() {
 
 
           {/* ── FINAL ROM TAB ── */}
-          {activeTab === 'final' && (
-            !romData?.final_rom?.agendas || romData.final_rom.agendas.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
-                <Sparkles size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(30,90%,55%)' }} />
-                <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>Final Record of Meeting Not Generated Yet</div>
-                <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
-                  Run Stage 3 on the left panel to map discussion points to agendas and generate the Final ROM.
+          {activeTab === 'final' && (() => {
+            const baseVersionRom = (
+              romVersion === 'long'
+                ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+                : romData?.final_rom_versions?.[romVersion]
+            )
+
+            // Reconcile with Stage 3 Agendas: ALWAYS include ALL agendas in exact Stage 3 order
+            const stage3Agendas = romData?.stage3?.agendas || []
+            let activeVersionRom = baseVersionRom
+            if (baseVersionRom && stage3Agendas.length > 0) {
+              const currentById = new Map<string, any>(
+                (baseVersionRom.agendas || []).map((a: any) => [a.agenda_id, a])
+              )
+              const mergedAgendas = stage3Agendas.map((s3a: any) => {
+                const existing = currentById.get(s3a.agenda_id)
+                const isSkippedInState = skippedAgendas[s3a.agenda_id]?.skipped
+                const skipNoteInState = skippedAgendas[s3a.agenda_id]?.note
+                if (existing) {
+                  return {
+                    ...s3a,
+                    ...existing,
+                    title: existing.title || s3a.title,
+                    description: existing.description || s3a.description,
+                    presenter: existing.presenter || s3a.presenter,
+                    discussion_points: isSkippedInState ? [] : (existing.discussion_points || []),
+                    skipped: isSkippedInState ?? existing.skipped,
+                    skip_note: skipNoteInState || existing.skip_note || 'Keep this agenda if forward to next meeting',
+                  }
+                }
+                return {
+                  ...s3a,
+                  discussion_points: [],
+                  skipped: isSkippedInState || false,
+                  skip_note: skipNoteInState || 'Keep this agenda if forward to next meeting',
+                }
+              })
+              activeVersionRom = {
+                ...baseVersionRom,
+                agendas: mergedAgendas,
+              }
+            }
+
+            const isCurrentVersionGenerated = romVersion === 'long'
+              ? !!(activeVersionRom?.agendas?.length)
+              : !!(baseVersionRom?.agendas?.some((a: any) => a.discussion_points?.length))
+
+            if (!romData?.final_rom?.agendas || romData.final_rom.agendas.length === 0) {
+              return (
+                <div style={{ textAlign: 'center', padding: '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                  <Sparkles size={42} style={{ margin: '0 auto 1rem', opacity: 0.4, color: 'hsl(30,90%,55%)' }} />
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>Final Record of Meeting Not Generated Yet</div>
+                  <div style={{ fontSize: '.84rem', maxWidth: 420, margin: '0 auto 1.25rem', lineHeight: 1.45 }}>
+                    Run Stage 3 on the left panel to map discussion points to agendas and generate the Final ROM.
+                  </div>
                 </div>
-              </div>
-            ) : (
+              )
+            }
+
+            return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                {/* Outdated Data Warning Card */}
+                {romData?.outdated_warnings?.final_rom && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    gap: 12, padding: '.75rem 1rem', borderRadius: 9,
+                    border: '1.5px solid hsl(38,90%,50%/.5)', background: 'hsl(38,90%,50%/.1)',
+                    color: 'hsl(38,90%,32%)', marginBottom: '.1rem'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <AlertTriangle size={18} style={{ color: 'hsl(38,90%,45%)', flexShrink: 0 }} />
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '.84rem' }}>Earlier Stage Data Changed (Final ROM May Be Outdated)</div>
+                        <div style={{ fontSize: '.75rem', marginTop: 2, opacity: 0.9 }}>
+                          {romData.outdated_warnings.final_rom} Click Re-map Final ROM to update discussion points against agendas.
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={runGenerateFinalRom}
+                      disabled={stage3FinalStatus === 'processing'}
+                      style={{
+                        padding: '.4rem .9rem', borderRadius: 7, border: 'none',
+                        background: 'hsl(38,90%,45%)', color: 'white', fontWeight: 700,
+                        fontSize: '.75rem', cursor: stage3FinalStatus === 'processing' ? 'not-allowed' : 'pointer',
+                        flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter'
+                      }}
+                    >
+                      <RefreshCw size={12} className={stage3FinalStatus === 'processing' ? 'spin' : ''} />
+                      Re-map Final ROM
+                    </button>
+                  </div>
+                )}
+
                 {/* Sticky Header Bar for Final ROM */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'hsl(var(--muted)/.3)', padding: '.65rem 1rem', borderRadius: 9, border: '1px solid hsl(var(--border)/.4)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <SectionHeader icon={<Sparkles size={14} />} label="Final Record of Meeting" count={finalCount} color="hsl(30,90%,55%)" />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'hsl(var(--muted)/.3)', padding: '.65rem 1rem', borderRadius: 9, border: '1px solid hsl(var(--border)/.4)', flexWrap: 'wrap', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <SectionHeader icon={<Sparkles size={14} />} label="Final Record of Meeting" count={activeVersionRom?.agendas?.length || finalCount} color="hsl(30,90%,55%)" />
+                    {/* Include Action Points Toggle in Final ROM */}
+                    <label style={{
+                      display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                      fontSize: '.74rem', fontWeight: 600,
+                      color: includeActionPointsInRom ? 'hsl(30,90%,40%)' : 'hsl(var(--ink))',
+                      background: includeActionPointsInRom ? 'hsl(30,90%,55%/.12)' : 'hsl(var(--card))',
+                      border: `1.5px solid ${includeActionPointsInRom ? 'hsl(30,90%,55%/.45)' : 'hsl(var(--border)/.6)'}`,
+                      padding: '.28rem .65rem', borderRadius: 7, transition: 'all .15s ease',
+                      userSelect: 'none'
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={includeActionPointsInRom}
+                        disabled={togglingActionPoints}
+                        onChange={e => handleToggleActionPoints(e.target.checked)}
+                        style={{ accentColor: 'hsl(30,90%,55%)', width: 13, height: 13 }}
+                      />
+                      {togglingActionPoints ? (
+                        <Loader size={12} className="spin" style={{ color: 'hsl(30,90%,50%)' }} />
+                      ) : (
+                        <Zap size={12} style={{ color: includeActionPointsInRom ? 'hsl(30,90%,50%)' : 'hsl(var(--pencil))' }} />
+                      )}
+                      <span>Include Action Points</span>
+                    </label>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
-                      onClick={() => saveFinalRom(romData.final_rom)}
-                      disabled={savingRom}
+                      onClick={() => saveFinalRom(activeVersionRom)}
+                      disabled={savingRom || !isCurrentVersionGenerated}
                       style={{
                         padding: '.35rem .85rem', borderRadius: 8,
                         background: 'hsl(280,75%,60%)', color: 'white', fontWeight: 700,
-                        fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6, cursor: savingRom ? 'not-allowed' : 'pointer',
-                        border: 'none', fontFamily: 'Inter'
+                        fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6, cursor: (savingRom || !isCurrentVersionGenerated) ? 'not-allowed' : 'pointer',
+                        border: 'none', fontFamily: 'Inter', opacity: isCurrentVersionGenerated ? 1 : 0.6
                       }}
                     >
                       {savingRom ? <Loader size={12} className="spin" /> : <Save size={12} />}
@@ -3822,13 +4518,14 @@ export default function RomPage() {
                     </button>
                     <button
                       onClick={() => downloadDocx('final')}
+                      disabled={!isCurrentVersionGenerated}
                       style={{
                         padding: '.35rem .85rem', borderRadius: 8,
                         background: 'hsl(205,90%,55%/.1)', color: 'hsl(205,90%,60%)', border: '1px solid hsl(205,90%,55%/.3)',
-                        fontWeight: 700, fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: 'Inter'
+                        fontWeight: 700, fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6, cursor: !isCurrentVersionGenerated ? 'not-allowed' : 'pointer', fontFamily: 'Inter', opacity: isCurrentVersionGenerated ? 1 : 0.6
                       }}
                     >
-                      <FileDown size={12} /> Download Final DOCX
+                      <FileDown size={12} /> Download Final DOCX ({romVersion.toUpperCase()})
                     </button>
                     <button
                       onClick={() => downloadDocx('agenda-transcript')}
@@ -3840,399 +4537,650 @@ export default function RomPage() {
                     >
                       <FileDown size={12} /> Download Agenda Transcript (.docx)
                     </button>
-
                   </div>
                 </div>
 
-                {/* ── Rewrite ROM Panel ── */}
-                <div style={{ borderRadius: 9, border: `1.5px solid ${isRewritten ? 'hsl(38,90%,52%/.6)' : 'hsl(var(--border)/.4)'}`, background: isRewritten ? 'hsl(38,90%,52%/.04)' : 'hsl(var(--card))', overflow: 'hidden', transition: 'border-color .2s, background .2s' }}>
+                {/* ── Version Bar: Long | Short | Medium ── */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  background: 'hsl(var(--card))',
+                  padding: '.6rem 1rem',
+                  borderRadius: 10,
+                  border: '1.5px solid hsl(var(--border)/.5)',
+                  boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
+                  flexWrap: 'wrap',
+                  gap: 10
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: '.75rem', fontWeight: 800, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                      ROM Version:
+                    </span>
+                    {(['long', 'short', 'medium'] as const).map(ver => {
+                      const isActive = romVersion === ver
+                      const verRom = ver === 'long'
+                        ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+                        : romData?.final_rom_versions?.[ver]
+                      const isGen = ver === 'long'
+                        ? true
+                        : !!verRom?.agendas?.some((a: any) => a.discussion_points?.length)
+                      const ptCount = verRom?.agendas?.reduce((sum: number, a: any) => sum + (a.discussion_points?.length || 0), 0) || 0
 
-                  {/* Panel toggle header */}
-                  <button
-                    onClick={() => setShowRewritePanel(prev => !prev)}
-                    style={{ width: '100%', background: isRewritten ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)', border: 'none', cursor: 'pointer', padding: '.6rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
-                      <WandSparkles size={13} style={{ color: 'hsl(38,90%,52%)' }} />
-                      Rewrite ROM
-                      {isRewritten && (
-                        <span style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 8, background: 'hsl(38,90%,52%/.18)', color: 'hsl(38,90%,40%)', border: '1px solid hsl(38,90%,52%/.4)', fontWeight: 700 }}>
-                          ✦ Rewritten
-                        </span>
-                      )}
-                      <span style={{ fontSize: '.63rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>
-                        {rewriteMode === 'window' ? `Window ×${rewriteWindowSize}` : rewriteMode === 'complete' ? 'Complete' : 'Reference'}
-                      </span>
+                      return (
+                        <button
+                          key={ver}
+                          onClick={() => handleSelectVersion(ver)}
+                          style={{
+                            padding: '.45rem 1.1rem',
+                            borderRadius: 8,
+                            border: isActive
+                              ? '2px solid hsl(200,90%,50%)'
+                              : '1.5px solid hsl(var(--border)/.6)',
+                            background: isActive
+                              ? 'hsl(200,90%,50%/.14)'
+                              : 'hsl(var(--muted)/.35)',
+                            color: isActive ? 'hsl(200,90%,40%)' : 'hsl(var(--ink))',
+                            fontWeight: isActive ? 800 : 600,
+                            fontSize: '.82rem',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 7,
+                            transition: 'all .15s ease',
+                            fontFamily: 'Inter'
+                          }}
+                        >
+                          <span>{ver === 'long' ? 'Long' : ver === 'short' ? 'Short' : 'Medium'}</span>
+                          {ver === 'long' ? (
+                            <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 4, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', fontWeight: 700 }}>
+                              Default ({ptCount} pts)
+                            </span>
+                          ) : isGen ? (
+                            <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 4, background: 'hsl(142,70%,45%/.18)', color: 'hsl(142,70%,32%)', fontWeight: 800 }}>
+                              ✓ Generated ({ptCount} pts)
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 4, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', fontWeight: 600 }}>
+                              Not Generated
+                            </span>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    {romVersion !== 'long' && isCurrentVersionGenerated && (
+                      <button
+                        onClick={() => runGenerateRomVersion(romVersion)}
+                        disabled={generatingVersion}
+                        title="Regenerate this version from the base Long ROM points"
+                        style={{
+                          padding: '.35rem .85rem',
+                          borderRadius: 6,
+                          border: '1px solid hsl(200,90%,50%/.4)',
+                          background: 'hsl(200,90%,50%/.08)',
+                          color: 'hsl(200,90%,45%)',
+                          fontSize: '.74rem',
+                          fontWeight: 700,
+                          cursor: generatingVersion ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 5,
+                          fontFamily: 'Inter'
+                        }}
+                      >
+                        {generatingVersion ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
+                        Regenerate {romVersion.charAt(0).toUpperCase() + romVersion.slice(1)}
+                      </button>
+                    )}
+                    <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>
+                      {romVersion === 'long' && 'Stage 2 points with full discussion details'}
+                      {romVersion === 'short' && 'Agenda-wise condensed: action points & decisions only'}
+                      {romVersion === 'medium' && 'Agenda-wise condensed: aggregated key details & decisions'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* If version is NOT generated, show the prominent Generate button card */}
+                {!isCurrentVersionGenerated ? (
+                  <div style={{
+                    textAlign: 'center',
+                    padding: '3.5rem 1.5rem',
+                    background: 'hsl(var(--card))',
+                    borderRadius: 12,
+                    border: '2px dashed hsl(200,90%,50%/.35)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 14,
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.03)'
+                  }}>
+                    <div style={{ width: 52, height: 52, borderRadius: 26, background: 'hsl(200,90%,50%/.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(200,90%,45%)' }}>
+                      <Sparkles size={26} />
                     </div>
-                    <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>{showRewritePanel ? '▲' : '▼'}</span>
-                  </button>
-
-                  {showRewritePanel && (
-                    <div style={{ padding: '.9rem 1rem', display: 'flex', flexDirection: 'column', gap: '.9rem' }}>
-
-                      {/* Style-only info banner */}
-                      <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(205,90%,55%/.07)', border: '1px solid hsl(205,90%,55%/.2)' }}>
-                        <strong style={{ color: 'hsl(var(--ink))' }}>Style-only rewrite</strong> — improves grammar, phrasing, and formatting.
-                        Facts, speakers, decisions, dates, and action items are <strong style={{ color: 'hsl(var(--ink))' }}>never changed</strong>.
-                        The original ROM is preserved and can be instantly restored.
-                      </div>
-
-                      {/* Rewritten notice bar */}
-                      {isRewritten && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '.5rem .85rem', borderRadius: 7, background: 'hsl(38,90%,52%/.1)', border: '1px solid hsl(38,90%,52%/.35)' }}>
-                          <WandSparkles size={12} style={{ color: 'hsl(38,90%,42%)', flexShrink: 0 }} />
-                          <span style={{ fontSize: '.74rem', color: 'hsl(38,90%,35%)', fontWeight: 600, flex: 1 }}>
-                            Showing rewritten version. Save to persist, or revert.
+                    <div style={{ maxWidth: 520 }}>
+                      <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: 'hsl(var(--ink))', marginBottom: '.4rem' }}>
+                        {romVersion === 'short' ? 'Short ROM Not Generated Yet' : 'Medium ROM Not Generated Yet'}
+                      </h3>
+                      <p style={{ fontSize: '.84rem', color: 'hsl(var(--pencil))', lineHeight: 1.55 }}>
+                        {romVersion === 'short'
+                          ? 'Short ROM processes all points for each agenda together, producing a focused summary of action points, decisions, and outcomes (approx. 2–5 points per agenda).'
+                          : 'Medium ROM processes all points for each agenda together into an aggregated version with key discussion details alongside all action points and decisions (approx. 4–8 points per agenda).'
+                        }
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => runGenerateRomVersion(romVersion as 'short' | 'medium')}
+                      disabled={generatingVersion}
+                      style={{
+                        padding: '.6rem 1.6rem',
+                        borderRadius: 9,
+                        background: generatingVersion ? 'hsl(var(--muted))' : 'linear-gradient(135deg, hsl(200,90%,45%), hsl(220,90%,50%))',
+                        color: 'white',
+                        fontWeight: 800,
+                        fontSize: '.88rem',
+                        border: 'none',
+                        cursor: generatingVersion ? 'not-allowed' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 9,
+                        fontFamily: 'Inter',
+                        boxShadow: '0 3px 12px rgba(0,0,0,0.15)',
+                        transition: 'transform .15s'
+                      }}
+                    >
+                      {generatingVersion ? <Loader size={15} className="spin" /> : <WandSparkles size={15} />}
+                      {generatingVersion
+                        ? `Generating ${romVersion.charAt(0).toUpperCase() + romVersion.slice(1)} ROM...`
+                        : `Generate ${romVersion.charAt(0).toUpperCase() + romVersion.slice(1)} ROM`
+                      }
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {/* Rewrite ROM Panel (Style / Reference rewriting of active points) */}
+                    <div style={{ borderRadius: 9, border: `1.5px solid ${isRewritten ? 'hsl(38,90%,52%/.6)' : 'hsl(var(--border)/.4)'}`, background: isRewritten ? 'hsl(38,90%,52%/.04)' : 'hsl(var(--card))', overflow: 'hidden', transition: 'border-color .2s, background .2s' }}>
+                      {/* Panel toggle header */}
+                      <button
+                        onClick={() => setShowRewritePanel(prev => !prev)}
+                        style={{ width: '100%', background: isRewritten ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)', border: 'none', cursor: 'pointer', padding: '.6rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                          <WandSparkles size={13} style={{ color: 'hsl(38,90%,52%)' }} />
+                          Style Rewrite ({romVersion.toUpperCase()} ROM)
+                          {isRewritten && (
+                            <span style={{ fontSize: '.65rem', padding: '1px 7px', borderRadius: 8, background: 'hsl(38,90%,52%/.18)', color: 'hsl(38,90%,40%)', border: '1px solid hsl(38,90%,52%/.4)', fontWeight: 700 }}>
+                              ✦ Rewritten
+                            </span>
+                          )}
+                          <span style={{ fontSize: '.63rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(var(--muted))', color: 'hsl(var(--pencil))', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                            {rewriteMode === 'window' ? `Window ×${rewriteWindowSize}` : rewriteMode === 'complete' ? 'Complete' : 'Reference'}
                           </span>
-                          <button
-                            onClick={revertToOriginal}
-                            style={{ padding: '.28rem .7rem', borderRadius: 6, background: 'hsl(var(--destructive)/.08)', color: 'hsl(var(--destructive))', border: '1px solid hsl(var(--destructive)/.3)', fontSize: '.71rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, fontFamily: 'Inter' }}
-                          >
-                            <RotateCcw size={10} /> Revert
-                          </button>
                         </div>
-                      )}
+                        <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>{showRewritePanel ? '▲' : '▼'}</span>
+                      </button>
 
-                      {/* ── Mode Selector ── */}
-                      <div>
-                        <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.45rem', textTransform: 'uppercase', letterSpacing: '.05em' }}>Rewrite Mode</div>
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          {([
-                            { id: 'window', label: 'Window Rewrite', desc: 'Batch points into windows' },
-                            { id: 'complete', label: 'Complete Rewrite', desc: 'Single call, best consistency' },
-                            { id: 'reference', label: 'Reference-Based', desc: 'Learn style from a sample doc' },
-                          ] as const).map(m => (
-                            <button
-                              key={m.id}
-                              onClick={() => setRewriteMode(m.id)}
-                              style={{
-                                flex: 1, padding: '.45rem .6rem', borderRadius: 7, cursor: 'pointer',
-                                border: rewriteMode === m.id ? '2px solid hsl(38,90%,52%)' : '1.5px solid hsl(var(--border)/.5)',
-                                background: rewriteMode === m.id ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)',
-                                transition: 'all .15s', textAlign: 'left' as const,
-                              }}
-                            >
-                              <div style={{ fontSize: '.73rem', fontWeight: 700, color: rewriteMode === m.id ? 'hsl(38,90%,42%)' : 'hsl(var(--ink))' }}>{m.label}</div>
-                              <div style={{ fontSize: '.63rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>{m.desc}</div>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Window Size (window / reference modes) */}
-                      {(rewriteMode === 'window' || rewriteMode === 'reference') && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(var(--muted)/.2)', border: '1px solid hsl(var(--border)/.4)' }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Window Size</div>
-                            <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>Discussion points processed per LLM call (1–10)</div>
+                      {showRewritePanel && (
+                        <div style={{ padding: '.9rem 1rem', display: 'flex', flexDirection: 'column', gap: '.9rem' }}>
+                          <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(205,90%,55%/.07)', border: '1px solid hsl(205,90%,55%/.2)' }}>
+                            <strong style={{ color: 'hsl(var(--ink))' }}>Style-only rewrite</strong> — improves grammar, phrasing, and formatting of {romVersion.toUpperCase()} points. Facts, speakers, decisions, dates, and action items are <strong style={{ color: 'hsl(var(--ink))' }}>never changed</strong>.
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <button
-                              onClick={() => setRewriteWindowSize(v => Math.max(1, v - 1))}
-                              style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
-                            >−</button>
-                            <span style={{ fontFamily: 'JetBrains Mono', fontSize: '.9rem', fontWeight: 700, minWidth: 22, textAlign: 'center', color: 'hsl(38,90%,45%)' }}>{rewriteWindowSize}</span>
-                            <button
-                              onClick={() => setRewriteWindowSize(v => Math.min(10, v + 1))}
-                              style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
-                            >+</button>
-                          </div>
-                        </div>
-                      )}
 
-                      {/* Reference Document Upload (reference mode only) */}
-                      {rewriteMode === 'reference' && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '.65rem', padding: '.7rem .85rem', borderRadius: 8, border: '1.5px dashed hsl(280,75%,60%/.4)', background: 'hsl(280,75%,60%/.04)' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <div>
-                              <div style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 5 }}>
-                                <FileUp size={13} style={{ color: 'hsl(280,75%,60%)' }} /> Upload Reference Document
+                          {isRewritten && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '.5rem .85rem', borderRadius: 7, background: 'hsl(38,90%,52%/.1)', border: '1px solid hsl(38,90%,52%/.35)' }}>
+                              <WandSparkles size={12} style={{ color: 'hsl(38,90%,42%)', flexShrink: 0 }} />
+                              <span style={{ fontSize: '.74rem', color: 'hsl(38,90%,35%)', fontWeight: 600, flex: 1 }}>
+                                Showing rewritten {romVersion.toUpperCase()} version. Click "Save Changes" above to persist, or revert.
+                              </span>
+                              <button
+                                onClick={revertToOriginal}
+                                style={{ padding: '.28rem .7rem', borderRadius: 6, background: 'hsl(var(--destructive)/.08)', color: 'hsl(var(--destructive))', border: '1px solid hsl(var(--destructive)/.3)', fontSize: '.71rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, fontFamily: 'Inter' }}
+                              >
+                                <RotateCcw size={10} /> Revert
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Rewrite Mode Selector */}
+                          <div>
+                            <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.45rem', textTransform: 'uppercase', letterSpacing: '.05em' }}>Rewrite Mode</div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              {([
+                                { id: 'window', label: 'Window Rewrite', desc: 'Batch points into windows' },
+                                { id: 'complete', label: 'Complete Rewrite', desc: 'Single call, best consistency' },
+                                { id: 'reference', label: 'Reference-Based', desc: 'Learn style from a sample doc' },
+                              ] as const).map(m => (
+                                <button
+                                  key={m.id}
+                                  onClick={() => setRewriteMode(m.id)}
+                                  style={{
+                                    flex: 1, padding: '.45rem .6rem', borderRadius: 7, cursor: 'pointer',
+                                    border: rewriteMode === m.id ? '2px solid hsl(38,90%,52%)' : '1.5px solid hsl(var(--border)/.5)',
+                                    background: rewriteMode === m.id ? 'hsl(38,90%,52%/.1)' : 'hsl(var(--muted)/.3)',
+                                    transition: 'all .15s', textAlign: 'left' as const,
+                                  }}
+                                >
+                                  <div style={{ fontSize: '.73rem', fontWeight: 700, color: rewriteMode === m.id ? 'hsl(38,90%,42%)' : 'hsl(var(--ink))' }}>{m.label}</div>
+                                  <div style={{ fontSize: '.63rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>{m.desc}</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Window Size */}
+                          {(rewriteMode === 'window' || rewriteMode === 'reference') && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '.55rem .85rem', borderRadius: 7, background: 'hsl(var(--muted)/.2)', border: '1px solid hsl(var(--border)/.4)' }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Window Size</div>
+                                <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>Discussion points processed per LLM call (1–10)</div>
                               </div>
-                              <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
-                                Upload a sample MoM/ROM (.pdf, .docx, .txt) to learn its writing style
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <button
+                                  onClick={() => setRewriteWindowSize(v => Math.max(1, v - 1))}
+                                  style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
+                                >−</button>
+                                <span style={{ fontFamily: 'JetBrains Mono', fontSize: '.9rem', fontWeight: 700, minWidth: 22, textAlign: 'center', color: 'hsl(38,90%,45%)' }}>{rewriteWindowSize}</span>
+                                <button
+                                  onClick={() => setRewriteWindowSize(v => Math.min(10, v + 1))}
+                                  style={{ width: 26, height: 26, borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', cursor: 'pointer', fontSize: '.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(var(--ink))' }}
+                                >+</button>
                               </div>
                             </div>
-                            <button
-                              onClick={() => referenceFileInputRef.current?.click()}
-                              disabled={extractingRules}
-                              style={{ padding: '.32rem .8rem', borderRadius: 6, background: extractingRules ? 'hsl(var(--muted))' : 'hsl(280,75%,60%)', color: 'white', border: 'none', fontSize: '.72rem', fontWeight: 700, cursor: extractingRules ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontFamily: 'Inter' }}
-                            >
-                              {extractingRules ? <Loader size={11} className="spin" /> : <FileUp size={11} />}
-                              {extractingRules ? 'Analyzing...' : 'Upload & Analyze'}
-                            </button>
-                            <input
-                              ref={referenceFileInputRef}
-                              type="file"
-                              accept=".pdf,.docx,.txt,.doc"
-                              style={{ display: 'none' }}
-                              onChange={e => handleReferenceDocUpload(e.target.files)}
-                            />
-                          </div>
+                          )}
 
-                          {/* Writing Rules textarea */}
+                          {/* Reference Document Upload */}
+                          {rewriteMode === 'reference' && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '.65rem', padding: '.7rem .85rem', borderRadius: 8, border: '1.5px dashed hsl(280,75%,60%/.4)', background: 'hsl(280,75%,60%/.04)' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <div>
+                                  <div style={{ fontSize: '.75rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                    <FileUp size={13} style={{ color: 'hsl(280,75%,60%)' }} />
+                                    Upload Reference Document
+                                  </div>
+                                  <div style={{ fontSize: '.65rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+                                    Upload a sample MoM/ROM (.pdf, .docx, .txt) to learn its writing style
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => referenceFileInputRef.current?.click()}
+                                  disabled={extractingRules}
+                                  style={{ padding: '.32rem .8rem', borderRadius: 6, background: extractingRules ? 'hsl(var(--muted))' : 'hsl(280,75%,60%)', color: 'white', border: 'none', fontSize: '.72rem', fontWeight: 700, cursor: extractingRules ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontFamily: 'Inter' }}
+                                >
+                                  {extractingRules ? <Loader size={11} className="spin" /> : <FileUp size={11} />}
+                                  {extractingRules ? 'Analyzing...' : 'Upload & Analyze'}
+                                </button>
+                                <input
+                                  ref={referenceFileInputRef}
+                                  type="file"
+                                  accept=".pdf,.docx,.txt,.doc"
+                                  style={{ display: 'none' }}
+                                  onChange={e => handleReferenceDocUpload(e.target.files)}
+                                />
+                              </div>
+
+                              <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.3rem' }}>
+                                  <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                                    Writing Rules {writingRules ? <span style={{ color: 'hsl(280,75%,60%)', fontWeight: 600 }}>— Editable</span> : <span style={{ color: 'hsl(var(--pencil))', fontWeight: 500 }}>— Upload a document to generate</span>}
+                                  </div>
+                                  {writingRules && (
+                                    <button onClick={() => setWritingRules('')} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Clear</button>
+                                  )}
+                                </div>
+                                <textarea
+                                  value={writingRules}
+                                  onChange={e => setWritingRules(e.target.value)}
+                                  rows={6}
+                                  placeholder="Writing rules will appear here after uploading a reference document. You can also type rules manually."
+                                  style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: `1px solid ${writingRules ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border))'}`, background: 'hsl(var(--muted)/.25)', fontSize: '.76rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.55, boxSizing: 'border-box', transition: 'border-color .2s' }}
+                                />
+                                {writingRules && (
+                                  <div style={{ fontSize: '.65rem', color: 'hsl(280,75%,55%)', marginTop: 3 }}>
+                                    ✓ {writingRules.split('\n').filter(l => l.trim()).length} rule{writingRules.split('\n').filter(l => l.trim()).length !== 1 ? 's' : ''} — will be injected into rewrite calls
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Instruction textarea */}
                           <div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.3rem' }}>
-                              <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
-                                Writing Rules {writingRules ? <span style={{ color: 'hsl(280,75%,60%)', fontWeight: 600 }}>— Editable</span> : <span style={{ color: 'hsl(var(--pencil))', fontWeight: 500 }}>— Upload a document to generate</span>}
-                              </div>
-                              {writingRules && (
-                                <button onClick={() => setWritingRules('')} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Clear</button>
+                              <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Rewrite Instruction</div>
+                              {rewriteInstruction !== DEFAULT_REWRITE_INSTRUCTION && (
+                                <button onClick={() => setRewriteInstruction(DEFAULT_REWRITE_INSTRUCTION)} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Reset to default</button>
                               )}
                             </div>
                             <textarea
-                              value={writingRules}
-                              onChange={e => setWritingRules(e.target.value)}
-                              rows={8}
-                              placeholder="Writing rules will appear here after uploading a reference document. You can also type rules manually."
-                              style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: `1px solid ${writingRules ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border))'}`, background: 'hsl(var(--muted)/.25)', fontSize: '.76rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.55, boxSizing: 'border-box', transition: 'border-color .2s' }}
+                              value={rewriteInstruction}
+                              onChange={e => setRewriteInstruction(e.target.value)}
+                              rows={3}
+                              style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.3)', fontSize: '.78rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.5, boxSizing: 'border-box' }}
                             />
-                            {writingRules && (
-                              <div style={{ fontSize: '.65rem', color: 'hsl(280,75%,55%)', marginTop: 3 }}>
-                                ✓ {writingRules.split('\n').filter(l => l.trim()).length} rule{writingRules.split('\n').filter(l => l.trim()).length !== 1 ? 's' : ''} — will be injected into every rewrite call
-                              </div>
+                          </div>
+
+                          {/* Action buttons */}
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <button
+                              onClick={runRewriteRom}
+                              disabled={
+                                rewriteStatus === 'processing' ||
+                                !rewriteInstruction.trim() ||
+                                (rewriteMode === 'reference' && !writingRules.trim())
+                              }
+                              style={{
+                                padding: '.42rem 1.1rem', borderRadius: 7,
+                                background: (
+                                  rewriteStatus === 'processing' ||
+                                  !rewriteInstruction.trim() ||
+                                  (rewriteMode === 'reference' && !writingRules.trim())
+                                ) ? 'hsl(var(--muted))' : 'linear-gradient(135deg, hsl(200,90%,45%), hsl(220,90%,50%))',
+                                color: 'white', fontWeight: 700, fontSize: '.78rem',
+                                border: 'none',
+                                cursor: (
+                                  rewriteStatus === 'processing' ||
+                                  !rewriteInstruction.trim() ||
+                                  (rewriteMode === 'reference' && !writingRules.trim())
+                                ) ? 'not-allowed' : 'pointer',
+                                display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'Inter',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.12)', transition: 'all .15s'
+                              }}
+                            >
+                              {rewriteStatus === 'processing' ? <Loader size={12} className="spin" /> : <WandSparkles size={12} />}
+                              {rewriteStatus === 'processing'
+                                ? `Rewriting Style (${romVersion.toUpperCase()})...`
+                                : `Apply Style Rewrite (${romVersion.toUpperCase()})`
+                              }
+                            </button>
+
+                            {isRewritten && (
+                              <button
+                                onClick={revertToOriginal}
+                                style={{ padding: '.42rem .95rem', borderRadius: 7, background: 'transparent', color: 'hsl(var(--destructive))', border: '1.5px solid hsl(var(--destructive)/.4)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter' }}
+                              >
+                                <RotateCcw size={12} /> Revert to Original
+                              </button>
                             )}
+                          </div>
+
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Speaker Name Mapping Panel */}
+                    <div style={{ borderRadius: 9, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
+                      <button
+                        onClick={() => setShowSpeakerMapping(prev => !prev)}
+                        style={{ width: '100%', background: 'hsl(var(--muted)/.3)', border: 'none', cursor: 'pointer', padding: '.6rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                          <Tag size={13} style={{ color: 'hsl(280,75%,60%)' }} /> Speaker Name Mapping
+                          {speakerMappings.length > 0 && <span style={{ fontSize: '.65rem', padding: '1px 6px', borderRadius: 8, background: 'hsl(280,75%,60%/.12)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)' }}>{speakerMappings.length} mapped</span>}
+                        </div>
+                        <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>{showSpeakerMapping ? '▲' : '▼'}</span>
+                      </button>
+                      {showSpeakerMapping && (
+                        <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.65rem' }}>
+                          <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', lineHeight: 1.35 }}>Map Speaker IDs (e.g. Speaker_1) to real names. Click Apply to update throughout the ROM.</div>
+                          {speakerMappings.map((m, idx) => (
+                            <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                              <input
+                                value={m.speaker_id}
+                                onChange={e => setSpeakerMappings(prev => prev.map((x, i) => i === idx ? { ...x, speaker_id: e.target.value } : x))}
+                                placeholder="Speaker_1"
+                                style={{ flex: 1, padding: '4px 8px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', fontSize: '.75rem', fontFamily: 'JetBrains Mono', color: 'hsl(var(--ink))' }}
+                              />
+                              <span style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>→</span>
+                              <input
+                                value={m.real_name}
+                                onChange={e => setSpeakerMappings(prev => prev.map((x, i) => i === idx ? { ...x, real_name: e.target.value } : x))}
+                                placeholder="Real Name"
+                                style={{ flex: 1, padding: '4px 8px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', fontSize: '.75rem', fontFamily: 'Inter', color: 'hsl(var(--ink))' }}
+                              />
+                              <button onClick={() => setSpeakerMappings(prev => prev.filter((_, i) => i !== idx))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '0 3px' }}><X size={12} /></button>
+                            </div>
+                          ))}
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button onClick={() => setSpeakerMappings(prev => [...prev, { speaker_id: '', real_name: '' }])} style={{ padding: '.3rem .65rem', borderRadius: 6, border: '1px dashed hsl(var(--border))', background: 'transparent', fontSize: '.72rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <Plus size={10} /> Add Mapping
+                            </button>
+                            <button onClick={applySpeakerMappings} style={{ padding: '.3rem .85rem', borderRadius: 6, background: 'hsl(280,75%,60%)', color: 'white', border: 'none', fontSize: '.72rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <Tag size={10} /> Apply Names
+                            </button>
                           </div>
                         </div>
                       )}
+                    </div>
 
-                      {/* Instruction textarea */}
-                      <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.3rem' }}>
-                          <div style={{ fontSize: '.73rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Rewrite Instruction</div>
-                          {rewriteInstruction !== DEFAULT_REWRITE_INSTRUCTION && (
-                            <button onClick={() => setRewriteInstruction(DEFAULT_REWRITE_INSTRUCTION)} style={{ background: 'none', border: 'none', color: 'hsl(var(--pencil))', fontSize: '.68rem', cursor: 'pointer', textDecoration: 'underline' }}>Reset to default</button>
-                          )}
-                        </div>
-                        <textarea
-                          value={rewriteInstruction}
-                          onChange={e => setRewriteInstruction(e.target.value)}
-                          rows={4}
-                          style={{ width: '100%', padding: '.6rem .75rem', borderRadius: 7, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.3)', fontSize: '.78rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', resize: 'vertical', lineHeight: 1.5, boxSizing: 'border-box' }}
-                        />
-                      </div>
+                    {/* Final ROM agendas */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                      {activeVersionRom.agendas.map((agenda: any, aIdx: number) => {
+                        const pts = agenda.discussion_points || []
+                        const isSkipped = agenda.skipped === true
 
-                      {/* Validation warning for reference mode */}
-                      {rewriteMode === 'reference' && !writingRules.trim() && (
-                        <div style={{ fontSize: '.72rem', color: 'hsl(38,90%,42%)', padding: '.4rem .75rem', borderRadius: 6, background: 'hsl(38,90%,52%/.08)', border: '1px solid hsl(38,90%,52%/.3)' }}>
-                          ⚠ Upload a reference document or enter writing rules manually before running reference-based rewrite.
-                        </div>
-                      )}
+                        // Collect all action points belonging to this agenda
+                        const agendaActionPoints: any[] = []
+                        const seenActionKeys = new Set<string>()
 
-                      {/* Action buttons */}
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <button
-                          onClick={runRewriteRom}
-                          disabled={
-                            rewriteStatus === 'processing' ||
-                            !rewriteInstruction.trim() ||
-                            (rewriteMode === 'reference' && !writingRules.trim())
+                        if (Array.isArray(agenda.action_points)) {
+                          for (const ap of agenda.action_points) {
+                            const task = ap.task || ap.item || ap.description || ''
+                            const key = task.trim().toLowerCase()
+                            if (key && !seenActionKeys.has(key)) {
+                              seenActionKeys.add(key)
+                              agendaActionPoints.push(ap)
+                            }
                           }
-                          style={{
-                            padding: '.42rem 1.1rem', borderRadius: 7,
-                            background: (
-                              rewriteStatus === 'processing' ||
-                              !rewriteInstruction.trim() ||
-                              (rewriteMode === 'reference' && !writingRules.trim())
-                            ) ? 'hsl(var(--muted))' : 'linear-gradient(135deg, hsl(38,90%,52%), hsl(25,90%,55%))',
-                            color: 'white', fontWeight: 700, fontSize: '.78rem',
-                            border: 'none',
-                            cursor: (
-                              rewriteStatus === 'processing' ||
-                              !rewriteInstruction.trim() ||
-                              (rewriteMode === 'reference' && !writingRules.trim())
-                            ) ? 'not-allowed' : 'pointer',
-                            display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'Inter',
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.12)', transition: 'all .15s'
-                          }}
-                        >
-                          {rewriteStatus === 'processing' ? <Loader size={12} className="spin" /> : <WandSparkles size={12} />}
-                          {rewriteStatus === 'processing' ? 'Rewriting ROM...' : (isRewritten ? 'Re-Rewrite ROM' : 'Rewrite ROM')}
-                        </button>
+                        }
 
-                        {isRewritten && (
-                          <button
-                            onClick={revertToOriginal}
-                            style={{ padding: '.42rem .95rem', borderRadius: 7, background: 'transparent', color: 'hsl(var(--destructive))', border: '1.5px solid hsl(var(--destructive)/.4)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter' }}
-                          >
-                            <RotateCcw size={12} /> Revert to Original
-                          </button>
-                        )}
+                        for (const pt of pts) {
+                          const apList = (pt.action_points && pt.action_points.length > 0)
+                            ? pt.action_points
+                            : (pt.action_items && pt.action_items.length > 0 ? pt.action_items : [])
+                          for (const ap of apList) {
+                            const task = ap.task || ap.item || ap.description || ''
+                            const key = task.trim().toLowerCase()
+                            if (key && !seenActionKeys.has(key)) {
+                              seenActionKeys.add(key)
+                              agendaActionPoints.push(ap)
+                            }
+                          }
+                        }
 
-                        <div style={{ marginLeft: 'auto', fontSize: '.68rem', color: 'hsl(var(--pencil))', lineHeight: 1.3, textAlign: 'right' as const }}>
-                          {rewriteMode === 'window' && <span>~{Math.ceil((romData?.final_rom?.agendas?.reduce((s: number, a: any) => s + (a.discussion_points?.length || 0), 0) || 0) / rewriteWindowSize)} LLM calls</span>}
-                          {rewriteMode === 'complete' && <span>1 LLM call</span>}
-                          {rewriteMode === 'reference' && <span>~{Math.ceil((romData?.final_rom?.agendas?.reduce((s: number, a: any) => s + (a.discussion_points?.length || 0), 0) || 0) / rewriteWindowSize)} LLM calls + rules</span>}
-                        </div>
-                      </div>
-
-                    </div>
-                  )}
-                </div>
-
-
-                {/* Speaker Name Mapping Panel */}
-
-                <div style={{ borderRadius: 9, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
-                  <button
-                    onClick={() => setShowSpeakerMapping(prev => !prev)}
-                    style={{ width: '100%', background: 'hsl(var(--muted)/.3)', border: 'none', cursor: 'pointer', padding: '.6rem 1rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
-                      <Tag size={13} style={{ color: 'hsl(280,75%,60%)' }} /> Speaker Name Mapping
-                      {speakerMappings.length > 0 && <span style={{ fontSize: '.65rem', padding: '1px 6px', borderRadius: 8, background: 'hsl(280,75%,60%/.12)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)' }}>{speakerMappings.length} mapped</span>}
-                    </div>
-                    <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>{showSpeakerMapping ? '▲' : '▼'}</span>
-                  </button>
-                  {showSpeakerMapping && (
-                    <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.65rem' }}>
-                      <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', lineHeight: 1.35 }}>Map Speaker IDs (e.g. Speaker_1) to real names. Click Apply to update throughout the ROM.</div>
-                      {speakerMappings.map((m, idx) => (
-                        <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                          <input
-                            value={m.speaker_id}
-                            onChange={e => setSpeakerMappings(prev => prev.map((x, i) => i === idx ? { ...x, speaker_id: e.target.value } : x))}
-                            placeholder="Speaker_1"
-                            style={{ flex: 1, padding: '4px 8px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', fontSize: '.75rem', fontFamily: 'JetBrains Mono', color: 'hsl(var(--ink))' }}
-                          />
-                          <span style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>→</span>
-                          <input
-                            value={m.real_name}
-                            onChange={e => setSpeakerMappings(prev => prev.map((x, i) => i === idx ? { ...x, real_name: e.target.value } : x))}
-                            placeholder="Real Name"
-                            style={{ flex: 1, padding: '4px 8px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted)/.4)', fontSize: '.75rem', fontFamily: 'Inter', color: 'hsl(var(--ink))' }}
-                          />
-                          <button onClick={() => setSpeakerMappings(prev => prev.filter((_, i) => i !== idx))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '0 3px' }}><X size={12} /></button>
-                        </div>
-                      ))}
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button onClick={() => setSpeakerMappings(prev => [...prev, { speaker_id: '', real_name: '' }])} style={{ padding: '.3rem .65rem', borderRadius: 6, border: '1px dashed hsl(var(--border))', background: 'transparent', fontSize: '.72rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Plus size={10} /> Add Mapping
-                        </button>
-                        <button onClick={applySpeakerMappings} style={{ padding: '.3rem .85rem', borderRadius: 6, background: 'hsl(280,75%,60%)', color: 'white', border: 'none', fontSize: '.72rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Tag size={10} /> Apply Names
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Final ROM agendas */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  {romData.final_rom.agendas.map((agenda: any, aIdx: number) => {
-                    const pts = agenda.discussion_points || []
-                    return (
-                      <div key={agenda.agenda_id || aIdx} style={{ borderRadius: 10, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
-                        {/* Agenda header */}
-                        <div style={{ background: 'hsl(30,90%,55%/.08)', padding: '.65rem 1rem', borderBottom: '1px solid hsl(var(--border)/.3)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{ background: 'hsl(30,90%,55%)', color: 'white', fontWeight: 700, fontSize: '.7rem', padding: '2px 7px', borderRadius: 5, flexShrink: 0, fontFamily: 'JetBrains Mono' }}>{agenda.agenda_id || `A${aIdx + 1}`}</span>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: '.92rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{agenda.title}</div>
-                            {agenda.description && <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>{agenda.description}</div>}
-                            {(agenda.presenter || agenda.speaker) && (
-                              <div style={{ marginTop: 3, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)', padding: '1px 6px', borderRadius: 6, fontSize: '.67rem', fontWeight: 600 }}>
-                                <User size={10} /> Presenter: {agenda.presenter || agenda.speaker}
+                        return (
+                          <div key={agenda.agenda_id || aIdx} style={{ borderRadius: 10, border: `1.5px solid ${isSkipped ? 'hsl(38,90%,50%/.4)' : 'hsl(var(--border)/.4)'}`, background: isSkipped ? 'hsl(38,90%,50%/.04)' : 'hsl(var(--card))', overflow: 'hidden' }}>
+                            {/* Agenda header */}
+                            <div style={{ background: isSkipped ? 'hsl(38,90%,50%/.1)' : 'hsl(30,90%,55%/.08)', padding: '.65rem 1rem', borderBottom: '1px solid hsl(var(--border)/.3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ background: isSkipped ? 'hsl(38,90%,50%)' : 'hsl(30,90%,55%)', color: 'white', fontWeight: 700, fontSize: '.7rem', padding: '2px 7px', borderRadius: 5, flexShrink: 0, fontFamily: 'JetBrains Mono' }}>{agenda.agenda_id || `A${aIdx + 1}`}</span>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '.92rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{agenda.title}</div>
+                                {agenda.description && <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>{agenda.description}</div>}
+                                {(agenda.presenter || agenda.speaker) && (
+                                  <div style={{ marginTop: 3, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)', padding: '1px 6px', borderRadius: 6, fontSize: '.67rem', fontWeight: 600 }}>
+                                    <User size={10} /> Presenter: {agenda.presenter || agenda.speaker}
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                          <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(30,90%,55%)', background: 'hsl(30,90%,55%/.1)', padding: '2px 7px', borderRadius: 8 }}>{pts.length} pts</span>
-                        </div>
+                              {isSkipped ? (
+                                <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(38,90%,45%)', background: 'hsl(38,90%,50%/.15)', padding: '2px 8px', borderRadius: 8, border: '1px solid hsl(38,90%,50%/.35)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  ⏩ Skipped
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(30,90%,55%)', background: 'hsl(30,90%,55%/.1)', padding: '2px 7px', borderRadius: 8 }}>{pts.length} pts</span>
+                              )}
+                            </div>
 
-                        {/* Points */}
-                        <div style={{ padding: '.75rem 1rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          {pts.length === 0 ? (
-                            <div style={{ color: 'hsl(var(--pencil))', fontStyle: 'italic', fontSize: '.78rem' }}>No discussion points mapped to this agenda.</div>
-                          ) : (
-                            pts.map((pt: any, pIdx: number) => {
-                              const isEditing = editingPointId === pt.id
-                              const ptText = pt.text || pt.polished_text || ''
-                              const spk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '—')
-                              const isDocPoint = pt.is_doc_point
-
-                              return (
-                                <div key={pt.id || pIdx} style={{ borderRadius: 8, border: `1px solid ${isDocPoint ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.3)'}`, background: isDocPoint ? 'hsl(280,75%,60%/.05)' : 'hsl(var(--paper)/.4)', padding: '.6rem .8rem' }}>
-                                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                                    {/* Point label */}
-                                    <span style={{ fontWeight: 700, color: isDocPoint ? 'hsl(280,75%,65%)' : 'hsl(280,75%,65%)', fontFamily: 'JetBrains Mono', fontSize: '.7rem', flexShrink: 0, marginTop: 2 }}>
-                                      {isDocPoint ? 'D' : `P${pIdx + 1}`}
-                                    </span>
-
-                                    {/* Point content */}
-                                    <div style={{ flex: 1 }}>
-                                      {isEditing ? (
-                                        <div>
-                                          <textarea
-                                            value={editDraft}
-                                            onChange={e => setEditDraft(e.target.value)}
-                                            style={{ width: '100%', minHeight: 55, padding: '4px 8px', borderRadius: 6, border: '1.5px solid hsl(280,75%,60%)', fontSize: '.8rem', fontFamily: 'Inter', outline: 'none', background: 'hsl(var(--paper))' }}
-                                          />
-                                          <div style={{ display: 'flex', gap: 4, marginTop: 4, justifyContent: 'flex-end' }}>
-                                            <button onClick={() => setEditingPointId(null)} style={{ padding: '2px 8px', fontSize: '.7rem', borderRadius: 4, border: '1px solid hsl(var(--border))', background: 'transparent', cursor: 'pointer' }}>Cancel</button>
-                                            <button
-                                              onClick={() => {
-                                                const newFinal = JSON.parse(JSON.stringify(romData.final_rom!))
-                                                newFinal.agendas[aIdx].discussion_points[pIdx].text = editDraft
-                                                setRomData(prev => ({ ...prev as RomData, final_rom: newFinal }))
-                                                setEditingPointId(null)
-                                                toast.success('Point updated')
-                                              }}
-                                              style={{ padding: '2px 8px', fontSize: '.7rem', borderRadius: 4, background: 'hsl(280,75%,60%)', color: 'white', border: 'none', fontWeight: 700, cursor: 'pointer' }}
-                                            >
-                                              Save
-                                            </button>
-                                          </div>
-                                        </div>
-                                      ) : (
-                                        <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{ptText}</div>
-                                      )}
-
-                                      {/* Speaker */}
-                                      <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                        <User size={10} />{spk}
-                                        {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
-                                      </div>
+                            {/* Skipped agenda note */}
+                            {isSkipped ? (
+                              <div style={{ padding: '.75rem 1rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '.6rem .85rem', borderRadius: 8, background: 'hsl(38,90%,50%/.08)', border: '1px solid hsl(38,90%,50%/.25)' }}>
+                                  <CornerDownRight size={14} style={{ color: 'hsl(38,90%,45%)', flexShrink: 0 }} />
+                                  <div>
+                                    <div style={{ fontSize: '.76rem', fontWeight: 700, color: 'hsl(38,90%,38%)' }}>Agenda Skipped</div>
+                                    <div style={{ fontSize: '.73rem', color: 'hsl(38,90%,35%)', fontStyle: 'italic', marginTop: 2 }}>
+                                      {agenda.skip_note || 'Keep this agenda if forward to next meeting'}
                                     </div>
-
-                                    {/* Actions column */}
-                                    {!isEditing && (
-                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flexShrink: 0 }}>
-                                        {/* Edit */}
-                                        <button onClick={() => { setEditingPointId(pt.id); setEditDraft(ptText) }} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}><Pencil size={11} /></button>
-                                        {/* Move Up */}
-                                        <button onClick={() => reorderPoint(aIdx, pIdx, 'up')} disabled={pIdx === 0} title="Move up" style={{ background: 'none', border: 'none', cursor: pIdx === 0 ? 'default' : 'pointer', color: pIdx === 0 ? 'hsl(var(--border))' : 'hsl(var(--pencil))', padding: '2px' }}><ChevronUp size={11} /></button>
-                                        {/* Move Down */}
-                                        <button onClick={() => reorderPoint(aIdx, pIdx, 'down')} disabled={pIdx === pts.length - 1} title="Move down" style={{ background: 'none', border: 'none', cursor: pIdx === pts.length - 1 ? 'default' : 'pointer', color: pIdx === pts.length - 1 ? 'hsl(var(--border))' : 'hsl(var(--pencil))', padding: '2px' }}><ChevronDown size={11} /></button>
-                                        {/* Delete Point */}
-                                        <button onClick={() => handleDeletePoint(pt.id)} title="Delete Discussion Point" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '2px' }}><Trash2 size={11} /></button>
-                                        {/* Move to agenda */}
-                                        <select
-                                          title="Move to agenda"
-                                          value=""
-                                          onChange={e => {
-                                            if (e.target.value) movePointToAgenda(aIdx, pIdx, e.target.value)
-                                            e.target.value = ''
-                                          }}
-                                          style={{ background: 'none', border: '1px solid hsl(var(--border)/.5)', borderRadius: 4, cursor: 'pointer', color: 'hsl(var(--pencil))', fontSize: '.63rem', padding: '1px', maxWidth: 20, appearance: 'none', textAlign: 'center' }}
-                                        >
-                                          <option value="">↔</option>
-                                          {romData.final_rom!.agendas.filter((a: any) => a.agenda_id !== agenda.agenda_id).map((a: any) => (
-                                            <option key={a.agenda_id} value={a.agenda_id}>{a.agenda_id}: {a.title?.slice(0, 20)}</option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                    )}
                                   </div>
                                 </div>
-                              )
-                            })
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
+                              </div>
+                            ) : (
+                              /* Points Container */
+                              <div style={{ padding: '.75rem 1rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {pts.length === 0 ? (
+                                  <div style={{ color: 'hsl(var(--pencil))', fontStyle: 'italic', fontSize: '.78rem' }}>No discussion points mapped to this agenda.</div>
+                                ) : (
+                                  pts.map((pt: any, pIdx: number) => {
+                                    const isEditing = editingPointId === pt.id
+                                    const ptText = pt.text || pt.polished_text || ''
+                                    const spk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '—')
+                                    const isDocPoint = pt.is_doc_point
+
+                                    return (
+                                      <div key={pt.id || `${agenda.agenda_id || aIdx}-pt-${pIdx}`}>
+                                        <div style={{ borderRadius: 8, border: `1px solid ${isDocPoint ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.3)'}`, background: isDocPoint ? 'hsl(280,75%,60%/.05)' : 'hsl(var(--paper)/.4)', padding: '.6rem .8rem' }}>
+                                          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                                            {/* Bullet marker (no point IDs) */}
+                                            <span style={{ color: 'hsl(var(--pencil))', fontSize: '1rem', lineHeight: '1.2rem', flexShrink: 0, marginTop: 1, userSelect: 'none' }}>
+                                              •
+                                            </span>
+
+                                            {/* Point content */}
+                                            <div style={{ flex: 1 }}>
+                                              {isEditing ? (
+                                                <div>
+                                                  <textarea
+                                                    value={editDraft}
+                                                    onChange={e => setEditDraft(e.target.value)}
+                                                    style={{ width: '100%', minHeight: 55, padding: '4px 8px', borderRadius: 6, border: '1.5px solid hsl(280,75%,60%)', fontSize: '.8rem', fontFamily: 'Inter', outline: 'none', background: 'hsl(var(--paper))' }}
+                                                  />
+                                                  <div style={{ display: 'flex', gap: 4, marginTop: 4, justifyContent: 'flex-end' }}>
+                                                    <button onClick={() => setEditingPointId(null)} style={{ padding: '2px 8px', fontSize: '.7rem', borderRadius: 4, border: '1px solid hsl(var(--border))', background: 'transparent', cursor: 'pointer' }}>Cancel</button>
+                                                    <button
+                                                      onClick={() => {
+                                                        const newFinal = JSON.parse(JSON.stringify(activeVersionRom))
+                                                        newFinal.agendas[aIdx].discussion_points[pIdx].text = editDraft
+                                                        if (newFinal.agendas[aIdx].discussion_points[pIdx].polished_text) {
+                                                          newFinal.agendas[aIdx].discussion_points[pIdx].polished_text = editDraft
+                                                        }
+                                                        setRomData(prev => {
+                                                          if (!prev) return prev
+                                                          return {
+                                                            ...prev,
+                                                            final_rom: newFinal,
+                                                            final_rom_versions: {
+                                                              ...(prev.final_rom_versions || {}),
+                                                              [romVersion]: newFinal,
+                                                            }
+                                                          }
+                                                        })
+                                                        setEditingPointId(null)
+                                                        toast.success('Point updated. Click "Save Changes" to persist.')
+                                                      }}
+                                                      style={{ padding: '2px 8px', fontSize: '.7rem', borderRadius: 4, background: 'hsl(280,75%,60%)', color: 'white', border: 'none', fontWeight: 700, cursor: 'pointer' }}
+                                                    >
+                                                      Save
+                                                    </button>
+                                                  </div>
+                                                </div>
+                                              ) : (
+                                                <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{ptText}</div>
+                                              )}
+
+                                              {/* Speaker */}
+                                              <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                <User size={10} />{spk}
+                                                {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
+                                              </div>
+                                            </div>
+
+                                            {/* Actions column */}
+                                            {!isEditing && (
+                                              <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flexShrink: 0 }}>
+                                                {/* Edit */}
+                                                <button onClick={() => { setEditingPointId(pt.id); setEditDraft(ptText) }} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}><Pencil size={11} /></button>
+                                                {/* Move Up */}
+                                                <button onClick={() => reorderPoint(aIdx, pIdx, 'up')} disabled={pIdx === 0} title="Move up" style={{ background: 'none', border: 'none', cursor: pIdx === 0 ? 'default' : 'pointer', color: pIdx === 0 ? 'hsl(var(--border))' : 'hsl(var(--pencil))', padding: '2px' }}><ChevronUp size={11} /></button>
+                                                {/* Move Down */}
+                                                <button onClick={() => reorderPoint(aIdx, pIdx, 'down')} disabled={pIdx === pts.length - 1} title="Move down" style={{ background: 'none', border: 'none', cursor: pIdx === pts.length - 1 ? 'default' : 'pointer', color: pIdx === pts.length - 1 ? 'hsl(var(--border))' : 'hsl(var(--pencil))', padding: '2px' }}><ChevronDown size={11} /></button>
+                                                {/* Delete Point */}
+                                                <button onClick={() => handleDeletePoint(pt.id)} title="Delete Discussion Point" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '2px' }}><Trash2 size={11} /></button>
+                                                {/* Move to agenda */}
+                                                <select
+                                                  title="Move to agenda"
+                                                  value=""
+                                                  onChange={e => {
+                                                    if (e.target.value) movePointToAgenda(aIdx, pIdx, e.target.value)
+                                                    e.target.value = ''
+                                                  }}
+                                                  style={{ background: 'none', border: '1px solid hsl(var(--border)/.5)', borderRadius: 4, cursor: 'pointer', color: 'hsl(var(--pencil))', fontSize: '.63rem', padding: '1px', maxWidth: 20, appearance: 'none', textAlign: 'center' }}
+                                                >
+                                                  <option value="">↔</option>
+                                                  {activeVersionRom.agendas.filter((a: any) => a.agenda_id !== agenda.agenda_id).map((a: any) => (
+                                                    <option key={a.agenda_id} value={a.agenda_id}>{a.agenda_id}: {a.title?.slice(0, 25)} ({a.discussion_points?.length || 0} pts)</option>
+                                                  ))}
+                                                </select>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )
+                                  })
+                                )}
+
+                                {/* Action Points Section – Listed underneath all agenda discussion points */}
+                                {includeActionPointsInRom && agendaActionPoints.length > 0 && (
+                                  <div style={{ marginTop: '.85rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', paddingTop: '.6rem', borderTop: '1px solid hsl(var(--border)/.4)', marginBottom: 2 }}>
+                                      Action Points
+                                    </div>
+                                    {agendaActionPoints.map((ap: any, apIdx: number) => {
+                                      const apTask = ap.task || ap.item || ap.description || ''
+                                      const apAssignee = ap.assignee || ap.owner || ''
+                                      const apDeadline = ap.deadline || ''
+                                      return (
+                                        <div
+                                          key={`agenda-ap-${agenda.agenda_id || aIdx}-${apIdx}`}
+                                          style={{
+                                            borderRadius: 8,
+                                            border: '1px solid hsl(var(--border)/.3)',
+                                            background: 'hsl(var(--paper)/.4)',
+                                            padding: '.6rem .8rem',
+                                            display: 'flex',
+                                            gap: 8,
+                                            alignItems: 'flex-start'
+                                          }}
+                                        >
+                                          <span style={{ color: 'hsl(var(--pencil))', fontSize: '1rem', lineHeight: '1.2rem', flexShrink: 0, marginTop: 1, userSelect: 'none' }}>•</span>
+                                          <div style={{ flex: 1 }}>
+                                            <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{apTask}</div>
+                                            {(apAssignee || (apDeadline && String(apDeadline).toLowerCase() !== 'asap' && String(apDeadline).toLowerCase() !== 'none')) && (
+                                              <div style={{ marginTop: 4, display: 'flex', gap: 8, fontSize: '.7rem', color: 'hsl(var(--pencil))' }}>
+                                                {apAssignee && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><UserCheck size={10} /> {apAssignee}</span>}
+                                                {apDeadline && String(apDeadline).toLowerCase() !== 'asap' && String(apDeadline).toLowerCase() !== 'none' && (
+                                                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={10} /> {apDeadline}</span>
+                                                )}
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
             )
-          )}
+          })()}
 
 
 

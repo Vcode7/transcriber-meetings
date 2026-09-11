@@ -149,7 +149,7 @@ class RecordingService {
     }
   }
 
-  // ── 1. Start Microphone Recording ───────────────────────────
+  // â”€â”€ 1. Start Microphone Recording â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   public async startMic(opts?: { meetingPrompt?: string; useVocabularyInPrompt?: boolean }) {
     if (this.state === 'recording' || this.state === 'paused') return
 
@@ -205,7 +205,7 @@ class RecordingService {
     }
   }
 
-  // ── 2. Start Tab Audio Recording ────────────────────────────
+  // â”€â”€ 2. Start Tab Audio Recording â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   public async startTab(includeMicOption: boolean = false) {
     if (this.state === 'recording' || this.state === 'paused') return
 
@@ -311,7 +311,7 @@ class RecordingService {
     }
   }
 
-  // ── Recorder Handlers Setup ──────────────────────────────────
+  // â”€â”€ Recorder Handlers Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   private setupRecorderHandlers(mr: MediaRecorder, mimeType: string) {
     let chunkIndexCounter = 0
 
@@ -347,7 +347,7 @@ class RecordingService {
     }
   }
 
-  // ── Timer Interval ───────────────────────────────────────────
+  // â”€â”€ Timer Interval â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   private startTimer() {
     this.clearTimer()
     this.timerId = setInterval(async () => {
@@ -396,7 +396,7 @@ class RecordingService {
     }, 1000)
   }
 
-  // ── Background Chunk Submission (10-min splits) ──────────────
+  // â”€â”€ Background Chunk Submission (10-min splits) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   private async submitBackgroundChunk(blobs: Blob[], chunkStartSec: number, chunkEndSec: number) {
     if (this.submittingChunk || blobs.length === 0 || !this.headerChunk) return
     this.submittingChunk = true
@@ -416,7 +416,7 @@ class RecordingService {
       const res = await api.post('/audio/chunk', form)
       const { chunk_id } = res.data
       this.chunkIds.push(chunk_id)
-      console.log(`[RecordingService] Chunk ${currIndex} submitted → ${chunk_id}`)
+      console.log(`[RecordingService] Chunk ${currIndex} submitted â†’ ${chunk_id}`)
     } catch (e) {
       console.error('[RecordingService] Chunk submission error:', e)
     } finally {
@@ -424,7 +424,7 @@ class RecordingService {
     }
   }
 
-  // ── 3. Pause Recording ───────────────────────────────────────
+  // â”€â”€ 3. Pause Recording â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   public pause() {
     if (this.state !== 'recording' || !this.mediaRecorder) return
     try {
@@ -454,7 +454,7 @@ class RecordingService {
     }
   }
 
-  // ── 4. Resume Recording ──────────────────────────────────────
+  // â”€â”€ 4. Resume Recording â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   public resume() {
     if (this.state !== 'paused' || !this.mediaRecorder) return
     try {
@@ -496,19 +496,33 @@ class RecordingService {
       } catch {}
     }
 
-    this.stream?.getTracks().forEach((t) => t.stop())
-    this.micStream?.getTracks().forEach((t) => t.stop())
-    if (this.audioCtx && this.audioCtx.state !== 'closed') {
-      try {
-        this.audioCtx.close()
-      } catch {}
-    }
+    const currentStream = this.stream
+    const currentMicStream = this.micStream
+    const currentAudioCtx = this.audioCtx
 
-    this.analyser = null
     this.stream = null
     this.micStream = null
     this.audioCtx = null
     this.dest = null
+    this.analyser = null
+
+    setTimeout(() => {
+      try {
+        currentStream?.getTracks().forEach((t) => {
+          t.stop()
+          t.enabled = false
+        })
+        currentMicStream?.getTracks().forEach((t) => {
+          t.stop()
+          t.enabled = false
+        })
+        if (currentAudioCtx && currentAudioCtx.state !== 'closed') {
+          currentAudioCtx.close().catch(() => {})
+        }
+      } catch (e) {
+        console.warn('[RecordingService] Error cleaning up audio tracks:', e)
+      }
+    }, 150)
   }
 
   // ── 6. Reset Recording State ─────────────────────────────────
@@ -549,7 +563,7 @@ class RecordingService {
     this.sessionId = null
   }
 
-  // ── 7. Check & Recover Un-submitted Crash Session ────────────
+  // â”€â”€ 7. Check & Recover Un-submitted Crash Session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   public async checkCrashRecovery() {
     if (this.state === 'recording' || this.state === 'paused') return
     try {
@@ -583,3 +597,4 @@ class RecordingService {
 }
 
 export const recordingService = new RecordingService()
+

@@ -32,9 +32,10 @@ import torchaudio
 from license import check_license, LICENSE_EXPIRED_BODY
 
 # Suppress warnings
-warnings.filterwarnings('ignore', category=UserWarning, module='pyannote')
-warnings.filterwarnings('ignore', category=UserWarning, module='torchcodec')
-warnings.filterwarnings('ignore', category=FutureWarning, module='librosa')
+warnings.filterwarnings('ignore', category=UserWarning, module=r'pyannote.*')
+warnings.filterwarnings('ignore', category=UserWarning, module=r'torchcodec.*')
+warnings.filterwarnings('ignore', category=UserWarning, message=r'.*torchcodec.*')
+warnings.filterwarnings('ignore', category=FutureWarning, module=r'librosa.*')
 
 from config import settings
 from database import connect_db, close_db
@@ -227,6 +228,16 @@ async def lifespan(app: FastAPI):
     _log_device()           # logs "Using CUDA -- GPU: ..." or "using CPU"
     await connect_db()
     init_diarization()      # try load pyannote if HF_TOKEN set
+
+    # Pre-load prompt templates into in-memory cache
+    try:
+        from services.prompt_service import _ensure_cache_loaded
+        from database import get_db_context
+        async with get_db_context() as db:
+            await _ensure_cache_loaded(db)
+        logger.info("[PromptService] Prompt templates cache loaded at startup.")
+    except Exception as e:
+        logger.warning(f"[PromptService] Failed to preload prompt cache at startup: {e}")
 
     # Overlap model device setup (do not pre-load model to save RAM/VRAM)
     _overlap_device = _ML_DEVICE

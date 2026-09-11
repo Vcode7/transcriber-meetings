@@ -62,6 +62,7 @@ class UserSettings(BaseModel):
     whisper_batch_size: int = Field(default=8, ge=1, le=32)
     whisper_parallel_processing: int = Field(default=1, ge=1, le=8)
     whisper_parallel_chunk_minutes: int = Field(default=10, ge=1, le=60)
+    parallel_transcription_diarization: bool = False
 
     # ROM Pipeline Settings
     rom_transcript_window: float = Field(default=2.0, ge=0.5, le=10.0)
@@ -70,6 +71,7 @@ class UserSettings(BaseModel):
     rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
     rom_parallel_window_processing: int = Field(default=2, ge=1, le=5)
     rom_separate_action_extraction: bool = False
+    rom_action_generation_chunk_size: int = Field(default=10, ge=1, le=100)
     rom_stage2_process_all_together: bool = False
     rom_min_similarity_threshold: float | None = Field(default=0.80, ge=0.0, le=1.0)
     # "base" = always use default prompts; "dspy" = use trained DSPy variants when available
@@ -78,6 +80,7 @@ class UserSettings(BaseModel):
     max_tokens_rom_discussion: int = Field(default=4096, ge=1)
     max_tokens_rom_discussion_no_actions: int = Field(default=4096, ge=1)
     max_tokens_rom_action_extraction: int = Field(default=2048, ge=1)
+    max_tokens_mom_extract_actions: int = Field(default=4096, ge=1)
     max_tokens_stage1_json_repair: int = Field(default=4548, ge=1)
     max_tokens_mom_action_regen: int = Field(default=4048, ge=1)
     max_tokens_rom_polish: int = Field(default=4096, ge=1)
@@ -184,6 +187,7 @@ class UserSettingsUpdate(BaseModel):
     whisper_batch_size: int | None = Field(default=None, ge=1, le=32)
     whisper_parallel_processing: int | None = Field(default=None, ge=1, le=8)
     whisper_parallel_chunk_minutes: int | None = Field(default=None, ge=1, le=60)
+    parallel_transcription_diarization: bool | None = None
 
 
     # ROM Pipeline Settings
@@ -193,6 +197,7 @@ class UserSettingsUpdate(BaseModel):
     rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
     rom_parallel_window_processing: int | None = Field(default=None, ge=1, le=5)
     rom_separate_action_extraction: bool | None = None
+    rom_action_generation_chunk_size: int | None = Field(default=None, ge=1, le=100)
     rom_stage2_process_all_together: bool | None = None
     rom_min_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     rom_pipeline_mode: str | None = None
@@ -200,6 +205,7 @@ class UserSettingsUpdate(BaseModel):
     max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
     max_tokens_rom_discussion_no_actions: int | None = Field(default=None, ge=1)
     max_tokens_rom_action_extraction: int | None = Field(default=None, ge=1)
+    max_tokens_mom_extract_actions: int | None = Field(default=None, ge=1)
     max_tokens_stage1_json_repair: int | None = Field(default=None, ge=1)
     max_tokens_mom_action_regen: int | None = Field(default=None, ge=1)
     max_tokens_rom_polish: int | None = Field(default=None, ge=1)

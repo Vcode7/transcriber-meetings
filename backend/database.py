@@ -146,6 +146,7 @@ async def connect_db():
                 ollama_num_gpu INTEGER NOT NULL DEFAULT -1,
                 max_tokens_mom INTEGER NOT NULL DEFAULT 1500,
                 max_tokens_mom_merge INTEGER NOT NULL DEFAULT 3072,
+                max_tokens_mom_extract_actions INTEGER NOT NULL DEFAULT 4096,
                 max_tokens_raw_mom_to_mom INTEGER NOT NULL DEFAULT 3000,
                 max_tokens_raw_mom_extraction INTEGER NOT NULL DEFAULT 1024,
                 max_tokens_raw_mom_repair INTEGER NOT NULL DEFAULT 1024,
@@ -187,6 +188,7 @@ async def connect_db():
                 missing_segment_min_duration_sec REAL NOT NULL DEFAULT 2.0,
                 whisper_parallel_processing INTEGER NOT NULL DEFAULT 1,
                 whisper_parallel_chunk_minutes INTEGER NOT NULL DEFAULT 10,
+                rom_action_generation_chunk_size INTEGER NOT NULL DEFAULT 10,
                 rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
                 updated_at TEXT NOT NULL
             )
@@ -577,6 +579,7 @@ async def connect_db():
             ("rom_windows_per_batch", "INTEGER NOT NULL DEFAULT 5"),
             ("rom_parallel_window_processing", "INTEGER NOT NULL DEFAULT 2"),
             ("rom_separate_action_extraction", "INTEGER NOT NULL DEFAULT 0"),
+            ("rom_action_generation_chunk_size", "INTEGER NOT NULL DEFAULT 10"),
             ("rom_stage2_process_all_together", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_min_similarity_threshold", "REAL DEFAULT 0.80"),
             ("rom_pipeline_mode", "TEXT NOT NULL DEFAULT 'base'"),
@@ -584,6 +587,7 @@ async def connect_db():
             ("max_tokens_rom_discussion", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_discussion_no_actions", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_action_extraction", "INTEGER NOT NULL DEFAULT 2048"),
+            ("max_tokens_mom_extract_actions", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_stage1_json_repair", "INTEGER NOT NULL DEFAULT 4548"),
             ("max_tokens_mom_action_regen", "INTEGER NOT NULL DEFAULT 4048"),
             ("max_tokens_rom_polish", "INTEGER NOT NULL DEFAULT 4096"),
@@ -625,6 +629,7 @@ async def connect_db():
             ("min_audio_rms_threshold", "REAL NOT NULL DEFAULT 0.003"),
             ("whisper_parallel_processing", "INTEGER NOT NULL DEFAULT 1"),
             ("whisper_parallel_chunk_minutes", "INTEGER NOT NULL DEFAULT 10"),
+            ("parallel_transcription_diarization", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))

@@ -38,7 +38,7 @@ metadata_packages = [
     # Pyannote
     "pyannote-audio", "pyannote-core", "pyannote-database", "pyannote-pipeline",
     # Audio
-    "librosa", "soundfile", "tqdm", "torchcodec",
+    "librosa", "soundfile", "tqdm", "torchcodec", "webrtcvad",
     # NLP / utilities
     "sentencepiece", "nltk", "scipy", "numpy", "pandas", "scikit-learn",
     "regex", "requests", "packaging", "filelock", "pyyaml", "Pillow",
@@ -50,9 +50,11 @@ metadata_packages = [
     # Others probed by pyannote/speechbrain
     "onnxruntime", "psutil", "pygments", "rich", "optree",
     "optimum_quanto", "gammatone", "pesq", "piq", "pystoi",
-    "torchmetrics", "pyannote-audio",
+    "torchmetrics",
     # Additional packages
     "python-pptx", "pptx", "pytesseract", "pypdf", "faiss", "faiss-cpu", "pydantic-settings",
+    # DSPy / GEPa / Vector store
+    "dspy", "gepa", "chromadb", "chromadb_rust_bindings", "pypika", "mmh3", "overrides", "opentelemetry", "litellm", "openai", "orjson", "json_repair", "diskcache", "cloudpickle", "tenacity",
 ]
 
 collected_metadata = []
@@ -69,6 +71,14 @@ data_packages = [
     "pptx",
     "rapidocr_onnxruntime",
     "cv2",
+    "dspy",
+    "gepa",
+    "chromadb",
+    "chromadb_rust_bindings",
+    "pypika",
+    "mmh3",
+    "overrides",
+    "opentelemetry",
 ]
 collected_datas = []
 for pkg in data_packages:
@@ -86,6 +96,16 @@ submodule_packages = [
     "onnxruntime",
     "rapidocr_onnxruntime",
     "cv2",
+    "dspy",
+    "gepa",
+    "chromadb",
+    "chromadb_rust_bindings",
+    "pypika",
+    "mmh3",
+    "overrides",
+    "opentelemetry",
+    "litellm",
+    "openai",
 ]
 collected_submodules = []
 for pkg in submodule_packages:
@@ -117,6 +137,14 @@ full_copy_packages = [
     "pymupdf",
     "rapidocr_onnxruntime",
     "cv2",
+    "dspy",
+    "gepa",
+    "chromadb",
+    "chromadb_rust_bindings",
+    "pypika",
+    "mmh3",
+    "overrides",
+    "opentelemetry",
 ]
 collected_full_packages = []
 for pkg in full_copy_packages:
@@ -187,6 +215,18 @@ a = Analysis(
         "pyclipper",
         "shapely",
         "rank_bm25",
+        "webrtcvad",
+        # DSPy / GEPa / LLM tooling
+        "dspy",
+        "gepa",
+        "litellm",
+        "openai",
+        "orjson",
+        "json_repair",
+        "diskcache",
+        "cloudpickle",
+        "tenacity",
+        "chromadb",
         # SpeechBrain submodules required for ECAPA-TDNN speaker embeddings
         "speechbrain.utils",
         "speechbrain.utils.fetching",
@@ -243,9 +283,15 @@ a = Analysis(
         "pptx",
         "pytesseract",
         "pypdf",
-        # FAISS vector store & Pydantic settings
+        # FAISS / ChromaDB vector store & Pydantic settings
         "faiss",
         "faiss.swigfaiss",
+        "chromadb",
+        "chromadb_rust_bindings",
+        "pypika",
+        "mmh3",
+        "overrides",
+        "opentelemetry",
         "pydantic_settings",
         # Extra utils from requirements.txt
         "multipart",
@@ -272,6 +318,8 @@ a = Analysis(
         "routers.collection_ai_router",
         "routers.rom_router",
         "routers.video_router",
+        "routers.speaker_management_router",
+        "routers.training_routes",
         # App modules — services
         "services.diarization",
         "services.embedding",
@@ -300,6 +348,22 @@ a = Analysis(
         "services.video_processing_service",
         "services.rom_service",
         "services.bm25",
+        "services.speaker_sync",
+        # Training services
+        "services.training",
+        "services.training.training_models",
+        "services.training.training_schemas",
+        "services.training.training_storage_service",
+        "services.training.training_dataset_service",
+        "services.training.training_model_service",
+        "services.training.training_service",
+        "services.training.training_evaluation_service",
+        "services.training.dspy_training_service",
+        "services.training.lora_training_service",
+        "services.training.qlora_training_service",
+        "services.training.stage1_training_service",
+        "services.training.stage2_training_service",
+        "services.training.stage3_training_service",
         # App modules — utils & core
         "utils.audio_utils",
         "utils.storage",

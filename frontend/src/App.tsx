@@ -28,6 +28,7 @@ import SquiggleFilter from "@/components/sketch/SquiggleFilter";
 import SmoothScroll from "@/components/sketch/SmoothScroll";
 import GlobalJobTracker from "./components/GlobalJobTracker";
 import { recordingService } from "./services/recordingService";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
@@ -216,58 +217,60 @@ export default function App() {
       <Toaster />
       <Sonner />
       <LicenseGate>
-        <HashRouter>
-          {/* Bootstrap runs inside HashRouter */}
-          <AuthBootstrap />
-          {/* GlobalJobTracker: null-render daemon — tracks all in-flight jobs */}
-          <GlobalJobTracker />
+        <ErrorBoundary>
+          <HashRouter>
+            {/* Bootstrap runs inside HashRouter */}
+            <AuthBootstrap />
+            {/* GlobalJobTracker: null-render daemon — tracks all in-flight jobs */}
+            <GlobalJobTracker />
 
-          <Routes>
-            {/* Public landing */}
-            <Route path="/" element={<Landing />} />
+            <Routes>
+              {/* Public landing */}
+              <Route path="/" element={<Landing />} />
 
-            {/* Auth */}
-            <Route path="/login" element={<Login />} />
-            <Route path="/signup" element={<Signup />} />
-            <Route
-              path="/setup"
-              element={
-                <RequireAuth>
-                  <Setup />
-                </RequireAuth>
-              }
-            />
+              {/* Auth */}
+              <Route path="/login" element={<Login />} />
+              <Route path="/signup" element={<Signup />} />
+              <Route
+                path="/setup"
+                element={
+                  <RequireAuth>
+                    <Setup />
+                  </RequireAuth>
+                }
+              />
 
-            {/* Dashboard (smooth-scroll handled here) */}
-            <Route
-              path="/dashboard"
-              element={
-                <RequireAuth>
-                  <SmoothScroll>
-                    <Dashboard />
-                  </SmoothScroll>
-                </RequireAuth>
-              }
-            >
-              <Route index element={<Record />} />
-              <Route path="tab-audio" element={<TabAudio />} />
-              <Route path="upload" element={<Upload />} />
-              <Route path="video-upload" element={<VideoUpload />} />
-              <Route path="history" element={<History />} />
-              <Route path="history/:id" element={<HistoryDetail />} />
-              <Route path="history/:id/mom" element={<MomPage />} />
-              <Route path="add-voice" element={<AddVoice />} />
-              <Route path="settings" element={<Settings />} />
-              <Route path="dictionary" element={<Dictionary />} />
-              <Route path="global-context" element={<GlobalContext />} />
-              <Route path="history/:id/rom" element={<RomPage />} />
-              <Route path="training" element={<Training />} />
-            </Route>
+              {/* Dashboard (smooth-scroll handled here) */}
+              <Route
+                path="/dashboard"
+                element={
+                  <RequireAuth>
+                    <SmoothScroll>
+                      <Dashboard />
+                    </SmoothScroll>
+                  </RequireAuth>
+                }
+              >
+                <Route index element={<Record />} />
+                <Route path="tab-audio" element={<TabAudio />} />
+                <Route path="upload" element={<Upload />} />
+                <Route path="video-upload" element={<VideoUpload />} />
+                <Route path="history" element={<History />} />
+                <Route path="history/:id" element={<HistoryDetail />} />
+                <Route path="history/:id/mom" element={<MomPage />} />
+                <Route path="add-voice" element={<AddVoice />} />
+                <Route path="settings" element={<Settings />} />
+                <Route path="dictionary" element={<Dictionary />} />
+                <Route path="global-context" element={<GlobalContext />} />
+                <Route path="history/:id/rom" element={<RomPage />} />
+                <Route path="training" element={<Training />} />
+              </Route>
 
-            {/* Catch-all → landing */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </HashRouter>
+              {/* Catch-all → landing */}
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </HashRouter>
+        </ErrorBoundary>
       </LicenseGate>
     </TooltipProvider>
   );

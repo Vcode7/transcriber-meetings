@@ -10,6 +10,7 @@ from typing import List, Dict, Optional, Any
 import numpy as np
 
 import math
+from services.text_embedding_service import unload_text_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -3478,6 +3479,7 @@ class RomService:
         as soft contextual guidance for the LLM.
         """
         from services.ai_provider import get_provider
+        from services.text_embedding_service import unload_text_embedder
 
         user_id = _validate_user_id(user_id)
 
@@ -3552,12 +3554,14 @@ class RomService:
                 batch_items = []
                 for point in batch_points:
                     pid = point["id"]
-                    batch_items.append({
+                    item_dict = {
                         "point_id": pid,
                         "enhanced_point": point.get("polished_text") or point.get("text", ""),
-                        "timeline": f"{_format_time_hhmm(point.get('timeline_start', 0))} – {_format_time_hhmm(point.get('timeline_end', 0))}",
                         "speakers": point.get("speakers", []),
-                    })
+                    }
+                    if timeline_guidance_text:
+                        item_dict["timeline"] = f"{_format_time_hhmm(point.get('timeline_start', 0))} – {_format_time_hhmm(point.get('timeline_end', 0))}"
+                    batch_items.append(item_dict)
 
                 batch_json_str = json.dumps(batch_items, ensure_ascii=False)
                 llm_result     = provider.assign_agenda_batch(
@@ -3660,10 +3664,10 @@ class RomService:
                                 "is_probable": False,
                             })
 
-                if agenda_points:
-                    agenda_copy = dict(a)
-                    agenda_copy["discussion_points"] = agenda_points
-                    final_agendas.append(agenda_copy)
+                # Always preserve all agendas from original list, even if zero points
+                agenda_copy = dict(a)
+                agenda_copy["discussion_points"] = agenda_points
+                final_agendas.append(agenda_copy)
 
             return {
                 "candidate_results": candidate_results,
@@ -3686,6 +3690,7 @@ class RomService:
         recording_id: str = "",
         user_id: str = "",
         separate_action_extraction: bool = False,
+        action_chunk_size: Optional[int] = None,
     ) -> Dict:
         """
         Generate Minutes of Meeting (MOM) using Stage 2/Stage 3 Enhanced Discussion Points.
@@ -3739,6 +3744,63 @@ class RomService:
         # 2. Extract action items depending on mode
         action_items = []
 
+        # ── Robust owner resolution helper ──────────────────────────────────
+        def _resolve_point_owner(
+            act_owner: Optional[str],
+            src_point: Optional[Dict],
+            task_text: str = "",
+        ) -> str:
+            invalid_values = {"none", "n/a", "null", "unassigned", "unknown", "undefined", ""}
+
+            def _clean(val) -> Optional[str]:
+                if val is None:
+                    return None
+                s = str(val).strip()
+                if s.lower() in invalid_values:
+                    return None
+                return s
+
+            # 1. Try explicitly extracted owner
+            cleaned = _clean(act_owner)
+            if cleaned:
+                return cleaned
+
+            if src_point:
+                # 2. Try source point's action_owner
+                p_owner = _clean(src_point.get("action_owner"))
+                if p_owner:
+                    return p_owner
+
+                # 3. Try source point's speakers list
+                spks = src_point.get("speakers")
+                if isinstance(spks, str):
+                    spks = [s.strip() for s in spks.split(",") if s.strip()]
+                if isinstance(spks, list):
+                    valid_spks = [s for s in spks if _clean(s) and str(s).strip().lower() != "for information"]
+                    if valid_spks:
+                        return ", ".join(valid_spks)
+
+                # 4. Try source point's speaker
+                p_spk = _clean(src_point.get("speaker"))
+                if p_spk and p_spk.lower() != "for information":
+                    return p_spk
+
+            # 5. Check if any meeting participant's name is mentioned in the task text
+            if participants and isinstance(participants, list):
+                task_lower = (task_text or "").lower()
+                matched = [
+                    str(p).strip() for p in participants
+                    if _clean(p) and str(p).strip().lower() != "for information" and str(p).strip().lower() in task_lower
+                ]
+                if matched:
+                    return ", ".join(matched)
+                
+                valid_parts = [str(p).strip() for p in participants if _clean(p) and str(p).strip().lower() != "for information"]
+                if len(valid_parts) == 1:
+                    return valid_parts[0]
+
+            return "Unassigned"
+
         if separate_action_extraction:
             # ── Separate-extraction mode: read action_items[] directly from each polished point ──
             for p in polished_points:
@@ -3762,59 +3824,50 @@ class RomService:
                         continue
 
                     displayed_task = format_action_point_display_text(act_dict)
-                    assignee = act_dict.get("assignee")
-                    if assignee:
-                        owner = assignee
-                    elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
-                        owner = p.get("action_owner")
-                    else:
-                        owner = "Unassigned"
-
+                    raw_assignee = act_dict.get("assignee") or act_dict.get("owner")
+                    owner = _resolve_point_owner(raw_assignee, p, task_text=displayed_task or act_dict["task"])
                     deadline = act_dict.get("deadline") or d_fallback or "ASAP"
 
                     action_items.append({
                         "task": displayed_task or act_dict["task"],
                         "item": displayed_task or act_dict["task"],
                         "description": displayed_task or act_dict["task"],
-                        "owner": str(owner).strip(),
+                        "owner": owner,
                         "deadline": deadline,
                         "status": "open",
                         "raw_json": act_dict,
                     })
         else:
-            # ── Default (embedded) mode: run LLM extraction pass over polished_text ──
-            logger.info("[ROM Service] MoM generation: running extract_actions_from_enhanced_points (default mode)")
+            # ── Default (embedded) mode: run LLM extraction pass over polished_text in chunks ──
+            logger.info(f"[ROM Service] MoM generation: running extract_actions_from_enhanced_points (chunk_size={action_chunk_size or 'default'})")
             provider = get_provider()
             try:
-                raw_extracted = provider.extract_actions_from_enhanced_points(polished_points)
+                raw_extracted = provider.extract_actions_from_enhanced_points(polished_points, chunk_size=action_chunk_size)
             except Exception as _ex:
                 logger.warning(f"[ROM Service] MoM action extraction pass failed ({_ex}). Continuing with no action items.")
                 raw_extracted = []
             finally:
                 provider.unload_model()
 
-            # Build a lookup: id -> point (for fallback action_owner)
+            # Build a lookup: id -> point (for fallback action_owner and speakers)
             point_by_id = {p.get("id"): p for p in polished_points if p.get("id")}
 
             for act in raw_extracted:
-                task = str(act.get("task") or "").strip()
+                task = str(act.get("task") or act.get("item") or act.get("description") or "").strip()
                 if not task:
                     continue
 
-                # owner: prefer extracted owner, then action_owner from the source point
-                raw_owner = act.get("owner")
-                if not raw_owner or str(raw_owner).strip().lower() in ("none", "n/a", "null", ""):
-                    src_id = act.get("source_point_id")
-                    src_point = point_by_id.get(src_id) if src_id else None
-                    if src_point and src_point.get("action_owner") and str(src_point.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
-                        raw_owner = src_point["action_owner"]
-                    else:
-                        raw_owner = None
+                src_id = act.get("source_point_id") or act.get("id")
+                src_point = point_by_id.get(src_id) if src_id else None
+                raw_owner = act.get("owner") or act.get("assignee") or act.get("person") or act.get("action_owner")
+                owner_str = _resolve_point_owner(raw_owner, src_point, task_text=task)
 
-                owner_str = str(raw_owner).strip() if raw_owner else "Unassigned"
-                deadline = str(act.get("deadline") or "ASAP").strip()
+                deadline = str(act.get("deadline") or act.get("due_date") or "ASAP").strip()
                 if deadline.lower() in ("none", "n/a", "null", ""):
                     deadline = "ASAP"
+
+                expected_outcome = act.get("expected_outcome") or act.get("goal") or act.get("outcome")
+                expected_outcome = str(expected_outcome).strip() if expected_outcome and str(expected_outcome).strip().lower() not in ("none", "n/a", "null", "") else None
 
                 action_items.append({
                     "task": task,
@@ -3822,6 +3875,7 @@ class RomService:
                     "description": task,
                     "owner": owner_str,
                     "deadline": deadline,
+                    "expected_outcome": expected_outcome,
                     "status": "open",
                     "raw_json": act,
                 })
@@ -3851,21 +3905,15 @@ class RomService:
                         continue
 
                     displayed_task = format_action_point_display_text(act_dict)
-                    assignee = act_dict.get("assignee")
-                    if assignee:
-                        owner = assignee
-                    elif p.get("action_owner") and str(p.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned"):
-                        owner = p.get("action_owner")
-                    else:
-                        owner = "Unassigned"
-
+                    raw_assignee = act_dict.get("assignee") or act_dict.get("owner")
+                    owner = _resolve_point_owner(raw_assignee, p, task_text=displayed_task or act_dict["task"])
                     deadline = act_dict.get("deadline") or d_fallback or "ASAP"
 
                     action_items.append({
                         "task": displayed_task or act_dict["task"],
                         "item": displayed_task or act_dict["task"],
                         "description": displayed_task or act_dict["task"],
-                        "owner": str(owner).strip(),
+                        "owner": owner,
                         "deadline": deadline,
                         "status": "open",
                         "raw_json": act_dict,
@@ -3884,6 +3932,33 @@ class RomService:
             "action_items": action_items,
             "conclusion": overview["conclusion"],
         }
+
+    @staticmethod
+    def _enforce_single_paragraph_5_to_7_sentences(text: str) -> str:
+        """
+        Ensure the text is strictly:
+        1. Exactly one single paragraph only (newlines/carriage returns collapsed to spaces).
+        2. 5 to 7 sentences (truncated to at most 7 sentences if longer).
+        3. Professional meeting-minutes punctuation.
+        """
+        if not text or not str(text).strip():
+            return ""
+        collapsed = re.sub(r'[\r\n]+', ' ', str(text).strip())
+        collapsed = re.sub(r'\s{2,}', ' ', collapsed).strip()
+
+        raw_sentences = [
+            s.strip() for s in re.split(r'(?<=[.!?])\s+', collapsed) if s.strip()
+        ]
+        if not raw_sentences:
+            return collapsed
+
+        if len(raw_sentences) > 7:
+            raw_sentences = raw_sentences[:7]
+
+        res = " ".join(raw_sentences).strip()
+        if res and not re.search(r'[.!?]$', res):
+            res += "."
+        return res
 
     def generate_mom_overview(
         self,
@@ -3911,16 +3986,18 @@ class RomService:
         part_str = ", ".join(str(p) for p in participants) if participants else "key stakeholders and team members"
         
         intro = (
-            f"This formal executive meeting session addressed {len(points_text_lines)} key discussion topic(s) "
-            f"pertaining to '{filename}'. The primary objective of the session was to review operational, strategic, "
-            f"and technical items, evaluating current progress and addressing critical focus areas. Participants including "
-            f"{part_str} actively contributed to evaluating proposals, resolving key inquiries, and setting strategic directives "
-            f"across all agenda points."
+            f"This executive meeting addressed {len(points_text_lines)} key discussion topic(s) pertaining to '{filename}'. "
+            f"The primary purpose was to review operational, strategic, and technical deliverables while addressing immediate priorities. "
+            f"Key participants including {part_str} evaluated core proposals, shared project progress, and clarified execution constraints. "
+            f"Discussions established decisive consensus on critical dependencies and the direction for ongoing initiatives. "
+            f"This document provides the official record of discussion points, agreed milestones, and actionable directives."
         )
         conclusion = (
-            "The meeting concluded following a comprehensive and detailed review of all agenda topics. Formal consensus was reached "
-            "on key items, with clear responsibilities and action items assigned to designated owners to ensure timely execution. "
-            "The team identified necessary follow-up milestones and agreed to maintain alignment on open items prior to the next scheduled review."
+            "The meeting concluded with comprehensive alignment achieved across all primary discussion topics. "
+            "Key decisions and project timelines were finalized to provide clear direction for participating stakeholders. "
+            "Specific action items and commitments were designated to responsible owners with defined delivery expectations. "
+            "Unresolved questions and operational risks were cataloged for proactive tracking and follow-up in the next scheduled review. "
+            "Participating teams agreed to maintain active communication to ensure milestone execution on schedule."
         )
         title = filename
 
@@ -3933,16 +4010,20 @@ class RomService:
             f"{points_combined_str}\n\n"
             f"Tasks:\n"
             f"1. Generate a professional, concise meeting TITLE that reflects the actual topics discussed (do NOT just use the filename; infer from content). Example: 'Q3 Engineering Review Meeting', 'Budget & Procurement Planning Session'.\n"
-            f"2. Write a long, detailed, and comprehensive executive INTRODUCTION section (at least 2-3 detailed paragraphs or 150-250+ words). Thoroughly describe:\n"
-            f"   - The overarching purpose, objective, strategic context, and business/technical background of the meeting.\n"
-            f"   - Key participants, stakeholders involved, and their roles/contributions.\n"
-            f"   - The major scope, themes, and agenda items covered during the discussion.\n"
-            f"   - Do NOT make it brief or high-level. Provide rich background, context, and detail.\n"
-            f"3. Write an actual, long, detailed, and actionable CONCLUSION section (at least 2-3 detailed paragraphs or 150-250+ words). Synthesize:\n"
-            f"   - All primary outcomes, key decisions finalized, and unanimous agreements reached.\n"
-            f"   - Critical risks, dependencies, assumptions, or open issues identified for future review.\n"
-            f"   - A clear roadmap of next steps, action item expectations, target milestones, and follow-up plans.\n"
-            f"   - Do NOT provide generic 1-2 line closing remarks. Provide a complete, highly detailed concluding section.\n\n"
+            f"2. Write a professional executive INTRODUCTION section.\n"
+            f"   STRICT CONSTRAINTS:\n"
+            f"   - Exactly ONE single paragraph only (do NOT generate multiple paragraphs or newline breaks).\n"
+            f"   - Exactly 5 to 7 sentences.\n"
+            f"   - Content must be based specifically on the actual meeting discussion and context.\n"
+            f"   - Use a concise, professional meeting-minutes style.\n"
+            f"   - Do NOT generate multiple paragraphs, excessive explanations, or generic filler.\n"
+            f"3. Write a professional executive CONCLUSION section.\n"
+            f"   STRICT CONSTRAINTS:\n"
+            f"   - Exactly ONE single paragraph only (do NOT generate multiple paragraphs or newline breaks).\n"
+            f"   - Exactly 5 to 7 sentences.\n"
+            f"   - Summarize key outcomes, decisions, progress, unresolved items, and next direction based specifically on the actual meeting.\n"
+            f"   - Use a concise, professional meeting-minutes style.\n"
+            f"   - Do NOT generate multiple paragraphs or unnecessarily long conclusions.\n\n"
             f"Respond ONLY with valid JSON in this exact format (no markdown, no code blocks):\n"
             f"{{\n"
             f'  "title": "...",\n'
@@ -3976,6 +4057,9 @@ class RomService:
         finally:
             provider.unload_model()
             gc.collect()
+
+        intro = self._enforce_single_paragraph_5_to_7_sentences(intro)
+        conclusion = self._enforce_single_paragraph_5_to_7_sentences(conclusion)
 
         return {
             "title": title,
@@ -4422,6 +4506,244 @@ class RomService:
         except Exception as e:
             logger.warning(f"[RomService] _rewrite_complete_rom error: {e} - keeping all originals")
 
+
+    @staticmethod
+    def _parse_condensed_points(raw_resp: Any) -> List[str]:
+        """
+        Robustly extract a list of condensed points from LLM output.
+        Handles:
+        - Thinking tags (<think>...</think>)
+        - Markdown code fences (```json ... ```)
+        - JSON array of strings: ["point 1", "point 2"]
+        - JSON array of objects: [{"text": "point 1"}, ...]
+        - Trailing commas in JSON
+        - Bullet points or numbered lists (1. ..., - ...)
+        """
+        import re
+        import json as _json
+
+        if not raw_resp:
+            return []
+
+        text = str(raw_resp).strip()
+
+        # 1. Strip <think>...</think> tags completely
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        if "<think>" in text:
+            if "</think>" in text:
+                text = text.split("</think>")[-1].strip()
+            else:
+                text = text.split("<think>")[0].strip()
+
+        # 2. Check for fenced code blocks
+        fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        candidates = fence_matches if fence_matches else [text]
+
+        # Try parsing JSON from candidates or whole text
+        for cand in candidates:
+            cand_str = cand.strip()
+            # Find outermost [ ... ]
+            start = cand_str.find("[")
+            end = cand_str.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                json_substr = cand_str[start:end + 1]
+                try:
+                    data = _json.loads(json_substr)
+                    if isinstance(data, list):
+                        pts = []
+                        for item in data:
+                            if isinstance(item, dict):
+                                t = (
+                                    item.get("text")
+                                    or item.get("polished_text")
+                                    or item.get("point")
+                                    or item.get("discussion")
+                                    or str(item)
+                                )
+                                if t and str(t).strip():
+                                    pts.append(str(t).strip())
+                            elif item and str(item).strip():
+                                pts.append(str(item).strip())
+                        if pts:
+                            return pts
+                except Exception:
+                    # Try repairing trailing commas: [ "a", "b", ]
+                    try:
+                        fixed = re.sub(r",\s*([\]\}])", r"\1", json_substr)
+                        data = _json.loads(fixed)
+                        if isinstance(data, list):
+                            pts = [str(x).strip() for x in data if str(x).strip()]
+                            if pts:
+                                return pts
+                    except Exception:
+                        pass
+
+        # 3. Fallback: Parse line-by-line (numbered lists or bullet points)
+        bullet_pts = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("```") or line.startswith("#"):
+                continue
+            m = re.match(r"^(?:\d+[\.\)]|[-*•])\s*(.+)$", line)
+            if m:
+                item = m.group(1).strip()
+                if (item.startswith('"') and item.endswith('"')) or (item.startswith("'") and item.endswith("'")):
+                    item = item[1:-1].strip()
+                if item:
+                    bullet_pts.append(item)
+
+        return bullet_pts
+
+    # -- Public generate-version entry-point -----------------------------------
+
+    def generate_rom_version(
+        self,
+        final_rom: Dict,
+        version: str,
+        writing_rules: str = "",
+    ) -> Dict:
+        """
+        Generate a condensed Short or Medium version of the Final ROM.
+
+        Each agenda's discussion points are passed together (agenda-wise) to the LLM,
+        which returns a reduced set of meaningful, properly structured points.
+
+        version: 'short' or 'medium'
+        writing_rules: Optional writing rules extracted from a reference document.
+
+        Returns a deep-copy with the new points; original is NOT modified.
+        """
+        import copy
+        from services.prompt_service import get_prompt_sync
+
+        if not final_rom or not isinstance(final_rom, dict):
+            return final_rom
+
+        version = (version or "long").strip().lower()
+        if version == "long":
+            # Long: Keep existing Stage 2 points as default.
+            # If reference writing rules exist, apply them.
+            if writing_rules and writing_rules.strip():
+                return self.rewrite_final_rom(
+                    final_rom=final_rom,
+                    rewrite_instruction="Rewrite the ROM in a formal, professional writing style.",
+                    mode="reference",
+                    writing_rules=writing_rules,
+                )
+            return copy.deepcopy(final_rom)
+
+        if version not in ("short", "medium"):
+            return copy.deepcopy(final_rom)
+
+        rewritten = copy.deepcopy(final_rom)
+        agendas = rewritten.get("agendas", [])
+        if not agendas:
+            return rewritten
+
+        prompt_key = "rom_version_short" if version == "short" else "rom_version_medium"
+        prompt_template = get_prompt_sync(prompt_key)
+
+        rules_section = self._build_rules_section(writing_rules)
+
+        from services.ai_provider import get_provider
+        provider = get_provider()
+        try:
+            for agenda in agendas:
+                if not isinstance(agenda, dict):
+                    continue
+                pts = agenda.get("discussion_points", [])
+                if not isinstance(pts, list) or not pts:
+                    continue
+
+                agenda_title = agenda.get("title", "General Discussion")
+
+                # Build structured input per point: Point ID, Speaker, Discussion, Action Owner
+                lines = []
+                for i, pt in enumerate(pts):
+                    pt_id = pt.get("id", f"P{i+1}")
+                    speaker = (
+                        pt.get("speaker") or
+                        (pt.get("speakers") or [None])[0] or
+                        "Unknown"
+                    )
+                    discussion = (pt.get("polished_text") or pt.get("text") or "").strip()
+                    action_owner = pt.get("action_owner") or "N/A"
+                    lines.append(
+                        f"[Point {i+1}] ID={pt_id} | Speaker={speaker} | "
+                        f"Action Owner={action_owner}\n{discussion}"
+                    )
+                points_json = "\n\n".join(lines)
+
+                prompt = prompt_template.format(
+                    agenda_title=agenda_title,
+                    points_json=points_json,
+                    rules_section=rules_section,
+                )
+
+                try:
+                    if hasattr(provider, "query"):
+                        raw = provider.query(prompt, max_tokens=4096, temperature=0.2)
+                    else:
+                        raw = provider._infer(prompt, max_new_tokens=4096)
+
+                    # Robustly parse points from LLM output (handles <think>, markdown fences, arrays, bullets)
+                    parsed_texts = self._parse_condensed_points(raw)
+                    if not parsed_texts:
+                        logger.warning(
+                            f"[RomService] generate_rom_version({version}): agenda='{agenda_title}' "
+                            f"LLM returned unparseable response, keeping originals. Raw: {str(raw)[:150]}"
+                        )
+                        continue
+
+                    new_pts = []
+                    for j, new_text in enumerate(parsed_texts):
+                        new_text = str(new_text).strip()
+                        if not new_text:
+                            continue
+                        src = pts[min(j, len(pts) - 1)]
+                        new_pt = {
+                            "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
+                            "text": new_text,
+                            "polished_text": new_text,
+                            "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
+                            "speakers": src.get("speakers") or [],
+                            "action_owner": src.get("action_owner"),
+                            "action_items": src.get("action_items") or [],
+                            "timeline_start": src.get("timeline_start", 0.0),
+                            "timeline_end": src.get("timeline_end", 0.0),
+                            "references": src.get("references") or [],
+                            "technical_terms": [],
+                            "dates": [],
+                            "numbers": [],
+                        }
+                        new_pts.append(new_pt)
+
+                    if new_pts:
+                        agenda["discussion_points"] = new_pts
+                        logger.info(
+                            f"[RomService] generate_rom_version({version}): agenda='{agenda_title}' "
+                            f"{len(pts)} pts -> {len(new_pts)} pts successfully generated"
+                        )
+                    else:
+                        logger.warning(
+                            f"[RomService] generate_rom_version({version}): agenda='{agenda_title}' "
+                            f"Empty points list, keeping originals"
+                        )
+
+                except Exception as e:
+                    logger.warning(
+                        f"[RomService] generate_rom_version({version}): agenda='{agenda_title}' "
+                        f"error={e} - keeping originals"
+                    )
+
+        finally:
+            provider.unload_model()
+            gc.collect()
+
+        return rewritten
+
     # -- Public rewrite entry-point --------------------------------------------
 
     def rewrite_final_rom(
@@ -4501,4 +4823,3 @@ def apply_speaker_mappings_to_final_rom(final_rom: Dict) -> Dict:
 
 
 rom_service = RomService()
-
