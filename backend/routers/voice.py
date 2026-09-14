@@ -1,21 +1,128 @@
 """Voice profile router — onboarding samples + add-voice + manage profiles."""
 import logging
 import uuid
+import shutil
 from datetime import datetime, timezone
 import os
+from pathlib import Path
 
-from typing import List, Optional
+import time
+from typing import List, Optional, Tuple, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
-from utils.storage import save_upload, delete_file
+from utils.storage import save_upload, delete_file, get_user_dir
 from utils.audio_utils import validate_audio, convert_to_wav
 from services.embedding import extract_embedding_from_file
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+
+def _get_audio_duration(file_path: str) -> float:
+    """Read audio file duration in seconds."""
+    try:
+        import soundfile as sf
+        info = sf.info(file_path)
+        return round(float(info.duration), 2)
+    except Exception:
+        pass
+    try:
+        import wave
+        with wave.open(file_path, "r") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate > 0:
+                return round(frames / float(rate), 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _save_profile_recordings(
+    user_id: str,
+    profile_id: str,
+    source_paths: list,
+    original_filenames: list = None,
+    source_type: str = "upload",
+) -> tuple[list[dict], list[str], list[list[float]], list[list[float]]]:
+    """
+    Copy voice sample WAV files to permanent profile audio storage,
+    create rich recording metadata objects, and extract BOTH ECAPA (192-d)
+    and ERes2Net-Large (512-d) embeddings.
+
+    Destination: {UPLOAD_DIR}/{user_id}/voice_profiles_audio/{profile_id}/
+    Returns: (recordings_list, audio_paths_list, ecapa_embeddings, eres2net_embeddings)
+    """
+    dest_dir = get_user_dir(user_id) / "voice_profiles_audio" / profile_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    recordings_list: list[dict] = []
+    audio_paths_list: list[str] = []
+    ecapa_embeddings: list[list[float]] = []
+    eres2net_embeddings: list[list[float]] = []
+
+    from services.embedding_router import extract_dual_embeddings
+
+    now_iso = dt_to_str(datetime.now(timezone.utc))
+
+    for i, src in enumerate(source_paths):
+        if not src or not os.path.exists(src):
+            continue
+        rec_id = str(uuid.uuid4())
+        ext = Path(src).suffix or ".wav"
+        dest_filename = f"rec_{int(time.time())}_{rec_id[:8]}{ext}"
+        dest = dest_dir / dest_filename
+
+        try:
+            shutil.copy2(src, str(dest))
+            dur = _get_audio_duration(str(dest))
+            orig_name = (
+                original_filenames[i]
+                if (original_filenames and i < len(original_filenames) and original_filenames[i])
+                else f"recording_{i+1}{ext}"
+            )
+
+            rec_obj = {
+                "id": rec_id,
+                "filename": orig_name,
+                "file_path": str(dest),
+                "duration": dur,
+                "created_at": now_iso,
+                "metadata": {
+                    "source": source_type,
+                },
+            }
+
+            # Extract dual embeddings (ECAPA 192-d + ERes2Net 512-d)
+            ecapa_emb, eres_emb = extract_dual_embeddings(str(dest))
+            if ecapa_emb is not None:
+                ecapa_embeddings.append(ecapa_emb)
+            if eres_emb is not None:
+                eres2net_embeddings.append(eres_emb)
+
+            recordings_list.append(rec_obj)
+            audio_paths_list.append(str(dest))
+        except Exception as e:
+            logger.warning(f"[Voice] Failed to process audio {src} -> {dest}: {e}")
+
+    # Immediately unload embedding models to free VRAM
+    try:
+        from services.embedding_router import unload_active_encoder
+        unload_active_encoder()
+    except Exception:
+        pass
+
+    return recordings_list, audio_paths_list, ecapa_embeddings, eres2net_embeddings
+
+
+def _save_profile_audio(user_id: str, profile_id: str, source_paths: list) -> list:
+    """Backwards-compatible wrapper returning only audio file paths."""
+    _, paths, _, _ = _save_profile_recordings(user_id, profile_id, source_paths)
+    return paths
 
 
 # ── Upload a single voice sample ─────────────────────────────
@@ -31,6 +138,9 @@ async def upload_voice_sample(
     Upload one voice sample. Returns the saved file path.
     Client calls this 1-3 times, then calls /finalize-setup or /add-profile.
     """
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="Audio file is required and cannot be empty.")
+
     user_id = current_user["id"]
     raw_path = await save_upload(file, user_id, prefix=f"vs_{sample_index}_")
 
@@ -85,32 +195,35 @@ async def finalize_setup(
     label = body.get("label", current_user.get("name", "Me"))
 
     if not file_paths:
-        raise HTTPException(status_code=400, detail="No voice sample files provided.")
-
-    embeddings = []
-    for fp in file_paths:
-        emb = extract_embedding_from_file(fp)
-        if emb is not None:
-            embeddings.append(emb.tolist())
-
-    if not embeddings:
-        raise HTTPException(status_code=422, detail="Could not extract embeddings from samples. Please re-record.")
+        raise HTTPException(status_code=400, detail="No voice sample files provided. You must provide an audio recording to create a voice profile.")
 
     now = datetime.now(timezone.utc)
     profile_id = str(uuid.uuid4())
 
+    # Save audio recordings permanently with metadata and dual embeddings
+    new_recs, new_paths, ecapa_embs, eres_embs = _save_profile_recordings(
+        user_id, profile_id, file_paths, source_type="onboarding"
+    )
+
+    if not ecapa_embs and not eres_embs:
+        raise HTTPException(status_code=422, detail="Could not extract voice embeddings from samples. Please re-record with clearer speech.")
+
     async with get_db_context() as db:
         await db.execute(
             text("""
-                INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
-                VALUES (:id, :user_id, :label, :embeddings, :sample_count, 1, :created_at, :updated_at)
+                INSERT INTO voice_profiles (id, user_id, label, embeddings, ecapa_embeddings, eres2net_embeddings, recordings, audio_paths, sample_count, is_self, created_at, updated_at)
+                VALUES (:id, :user_id, :label, :embeddings, :ecapa_embeddings, :eres2net_embeddings, :recordings, :audio_paths, :sample_count, 1, :created_at, :updated_at)
             """),
             {
                 "id": profile_id,
                 "user_id": user_id,
                 "label": label,
-                "embeddings": to_json(embeddings),
-                "sample_count": len(file_paths),
+                "embeddings": to_json(ecapa_embs),
+                "ecapa_embeddings": to_json(ecapa_embs),
+                "eres2net_embeddings": to_json(eres_embs) if eres_embs else None,
+                "recordings": to_json(new_recs),
+                "audio_paths": to_json(new_paths),
+                "sample_count": len(new_recs),
                 "created_at": dt_to_str(now),
                 "updated_at": dt_to_str(now),
             },
@@ -125,7 +238,9 @@ async def finalize_setup(
     return {
         "profile_id": profile_id,
         "label": label,
-        "embedding_count": len(embeddings),
+        "embedding_count": len(ecapa_embs),
+        "has_ecapa": len(ecapa_embs) > 0,
+        "has_eres2net": len(eres_embs) > 0,
         "message": "Voice profile created. Setup complete!",
     }
 
@@ -147,7 +262,6 @@ async def skip_setup(current_user: dict = Depends(get_current_user)):
     return {"message": "Voice profile setup skipped."}
 
 
-
 # ── Add an extra voice profile ────────────────────────────────
 @router.post("/add-profile")
 async def add_voice_profile(
@@ -162,42 +276,98 @@ async def add_voice_profile(
     if not label:
         raise HTTPException(status_code=400, detail="Label is required.")
     if not file_paths:
-        raise HTTPException(status_code=400, detail="No file paths provided.")
+        raise HTTPException(status_code=400, detail="No audio files provided. You must provide an audio recording to create a voice profile.")
 
-    embeddings = []
-    for fp in file_paths:
-        emb = extract_embedding_from_file(fp)
-        if emb is not None:
-            embeddings.append(emb.tolist())
+    # Check if a profile with this label already exists for the user
+    async with get_db_context() as db:
+        r = await db.execute(
+            text("SELECT id, recordings, audio_paths, ecapa_embeddings, eres2net_embeddings, embeddings FROM voice_profiles WHERE user_id = :uid AND LOWER(TRIM(label)) = LOWER(TRIM(:label)) LIMIT 1"),
+            {"uid": user_id, "label": label},
+        )
+        existing = r.mappings().fetchone()
 
-    if not embeddings:
-        raise HTTPException(status_code=422, detail="Could not extract embeddings. Please re-record with clearer audio.")
-
+    target_pid = existing["id"] if existing else str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    profile_id = str(uuid.uuid4())
+
+    # Save audio files to permanent storage for future embedding generation and playback
+    new_recs, new_paths, ecapa_embs, eres_embs = _save_profile_recordings(
+        user_id, target_pid, file_paths, source_type="add_profile"
+    )
+
+    if not ecapa_embs and not eres_embs:
+        raise HTTPException(status_code=422, detail="Could not extract voice embeddings from the audio. Please provide clearer speech.")
 
     async with get_db_context() as db:
-        await db.execute(
-            text("""
-                INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
-                VALUES (:id, :user_id, :label, :embeddings, :sample_count, 0, :created_at, :updated_at)
-            """),
-            {
-                "id": profile_id,
-                "user_id": user_id,
-                "label": label,
-                "embeddings": to_json(embeddings),
-                "sample_count": len(file_paths),
-                "created_at": dt_to_str(now),
-                "updated_at": dt_to_str(now),
-            },
-        )
+        if existing:
+            existing_recs = from_json(existing.get("recordings", "[]"), [])
+            existing_paths = from_json(existing.get("audio_paths", "[]"), [])
+            existing_ecapa = from_json(existing.get("ecapa_embeddings") or existing.get("embeddings", "[]"), [])
+            existing_eres = from_json(existing.get("eres2net_embeddings", "[]"), [])
+
+            merged_recs = existing_recs + new_recs
+            merged_paths = existing_paths + new_paths
+            merged_ecapa = [e for e in existing_ecapa if len(e) == 192] + ecapa_embs
+            merged_eres = [e for e in existing_eres if len(e) == 512] + eres_embs
+
+            await db.execute(
+                text("""
+                    UPDATE voice_profiles
+                    SET recordings = :recordings,
+                        audio_paths = :audio_paths,
+                        ecapa_embeddings = :ecapa_embeddings,
+                        eres2net_embeddings = :eres2net_embeddings,
+                        embeddings = :embeddings,
+                        sample_count = :count,
+                        updated_at = :updated_at
+                    WHERE id = :id AND user_id = :uid
+                """),
+                {
+                    "recordings": to_json(merged_recs),
+                    "audio_paths": to_json(merged_paths),
+                    "ecapa_embeddings": to_json(merged_ecapa),
+                    "eres2net_embeddings": to_json(merged_eres) if merged_eres else None,
+                    "embeddings": to_json(merged_ecapa),
+                    "count": len(merged_recs),
+                    "updated_at": dt_to_str(now),
+                    "id": target_pid,
+                    "uid": user_id,
+                },
+            )
+            profile_id = target_pid
+            total_embeddings = len(merged_ecapa)
+            total_sample_count = len(merged_recs)
+        else:
+            profile_id = target_pid
+            total_embeddings = len(ecapa_embs)
+            total_sample_count = len(new_recs)
+            await db.execute(
+                text("""
+                    INSERT INTO voice_profiles (id, user_id, label, embeddings, ecapa_embeddings, eres2net_embeddings, recordings, audio_paths, sample_count, is_self, created_at, updated_at)
+                    VALUES (:id, :user_id, :label, :embeddings, :ecapa_embeddings, :eres2net_embeddings, :recordings, :audio_paths, :sample_count, 0, :created_at, :updated_at)
+                """),
+                {
+                    "id": profile_id,
+                    "user_id": user_id,
+                    "label": label,
+                    "embeddings": to_json(ecapa_embs),
+                    "ecapa_embeddings": to_json(ecapa_embs),
+                    "eres2net_embeddings": to_json(eres_embs) if eres_embs else None,
+                    "recordings": to_json(new_recs),
+                    "audio_paths": to_json(new_paths),
+                    "sample_count": total_sample_count,
+                    "created_at": dt_to_str(now),
+                    "updated_at": dt_to_str(now),
+                },
+            )
         await db.commit()
 
     return {
         "profile_id": profile_id,
         "label": label,
-        "embedding_count": len(embeddings),
+        "embedding_count": total_embeddings,
+        "has_ecapa": len(ecapa_embs) > 0,
+        "has_eres2net": len(eres_embs) > 0,
+        "sample_count": total_sample_count,
     }
 
 
@@ -286,13 +456,22 @@ async def bulk_folder_import_voices(
         now = datetime.now(timezone.utc)
 
         for speaker_label, sample_paths in speaker_samples.items():
-            embeddings = []
-            for sample_path in sample_paths:
-                emb = extract_embedding_from_file(sample_path)
-                if emb is not None:
-                    embeddings.append(emb.tolist())
+            # Check if profile already exists for this speaker
+            async with get_db_context() as db:
+                r = await db.execute(
+                    text("SELECT id, embeddings, ecapa_embeddings, eres2net_embeddings, recordings, audio_paths FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
+                    {"uid": user_id, "label": speaker_label},
+                )
+                existing = r.mappings().fetchone()
 
-            if not embeddings:
+            target_pid = existing["id"] if existing else str(uuid.uuid4())
+
+            # Save recordings permanently and extract dual embeddings
+            new_recs, new_paths, new_ecapa, new_eres = _save_profile_recordings(
+                user_id, target_pid, sample_paths, source_type="bulk_import"
+            )
+
+            if not new_ecapa and not new_eres:
                 speaker_results.append({
                     "speaker": speaker_label,
                     "status": "failed",
@@ -301,35 +480,39 @@ async def bulk_folder_import_voices(
                 })
                 continue
 
-            # Save or update profile in DB
             async with get_db_context() as db:
-                r = await db.execute(
-                    text("SELECT id, embeddings FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
-                    {"uid": user_id, "label": speaker_label},
-                )
-                existing = r.mappings().fetchone()
-
                 if existing:
-                    profile_id = existing["id"]
-                    existing_embs = from_json(existing["embeddings"], [])
-                    if existing_embs and embeddings:
-                        new_dim = len(embeddings[0])
-                        compatible = [e for e in existing_embs if len(e) == new_dim]
-                        merged = compatible + embeddings
-                    else:
-                        merged = existing_embs + embeddings
+                    existing_recs = from_json(existing.get("recordings", "[]"), [])
+                    existing_paths = from_json(existing.get("audio_paths", "[]"), [])
+                    existing_ecapa = from_json(existing.get("ecapa_embeddings") or existing.get("embeddings", "[]"), [])
+                    existing_eres = from_json(existing.get("eres2net_embeddings", "[]"), [])
+
+                    merged_recs = existing_recs + new_recs
+                    merged_paths = existing_paths + new_paths
+                    merged_ecapa = [e for e in existing_ecapa if len(e) == 192] + new_ecapa
+                    merged_eres = [e for e in existing_eres if len(e) == 512] + new_eres
 
                     await db.execute(
                         text("""
                             UPDATE voice_profiles
-                            SET embeddings = :embeddings, sample_count = :count, updated_at = :updated_at
+                            SET recordings = :recordings,
+                                audio_paths = :audio_paths,
+                                ecapa_embeddings = :ecapa_embeddings,
+                                eres2net_embeddings = :eres2net_embeddings,
+                                embeddings = :embeddings,
+                                sample_count = :count,
+                                updated_at = :updated_at
                             WHERE id = :id AND user_id = :uid
                         """),
                         {
-                            "embeddings": to_json(merged),
-                            "count": len(merged),
+                            "recordings": to_json(merged_recs),
+                            "audio_paths": to_json(merged_paths),
+                            "ecapa_embeddings": to_json(merged_ecapa),
+                            "eres2net_embeddings": to_json(merged_eres) if merged_eres else None,
+                            "embeddings": to_json(merged_ecapa),
+                            "count": len(merged_recs),
                             "updated_at": dt_to_str(now),
-                            "id": profile_id,
+                            "id": target_pid,
                             "uid": user_id,
                         },
                     )
@@ -337,23 +520,26 @@ async def bulk_folder_import_voices(
                     speaker_results.append({
                         "speaker": speaker_label,
                         "status": "success",
-                        "profile_id": profile_id,
-                        "samples_trained": len(embeddings),
+                        "profile_id": target_pid,
+                        "samples_trained": len(new_recs),
                         "action": "updated",
                     })
                 else:
-                    profile_id = str(uuid.uuid4())
                     await db.execute(
                         text("""
-                            INSERT INTO voice_profiles (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
-                            VALUES (:id, :user_id, :label, :embeddings, :count, 0, :created_at, :updated_at)
+                            INSERT INTO voice_profiles (id, user_id, label, embeddings, ecapa_embeddings, eres2net_embeddings, recordings, audio_paths, sample_count, is_self, created_at, updated_at)
+                            VALUES (:id, :user_id, :label, :embeddings, :ecapa_embeddings, :eres2net_embeddings, :recordings, :audio_paths, :count, 0, :created_at, :updated_at)
                         """),
                         {
-                            "id": profile_id,
+                            "id": target_pid,
                             "user_id": user_id,
                             "label": speaker_label,
-                            "embeddings": to_json(embeddings),
-                            "count": len(embeddings),
+                            "embeddings": to_json(new_ecapa),
+                            "ecapa_embeddings": to_json(new_ecapa),
+                            "eres2net_embeddings": to_json(new_eres) if new_eres else None,
+                            "recordings": to_json(new_recs),
+                            "audio_paths": to_json(new_paths),
+                            "count": len(new_recs),
                             "created_at": dt_to_str(now),
                             "updated_at": dt_to_str(now),
                         },
@@ -362,8 +548,8 @@ async def bulk_folder_import_voices(
                     speaker_results.append({
                         "speaker": speaker_label,
                         "status": "success",
-                        "profile_id": profile_id,
-                        "samples_trained": len(embeddings),
+                        "profile_id": target_pid,
+                        "samples_trained": len(new_recs),
                         "action": "created",
                     })
 
@@ -394,17 +580,315 @@ async def list_profiles(current_user: dict = Depends(get_current_user)):
         )
         profiles = r.mappings().fetchall()
 
-    return [
-        {
+    result = []
+    for p in profiles:
+        # 1. Parse recordings
+        raw_recs = p.get("recordings")
+        recs = from_json(raw_recs, []) if isinstance(raw_recs, str) else (raw_recs or [])
+        if not recs:
+            # Check legacy audio_paths
+            raw_paths = p.get("audio_paths")
+            paths = from_json(raw_paths, []) if isinstance(raw_paths, str) else (raw_paths or [])
+            recs = [
+                {
+                    "id": f"rec_{i}",
+                    "filename": Path(fp).name,
+                    "file_path": fp,
+                    "duration": _get_audio_duration(fp) if os.path.exists(fp) else 0.0,
+                    "created_at": p["created_at"],
+                }
+                for i, fp in enumerate(paths)
+                if fp and os.path.exists(fp)
+            ]
+
+        # Valid recordings on disk
+        valid_recs = [r for r in recs if r.get("file_path") and os.path.exists(r["file_path"])]
+        has_audio = len(valid_recs) > 0
+
+        # Check embeddings
+        ecapa_raw = p.get("ecapa_embeddings")
+        if ecapa_raw is None or ecapa_raw == "null":
+            ecapa_raw = p.get("embeddings")
+        ecapa_list = from_json(ecapa_raw, []) if isinstance(ecapa_raw, str) else (ecapa_raw or [])
+        has_ecapa = any(hasattr(e, "__len__") and len(e) == 192 for e in ecapa_list)
+
+        eres_raw = p.get("eres2net_embeddings")
+        eres_list = from_json(eres_raw, []) if isinstance(eres_raw, str) else (eres_raw or [])
+        has_eres2net = any(hasattr(e, "__len__") and len(e) == 512 for e in eres_list)
+
+        result.append({
             "id": p["id"],
             "label": p["label"],
-            "sample_count": p.get("sample_count", 0),
+            "sample_count": len(valid_recs) if valid_recs else p.get("sample_count", 0),
             "is_self": bool(p.get("is_self", False)),
             "created_at": p["created_at"],
             "updated_at": p["updated_at"],
-        }
-        for p in profiles
-    ]
+            "has_ecapa": has_ecapa,
+            "has_eres2net": has_eres2net,
+            "has_audio": has_audio,
+            "recordings": [
+                {
+                    "id": r["id"],
+                    "filename": r.get("filename") or Path(r.get("file_path", "audio.wav")).name,
+                    "duration": r.get("duration", 0.0),
+                    "created_at": r.get("created_at", p["created_at"]),
+                }
+                for r in valid_recs
+            ],
+        })
+
+    return result
+
+
+# ── Serve profile recording audio for playback ────────────────────────
+@router.get("/profiles/{profile_id}/recordings/{recording_id}/audio")
+async def get_profile_recording_audio(
+    profile_id: str,
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream a saved voice recording audio file for in-browser playback."""
+    user_id = current_user["id"]
+    async with get_db_context() as db:
+        r = await db.execute(
+            text("SELECT recordings, audio_paths FROM voice_profiles WHERE id = :id AND user_id = :uid"),
+            {"id": profile_id, "uid": user_id},
+        )
+        row = r.mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    raw_recs = row.get("recordings")
+    recs = from_json(raw_recs, []) if isinstance(raw_recs, str) else (raw_recs or [])
+    target_path = None
+
+    for r in recs:
+        if str(r.get("id")) == str(recording_id):
+            target_path = r.get("file_path")
+            break
+
+    if not target_path:
+        raw_paths = row.get("audio_paths")
+        paths = from_json(raw_paths, []) if isinstance(raw_paths, str) else (raw_paths or [])
+        if recording_id.isdigit():
+            idx = int(recording_id)
+            if 0 <= idx < len(paths):
+                target_path = paths[idx]
+        elif recording_id.startswith("rec_") and recording_id[4:].isdigit():
+            idx = int(recording_id[4:])
+            if 0 <= idx < len(paths):
+                target_path = paths[idx]
+
+    if not target_path or not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="Recording audio file not found on disk.")
+
+    return FileResponse(target_path, media_type="audio/wav", filename=Path(target_path).name)
+
+
+# ── Add a new recording to an existing profile (Add More / Train) ─────
+@router.post("/profiles/{profile_id}/recordings")
+async def add_recording_to_profile(
+    profile_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db),
+):
+    """
+    Upload and attach an additional voice recording to an existing profile.
+    Generates BOTH ECAPA and ERes2Net-Large embeddings, and stores the audio file permanently.
+    """
+    user_id = current_user["id"]
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="Audio file is required and cannot be empty.")
+
+    r = await db.execute(
+        text("SELECT * FROM voice_profiles WHERE id = :id AND user_id = :uid"),
+        {"id": profile_id, "uid": user_id},
+    )
+    prof = r.mappings().fetchone()
+    if not prof:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    # Save uploaded file to temp and convert to 16 kHz WAV
+    raw_path = await save_upload(file, user_id, prefix="add_rec_")
+    wav_path = raw_path.rsplit(".", 1)[0] + "_16k.wav"
+    try:
+        convert_to_wav(raw_path, wav_path)
+    except Exception as e:
+        delete_file(raw_path)
+        raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
+    delete_file(raw_path)
+
+    # Validate audio quality
+    valid, reason = validate_audio(wav_path)
+    if not valid:
+        delete_file(wav_path)
+        raise HTTPException(status_code=422, detail=reason)
+
+    # Process and save permanently with dual embeddings
+    new_recs, new_paths, new_ecapa, new_eres = _save_profile_recordings(
+        user_id, profile_id, [wav_path], [file.filename], source_type="add_recording"
+    )
+    delete_file(wav_path)
+
+    if not new_recs:
+        raise HTTPException(status_code=422, detail="Failed to save voice recording.")
+
+    # Merge into existing profile
+    existing_recs = from_json(prof.get("recordings", "[]"), [])
+    existing_paths = from_json(prof.get("audio_paths", "[]"), [])
+    existing_ecapa = from_json(prof.get("ecapa_embeddings") or prof.get("embeddings", "[]"), [])
+    existing_eres = from_json(prof.get("eres2net_embeddings", "[]"), [])
+
+    merged_recs = existing_recs + new_recs
+    merged_paths = existing_paths + new_paths
+    merged_ecapa = [e for e in existing_ecapa if len(e) == 192] + new_ecapa
+    merged_eres = [e for e in existing_eres if len(e) == 512] + new_eres
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("""
+            UPDATE voice_profiles
+            SET recordings = :recordings,
+                audio_paths = :audio_paths,
+                ecapa_embeddings = :ecapa_embeddings,
+                eres2net_embeddings = :eres2net_embeddings,
+                embeddings = :embeddings,
+                sample_count = :count,
+                updated_at = :updated_at
+            WHERE id = :id AND user_id = :uid
+        """),
+        {
+            "recordings": to_json(merged_recs),
+            "audio_paths": to_json(merged_paths),
+            "ecapa_embeddings": to_json(merged_ecapa),
+            "eres2net_embeddings": to_json(merged_eres) if merged_eres else None,
+            "embeddings": to_json(merged_ecapa),
+            "count": len(merged_recs),
+            "updated_at": dt_to_str(now),
+            "id": profile_id,
+            "uid": user_id,
+        },
+    )
+    await db.commit()
+
+    return {
+        "message": "Recording added successfully.",
+        "recording": new_recs[0],
+        "has_ecapa": len(merged_ecapa) > 0,
+        "has_eres2net": len(merged_eres) > 0,
+        "sample_count": len(merged_recs),
+    }
+
+
+# ── Remove a specific recording from a profile ────────────────────────
+@router.delete("/profiles/{profile_id}/recordings/{recording_id}")
+async def remove_profile_recording(
+    profile_id: str,
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db = Depends(get_db),
+):
+    """
+    Remove a specific voice recording from a profile.
+    Deletes the audio file and recomputes embeddings.
+    """
+    user_id = current_user["id"]
+    r = await db.execute(
+        text("SELECT * FROM voice_profiles WHERE id = :id AND user_id = :uid"),
+        {"id": profile_id, "uid": user_id},
+    )
+    prof = r.mappings().fetchone()
+    if not prof:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    existing_recs = from_json(prof.get("recordings", "[]"), [])
+    existing_paths = from_json(prof.get("audio_paths", "[]"), [])
+
+    # Find target recording
+    target_idx = None
+    target_file = None
+
+    for i, rec in enumerate(existing_recs):
+        if str(rec.get("id")) == str(recording_id):
+            target_idx = i
+            target_file = rec.get("file_path")
+            break
+
+    if target_idx is None and recording_id.isdigit():
+        idx = int(recording_id)
+        if 0 <= idx < len(existing_recs):
+            target_idx = idx
+            target_file = existing_recs[idx].get("file_path")
+        elif 0 <= idx < len(existing_paths):
+            target_file = existing_paths[idx]
+
+    if target_file and os.path.exists(target_file):
+        try:
+            os.remove(target_file)
+        except Exception as e:
+            logger.warning(f"[Voice] Could not delete file {target_file}: {e}")
+
+    # Remove from recordings and audio_paths
+    if target_idx is not None and target_idx < len(existing_recs):
+        existing_recs.pop(target_idx)
+    if target_file and target_file in existing_paths:
+        existing_paths.remove(target_file)
+
+    # Recompute dual embeddings for remaining valid recordings
+    from services.embedding_router import extract_dual_embeddings
+    recomputed_ecapa = []
+    recomputed_eres = []
+    for rec in existing_recs:
+        fp = rec.get("file_path")
+        if fp and os.path.exists(fp):
+            ec, er = extract_dual_embeddings(fp)
+            if ec is not None:
+                recomputed_ecapa.append(ec)
+            if er is not None:
+                recomputed_eres.append(er)
+
+    try:
+        from services.embedding_router import unload_active_encoder
+        unload_active_encoder()
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("""
+            UPDATE voice_profiles
+            SET recordings = :recordings,
+                audio_paths = :audio_paths,
+                ecapa_embeddings = :ecapa_embeddings,
+                eres2net_embeddings = :eres2net_embeddings,
+                embeddings = :embeddings,
+                sample_count = :count,
+                updated_at = :updated_at
+            WHERE id = :id AND user_id = :uid
+        """),
+        {
+            "recordings": to_json(existing_recs),
+            "audio_paths": to_json(existing_paths),
+            "ecapa_embeddings": to_json(recomputed_ecapa),
+            "eres2net_embeddings": to_json(recomputed_eres) if recomputed_eres else None,
+            "embeddings": to_json(recomputed_ecapa),
+            "count": len(existing_recs),
+            "updated_at": dt_to_str(now),
+            "id": profile_id,
+            "uid": user_id,
+        },
+    )
+    await db.commit()
+
+    return {
+        "message": "Recording removed.",
+        "sample_count": len(existing_recs),
+        "has_ecapa": len(recomputed_ecapa) > 0,
+        "has_eres2net": len(recomputed_eres) > 0,
+        "has_audio": len(existing_recs) > 0,
+    }
 
 
 # ── Rename profile ────────────────────────────────────────────
@@ -496,7 +980,7 @@ async def check_label(
     user_id = current_user["id"]
     async with get_db_context() as db:
         r = await db.execute(
-            text("SELECT id FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
+            text("SELECT id FROM voice_profiles WHERE user_id = :uid AND LOWER(TRIM(label)) = LOWER(TRIM(:label)) LIMIT 1"),
             {"uid": user_id, "label": label.strip()},
         )
         row = r.mappings().fetchone()
@@ -669,28 +1153,38 @@ async def train_from_transcript(
     if not sample_paths:
         raise HTTPException(status_code=422, detail="At least one sample_path is required.")
 
-    # Check uniqueness of new_label (skip if it belongs to the profile being updated)
+    # Check uniqueness of new_label (or find existing profile to append to)
     async with get_db_context() as db:
         r = await db.execute(
-            text("SELECT id FROM voice_profiles WHERE user_id = :uid AND label = :label LIMIT 1"),
+            text("SELECT id FROM voice_profiles WHERE user_id = :uid AND LOWER(TRIM(label)) = LOWER(TRIM(:label)) LIMIT 1"),
             {"uid": user_id, "label": new_label},
         )
         dup = r.mappings().fetchone()
-    if dup and str(dup["id"]) != str(existing_profile_id or ""):
-        raise HTTPException(status_code=409, detail=f"The name '{new_label}' is already used by another profile.")
 
-    # Extract embeddings from each valid sample
-    from services.embedding import extract_embedding_from_file
-    embeddings = []
-    for fp in sample_paths:
-        if not os.path.exists(fp):
-            logger.warning(f"[TrainFromTranscript] Sample file not found, skipping: {fp}")
-            continue
-        emb = extract_embedding_from_file(fp)
-        if emb is not None:
-            embeddings.append(emb.tolist())
+    if dup:
+        if not existing_profile_id:
+            # If no profile_id was explicitly provided, automatically append as an additional sample to the existing profile!
+            existing_profile_id = str(dup["id"])
+            logger.info(f"[TrainFromTranscript] Name '{new_label}' matches existing profile {existing_profile_id} — treating as additional sample.")
+        elif str(dup["id"]) != str(existing_profile_id):
+            # Only conflict if renaming an existing profile into a DIFFERENT existing profile's name
+            raise HTTPException(status_code=409, detail=f"The name '{new_label}' is already used by another profile.")
 
-    if not embeddings:
+    target_profile_id = existing_profile_id or str(uuid.uuid4())
+
+    # Permanently save audio recordings and generate BOTH ECAPA and ERes2Net embeddings
+    new_recs, new_paths, ecapa_embs, eres_embs = _save_profile_recordings(
+        user_id, target_profile_id, sample_paths, source_type="train_from_transcript"
+    )
+
+    if not ecapa_embs and not eres_embs:
+        # Clean up copied files since profile was not created
+        for p in new_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
         raise HTTPException(
             status_code=422,
             detail="Could not extract voice embeddings from the samples. "
@@ -699,92 +1193,131 @@ async def train_from_transcript(
 
     now = datetime.now(timezone.utc)
 
-    async with get_db_context() as db:
-        if existing_profile_id:
-            # Update existing profile: merge embeddings, update label
-            r = await db.execute(
-                text("SELECT embeddings FROM voice_profiles WHERE id = :id AND user_id = :uid"),
-                {"id": existing_profile_id, "uid": user_id},
-            )
-            prof = r.mappings().fetchone()
-            if prof:
-                existing_embs = from_json(prof["embeddings"], [])
-                # Filter out stale embeddings with a different dimension (e.g. old 256-d
-                # Resemblyzer vectors) — mixing dimensions breaks cosine similarity.
-                if existing_embs and embeddings:
-                    new_dim = len(embeddings[0])
-                    compatible = [e for e in existing_embs if len(e) == new_dim]
-                    if len(compatible) < len(existing_embs):
-                        logger.warning(
-                            f"[TrainFromTranscript] Filtered out "
-                            f"{len(existing_embs) - len(compatible)} stale embeddings "
-                            f"with wrong dimension from profile {existing_profile_id}. "
-                            f"Expected {new_dim}-d, keeping only matching ones."
-                        )
-                    merged = compatible + embeddings
+    try:
+        async with get_db_context() as db:
+            if existing_profile_id:
+                # Update existing profile: merge recordings and both embedding models
+                r = await db.execute(
+                    text("SELECT recordings, audio_paths, embeddings, ecapa_embeddings, eres2net_embeddings FROM voice_profiles WHERE id = :id AND user_id = :uid"),
+                    {"id": existing_profile_id, "uid": user_id},
+                )
+                prof = r.mappings().fetchone()
+                if prof:
+                    existing_recs = from_json(prof.get("recordings", "[]"), [])
+                    existing_paths = from_json(prof.get("audio_paths", "[]"), [])
+                    existing_ecapa = from_json(prof.get("ecapa_embeddings") or prof.get("embeddings", "[]"), [])
+                    existing_eres = from_json(prof.get("eres2net_embeddings", "[]"), [])
+
+                    merged_recs = existing_recs + new_recs
+                    merged_paths = existing_paths + new_paths
+                    merged_ecapa = [e for e in existing_ecapa if len(e) == 192] + ecapa_embs
+                    merged_eres = [e for e in existing_eres if len(e) == 512] + eres_embs
+
+                    await db.execute(
+                        text("""
+                            UPDATE voice_profiles
+                            SET label = :label,
+                                recordings = :recordings,
+                                audio_paths = :audio_paths,
+                                ecapa_embeddings = :ecapa_embeddings,
+                                eres2net_embeddings = :eres2net_embeddings,
+                                embeddings = :embeddings,
+                                sample_count = :count,
+                                updated_at = :updated_at
+                            WHERE id = :id AND user_id = :uid
+                        """),
+                        {
+                            "label": new_label,
+                            "recordings": to_json(merged_recs),
+                            "audio_paths": to_json(merged_paths),
+                            "ecapa_embeddings": to_json(merged_ecapa),
+                            "eres2net_embeddings": to_json(merged_eres) if merged_eres else None,
+                            "embeddings": to_json(merged_ecapa),
+                            "count": len(merged_recs),
+                            "updated_at": dt_to_str(now),
+                            "id": existing_profile_id,
+                            "uid": user_id,
+                        },
+                    )
+                    profile_id = existing_profile_id
+                    total_embeddings = len(merged_ecapa)
+                    total_sample_count = len(merged_recs)
+                    has_ecapa = len(merged_ecapa) > 0
+                    has_eres2net = len(merged_eres) > 0
+                    logger.info(f"[TrainFromTranscript] Updated profile {profile_id} with {len(new_recs)} new recordings")
                 else:
-                    merged = existing_embs + embeddings
+                    raise HTTPException(status_code=404, detail="Existing profile not found.")
+            else:
+                # Create new profile with recordings and dual embeddings
+                profile_id = target_profile_id
+                total_embeddings = len(ecapa_embs)
+                total_sample_count = len(new_recs)
+                has_ecapa = len(ecapa_embs) > 0
+                has_eres2net = len(eres_embs) > 0
+
                 await db.execute(
                     text("""
-                        UPDATE voice_profiles
-                        SET label = :label, embeddings = :embeddings,
-                            sample_count = :count, updated_at = :updated_at
-                        WHERE id = :id AND user_id = :uid
+                        INSERT INTO voice_profiles
+                            (id, user_id, label, embeddings, ecapa_embeddings, eres2net_embeddings, recordings, audio_paths, sample_count, is_self, created_at, updated_at)
+                        VALUES
+                            (:id, :user_id, :label, :embeddings, :ecapa_embeddings, :eres2net_embeddings, :recordings, :audio_paths, :count, 0, :created_at, :updated_at)
                     """),
                     {
+                        "id": profile_id,
+                        "user_id": user_id,
                         "label": new_label,
-                        "embeddings": to_json(merged),
-                        "count": len(merged),
+                        "embeddings": to_json(ecapa_embs),
+                        "ecapa_embeddings": to_json(ecapa_embs),
+                        "eres2net_embeddings": to_json(eres_embs) if eres_embs else None,
+                        "recordings": to_json(new_recs),
+                        "audio_paths": to_json(new_paths),
+                        "count": len(new_recs),
+                        "created_at": dt_to_str(now),
                         "updated_at": dt_to_str(now),
-                        "id": existing_profile_id,
-                        "uid": user_id,
                     },
                 )
-                profile_id = existing_profile_id
-                logger.info(f"[TrainFromTranscript] Updated profile {profile_id} with {len(embeddings)} new embeddings")
-            else:
-                raise HTTPException(status_code=404, detail="Existing profile not found.")
-        else:
-            # Create new profile
-            profile_id = str(uuid.uuid4())
-            await db.execute(
-                text("""
-                    INSERT INTO voice_profiles
-                        (id, user_id, label, embeddings, sample_count, is_self, created_at, updated_at)
-                    VALUES
-                        (:id, :user_id, :label, :embeddings, :count, 0, :created_at, :updated_at)
-                """),
-                {
-                    "id": profile_id,
-                    "user_id": user_id,
-                    "label": new_label,
-                    "embeddings": to_json(embeddings),
-                    "count": len(embeddings),
-                    "created_at": dt_to_str(now),
-                    "updated_at": dt_to_str(now),
-                },
-            )
-            logger.info(f"[TrainFromTranscript] Created new profile {profile_id} for label '{new_label}'")
+                logger.info(f"[TrainFromTranscript] Created new profile {profile_id} for label '{new_label}'")
 
-        # Relabel matching segments and synchronize speaker mappings everywhere
-        from services.speaker_sync import sync_global_speaker_rename
-        updated_rec = await sync_global_speaker_rename(db, recording_id, user_id, {speaker_label: new_label})
-        updated_count = len(updated_rec.get("transcript", [])) if updated_rec else 0
+            # Relabel matching segments and synchronize speaker mappings everywhere
+            from services.speaker_sync import sync_global_speaker_rename
+            updated_rec = await sync_global_speaker_rename(db, recording_id, user_id, {speaker_label: new_label})
+            updated_count = len(updated_rec.get("transcript", [])) if updated_rec else 0
 
-        await db.commit()
+            await db.commit()
+    except HTTPException:
+        # Re-raise explicit HTTP exceptions (e.g. 404, 422) after cleaning up newly copied recordings
+        for p in new_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        # If DB or rename fails, clean up newly copied permanent recordings to prevent orphans
+        for p in new_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        logger.error(f"[TrainFromTranscript] Failed to train voice profile: {e}", exc_info=True)
+        # Do NOT delete source recordings on failure!
+        raise HTTPException(status_code=500, detail=f"Failed to complete voice training: {e}")
 
-    # Auto-delete sample files
+    # Only delete temporary sample files AFTER permanent recording storage and profile/embedding updates succeed
     for fp in sample_paths:
         try:
             if fp and os.path.exists(fp):
                 os.remove(fp)
-                logger.info(f"[TrainFromTranscript] Deleted sample: {fp}")
+                logger.info(f"[TrainFromTranscript] Deleted temporary sample: {fp}")
         except Exception as e:
-            logger.warning(f"[TrainFromTranscript] Could not delete sample {fp}: {e}")
+            logger.warning(f"[TrainFromTranscript] Could not delete temporary sample {fp}: {e}")
 
     logger.info(
         f"[TrainFromTranscript] Done — profile={profile_id}, label='{new_label}', "
-        f"segments_updated={updated_count}, embeddings={len(embeddings)}"
+        f"segments_updated={updated_count}, ecapa_embeddings={len(ecapa_embs)}, "
+        f"eres2net_embeddings={len(eres_embs)}"
     )
 
     # speaker_sync already updated the transcript, speakers_detected, speaker
@@ -795,7 +1328,10 @@ async def train_from_transcript(
         "profile_id": profile_id,
         "new_label": new_label,
         "updated_segment_count": updated_count,
-        "embedding_count": len(embeddings),
+        "embedding_count": total_embeddings,
+        "has_ecapa": has_ecapa,
+        "has_eres2net": has_eres2net,
+        "sample_count": total_sample_count,
     }
 
 

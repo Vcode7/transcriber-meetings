@@ -3,12 +3,19 @@ import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
   MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database, Volume2, Activity,
   Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check,
-  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info
+  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info, Play, Pause, Plus, PlusCircle
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
 import { useJobsStore } from '../store/jobs'
 import { useProcessingStore } from '../store/processing'
+
+interface ProfileRecording {
+  id: string
+  filename: string
+  duration: number
+  created_at: string
+}
 
 interface Profile {
   id: string
@@ -16,6 +23,11 @@ interface Profile {
   sample_count: number
   is_self: boolean
   created_at: string
+  updated_at?: string
+  has_ecapa?: boolean
+  has_eres2net?: boolean
+  has_audio?: boolean
+  recordings?: ProfileRecording[]
 }
 
 interface UserSettings {
@@ -36,6 +48,7 @@ interface UserSettings {
   rag_relative_score_cutoff?: number
   generate_mom_auto?: boolean
   embedding_model?: string
+  speaker_embedding_model?: string
 
   // Ollama settings
   ollama_num_ctx?: number
@@ -178,6 +191,17 @@ export default function SettingsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
   const [settingsSaved, setSettingsSaved] = useState(false)
+
+  // Voice Recording & Profile Management states
+  const [playingRecKey, setPlayingRecKey] = useState<string | null>(null)
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null)
+  const [uploadingRecProfileId, setUploadingRecProfileId] = useState<string | null>(null)
+  const [deletingRecId, setDeletingRecId] = useState<string | null>(null)
+  const [showAddProfileModal, setShowAddProfileModal] = useState(false)
+  const [newProfileLabel, setNewProfileLabel] = useState('')
+  const [newProfileFile, setNewProfileFile] = useState<File | null>(null)
+  const [addingProfile, setAddingProfile] = useState(false)
+  const [addProfileError, setAddProfileError] = useState<string | null>(null)
 
   // Jobs & Processing states
   const jobs = useJobsStore((s) => s.jobs)
@@ -326,6 +350,119 @@ export default function SettingsPage() {
     await api.delete(`/voice/profiles/${id}`)
     setProfiles((prev) => prev.filter((p) => p.id !== id))
     setDeletingId(null)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause()
+      }
+    }
+  }, [])
+
+  const handlePlayRecording = (profileId: string, recordingId: string) => {
+    const key = `${profileId}_${recordingId}`
+    if (playingRecKey === key) {
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause()
+      }
+      setPlayingRecKey(null)
+      return
+    }
+
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause()
+    }
+
+    const audioUrl = `/voice/profiles/${profileId}/recordings/${recordingId}/audio`
+    const audio = new Audio(audioUrl)
+    audioPlayerRef.current = audio
+    setPlayingRecKey(key)
+
+    audio.play().catch(() => {
+      toast.error('Failed to play recording audio')
+      setPlayingRecKey(null)
+    })
+
+    audio.onended = () => {
+      setPlayingRecKey(null)
+    }
+    audio.onerror = () => {
+      toast.error('Could not load audio file')
+      setPlayingRecKey(null)
+    }
+  }
+
+  const handleRemoveRecording = async (profileId: string, recordingId: string) => {
+    if (!confirm('Remove this voice recording?')) return
+    setDeletingRecId(recordingId)
+    try {
+      await api.delete(`/voice/profiles/${profileId}/recordings/${recordingId}`)
+      toast.success('Recording removed')
+      await loadData()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Failed to remove recording')
+    } finally {
+      setDeletingRecId(null)
+    }
+  }
+
+  const handleAddMoreRecording = async (profileId: string, file: File) => {
+    if (!file) return
+    setUploadingRecProfileId(profileId)
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      await api.post(`/voice/profiles/${profileId}/recordings`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      toast.success('Voice recording added with ECAPA & ERes2Net embeddings!')
+      await loadData()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || 'Failed to upload voice recording')
+    } finally {
+      setUploadingRecProfileId(null)
+    }
+  }
+
+  const handleCreateProfile = async () => {
+    setAddProfileError(null)
+    if (!newProfileLabel.trim()) {
+      setAddProfileError('Speaker name is required.')
+      return
+    }
+    if (!newProfileFile) {
+      setAddProfileError('An audio file is required to create a voice profile. Please select an audio file.')
+      return
+    }
+
+    setAddingProfile(true)
+    try {
+      const sampleData = new FormData()
+      sampleData.append('file', newProfileFile)
+      sampleData.append('label', newProfileLabel.trim())
+      sampleData.append('sample_index', '0')
+
+      const sRes = await api.post('/voice/sample', sampleData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      const filePath = sRes.data.file_path
+
+      await api.post('/voice/add-profile', {
+        label: newProfileLabel.trim(),
+        file_paths: [filePath],
+      })
+
+      toast.success(`Voice profile "${newProfileLabel}" created with ECAPA & ERes2Net embeddings!`)
+      setNewProfileLabel('')
+      setNewProfileFile(null)
+      setShowAddProfileModal(false)
+      await loadData()
+    } catch (err: any) {
+      setAddProfileError(err?.response?.data?.detail || 'Failed to create voice profile')
+    } finally {
+      setAddingProfile(false)
+    }
   }
 
   const handleSaveSettings = async () => {
@@ -1189,9 +1326,75 @@ export default function SettingsPage() {
                   <Sliders size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Diarization &amp; Speaker Matching
                 </h3>
                 {settings && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.1rem' }}>
-                    <SettingCard
-                      title="Speaker Similarity Threshold"
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                    {/* Speaker Embedding Model Selector */}
+                    <div style={{
+                      padding: '1rem 1.25rem',
+                      borderRadius: 10,
+                      background: 'hsl(var(--paper)/.5)',
+                      border: '1px solid hsl(var(--border)/.6)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            Speaker Embedding Model
+                            <span style={{
+                              fontSize: '.68rem',
+                              fontWeight: 700,
+                              padding: '2px 8px',
+                              borderRadius: 12,
+                              background: (settings.speaker_embedding_model || 'ecapa') === 'ecapa' ? 'hsl(205,90%,55%/.15)' : 'hsl(142,70%,45%/.15)',
+                              color: (settings.speaker_embedding_model || 'ecapa') === 'ecapa' ? 'hsl(205,90%,55%)' : 'hsl(142,70%,45%)',
+                            }}>
+                              {(settings.speaker_embedding_model || 'ecapa') === 'ecapa' ? '192-d ECAPA-TDNN' : '293-d ERes2Net'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+                            Neural model used for voice embedding extraction and speaker recognition.
+                          </div>
+                        </div>
+
+                        <select
+                          id="speaker-embedding-model-select"
+                          value={settings.speaker_embedding_model || 'ecapa'}
+                          onChange={e => {
+                            const newModel = e.target.value
+                            setSettings({
+                              ...settings,
+                              speaker_embedding_model: newModel,
+                            })
+                          }}
+                          style={{
+                            padding: '6px 14px',
+                            borderRadius: 8,
+                            border: '1.5px solid hsl(var(--border))',
+                            background: 'hsl(var(--card))',
+                            fontSize: '.82rem',
+                            fontWeight: 600,
+                            color: 'hsl(var(--ink))',
+                            cursor: 'pointer',
+                            outline: 'none',
+                            fontFamily: 'Inter, sans-serif',
+                            minWidth: 220,
+                          }}
+                        >
+                          <option value="ecapa">ECAPA-TDNN (192-d, Default)</option>
+                          <option value="eres2net_large">ERes2Net-Large (293-d, 3D-Speaker)</option>
+                        </select>
+                      </div>
+
+                      <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: 6, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                        <span>• <strong>ECAPA-TDNN:</strong> Fast &amp; robust, recommended similarity threshold 0.72.</span>
+                        <span>• <strong>ERes2Net-Large:</strong> High-precision 3D-Speaker model, recommended similarity threshold 0.55.</span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.1rem' }}>
+                      <SettingCard
+                        title="Speaker Similarity Threshold"
                       description="Cosine similarity threshold for assigning speaker labels (0.50–0.99)."
                       value={settings.speaker_similarity_threshold}
                       min={0.50} max={0.99} step={0.01}
@@ -1211,47 +1414,334 @@ export default function SettingsPage() {
                       min={0.1} max={1.0} step={0.05}
                       onChange={v => setSettings({ ...settings, word_conf_low: v })}
                     />
-                    <SettingCard
-                      title="Word Confidence Mid"
-                      description="Mid word confidence threshold for transcript highlighting."
-                      value={settings.word_conf_mid}
-                      min={0.1} max={1.0} step={0.05}
-                      onChange={v => setSettings({ ...settings, word_conf_mid: v })}
-                    />
+                      <SettingCard
+                        title="Word Confidence Mid"
+                        description="Mid word confidence threshold for transcript highlighting."
+                        value={settings.word_conf_mid}
+                        min={0.1} max={1.0} step={0.05}
+                        onChange={v => setSettings({ ...settings, word_conf_mid: v })}
+                      />
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Voice Profiles List */}
+              {/* Voice Profiles List & Management */}
               <div style={{ borderRadius: 12, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', padding: '1.25rem' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Mic size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Voice Profiles ({profiles.length})
-                </h3>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+                  <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Mic size={16} style={{ color: 'hsl(205,90%,55%)' }} /> Voice Profiles ({profiles.length})
+                  </h3>
+                  <button
+                    onClick={() => { setShowAddProfileModal(true); setAddProfileError(null); }}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '.4rem .85rem', borderRadius: 8,
+                      background: 'hsl(205,90%,55%)', color: '#fff',
+                      border: 'none', fontSize: '.78rem', fontWeight: 700,
+                      cursor: 'pointer', transition: 'all .15s'
+                    }}
+                  >
+                    <Plus size={13} /> Add Voice Profile
+                  </button>
+                </div>
+
+                {/* Add Voice Profile Modal / Form */}
+                {showAddProfileModal && (
+                  <div style={{
+                    marginBottom: '1.25rem', padding: '1.15rem', borderRadius: 10,
+                    background: 'hsl(var(--paper)/.7)', border: '1.5px solid hsl(205,90%,55%/.4)',
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.1)'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.85rem' }}>
+                      <div style={{ fontWeight: 700, fontSize: '.9rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <User size={15} style={{ color: 'hsl(205,90%,55%)' }} /> Create Speaker Voice Profile
+                      </div>
+                      <button
+                        onClick={() => { setShowAddProfileModal(false); setAddProfileError(null); }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', fontSize: '.9rem' }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {addProfileError && (
+                      <div style={{
+                        padding: '.55rem .85rem', borderRadius: 6, marginBottom: '.85rem',
+                        background: 'hsl(0,80%,50%/.1)', border: '1px solid hsl(0,80%,50%/.3)',
+                        fontSize: '.76rem', color: 'hsl(0,80%,45%)', display: 'flex', alignItems: 'center', gap: 6
+                      }}>
+                        <AlertTriangle size={13} style={{ flexShrink: 0 }} />
+                        <span>{addProfileError}</span>
+                      </div>
+                    )}
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--pencil))', marginBottom: 4 }}>
+                          Speaker Name / Label *
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Vikas, Alice, Team Lead"
+                          value={newProfileLabel}
+                          onChange={(e) => setNewProfileLabel(e.target.value)}
+                          style={{
+                            width: '100%', padding: '.45rem .75rem', borderRadius: 6,
+                            border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))',
+                            color: 'hsl(var(--ink))', fontSize: '.82rem'
+                          }}
+                        />
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--pencil))', marginBottom: 4 }}>
+                          Voice Audio Recording (Required) *
+                        </label>
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null
+                            setNewProfileFile(f)
+                            if (f) setAddProfileError(null)
+                          }}
+                          style={{
+                            width: '100%', padding: '.35rem', borderRadius: 6,
+                            border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))',
+                            color: 'hsl(var(--ink))', fontSize: '.78rem'
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                      <button
+                        onClick={() => { setShowAddProfileModal(false); setAddProfileError(null); }}
+                        style={{
+                          padding: '.4rem .85rem', borderRadius: 6, border: '1px solid hsl(var(--border))',
+                          background: 'transparent', color: 'hsl(var(--pencil))', fontSize: '.76rem', cursor: 'pointer'
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleCreateProfile}
+                        disabled={addingProfile}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          padding: '.4rem 1rem', borderRadius: 6, border: 'none',
+                          background: 'hsl(205,90%,55%)', color: '#fff', fontSize: '.76rem',
+                          fontWeight: 700, cursor: addingProfile ? 'not-allowed' : 'pointer'
+                        }}
+                      >
+                        {addingProfile ? <Loader size={12} className="spin" /> : <Save size={12} />}
+                        {addingProfile ? 'Processing & Generating Dual Embeddings...' : 'Save Voice Profile'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {loadingProfiles ? (
                   <div style={{ textAlign: 'center', padding: '2rem' }}><Loader size={20} className="spin" /></div>
                 ) : profiles.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '2rem', color: 'hsl(var(--pencil))' }}>No voice profiles saved yet.</div>
+                  <div style={{ textAlign: 'center', padding: '2rem', color: 'hsl(var(--pencil))' }}>No voice profiles saved yet. Click "Add Voice Profile" above to create one.</div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     {profiles.map((p, idx) => {
                       const color = PROFILE_COLORS[idx % PROFILE_COLORS.length]
                       return (
-                        <div key={p.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '.75rem 1rem', borderRadius: 8, background: 'hsl(var(--paper)/.4)', borderLeft: `4px solid ${color}`, border: '1px solid hsl(var(--border)/.3)' }}>
-                          <div>
-                            {editingId === p.id ? (
-                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                                <input value={editLabel} onChange={e => setEditLabel(e.target.value)} style={{ padding: '3px 7px', borderRadius: 6, fontSize: '.8rem', border: '1px solid hsl(var(--border))' }} />
-                                <button onClick={() => handleRename(p.id)} disabled={savingLabel} style={{ padding: '3px 8px', borderRadius: 6, background: 'hsl(var(--accent))', color: 'white', border: 'none', fontSize: '.74rem', cursor: 'pointer' }}>{savingLabel ? 'Saving' : 'Save'}</button>
+                        <div
+                          key={p.id}
+                          style={{
+                            padding: '.85rem 1.15rem', borderRadius: 10,
+                            background: 'hsl(var(--paper)/.4)', borderLeft: `4px solid ${color}`,
+                            border: '1px solid hsl(var(--border)/.3)'
+                          }}
+                        >
+                          {/* Profile Header Row */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                            <div>
+                              {editingId === p.id ? (
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                  <input
+                                    value={editLabel}
+                                    onChange={e => setEditLabel(e.target.value)}
+                                    style={{ padding: '3px 7px', borderRadius: 6, fontSize: '.8rem', border: '1px solid hsl(var(--border))' }}
+                                  />
+                                  <button
+                                    onClick={() => handleRename(p.id)}
+                                    disabled={savingLabel}
+                                    style={{ padding: '3px 8px', borderRadius: 6, background: 'hsl(var(--accent))', color: 'white', border: 'none', fontSize: '.74rem', cursor: 'pointer' }}
+                                  >
+                                    {savingLabel ? 'Saving' : 'Save'}
+                                  </button>
+                                </div>
+                              ) : (
+                                <div style={{ fontWeight: 700, fontSize: '.9rem', color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span>{p.label}</span>
+                                  {p.is_self && (
+                                    <span style={{ fontSize: '.65rem', background: 'hsl(205,90%,55%/.15)', color: 'hsl(205,90%,55%)', padding: '1px 6px', borderRadius: 4 }}>
+                                      You
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              <div style={{ fontSize: '.71rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+                                {p.sample_count} voice sample{p.sample_count !== 1 ? 's' : ''} enrolled
                               </div>
-                            ) : (
-                              <div style={{ fontWeight: 700, fontSize: '.86rem', color: 'hsl(var(--ink))' }}>{p.label} {p.is_self && <span style={{ fontSize: '.65rem', background: 'hsl(205,90%,55%/.15)', color: 'hsl(205,90%,55%)', padding: '1px 6px', borderRadius: 4, marginLeft: 4 }}>You</span>}</div>
-                            )}
-                            <div style={{ fontSize: '.71rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>{p.sample_count} audio samples recorded</div>
+                            </div>
+
+                            {/* Embedding Status Tags & Actions */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <div style={{ display: 'flex', gap: 5 }}>
+                                {/* ECAPA tag */}
+                                <span style={{
+                                  fontSize: '.66rem', fontWeight: 700, padding: '2px 7px', borderRadius: 6,
+                                  background: p.has_ecapa ? 'hsl(140,70%,45%/.15)' : 'hsl(var(--muted)/.6)',
+                                  color: p.has_ecapa ? 'hsl(140,70%,40%)' : 'hsl(var(--pencil))',
+                                  border: `1px solid ${p.has_ecapa ? 'hsl(140,70%,45%/.3)' : 'hsl(var(--border)/.4)'}`
+                                }}>
+                                  ECAPA {p.has_ecapa ? '✓' : '✗'}
+                                </span>
+
+                                {/* ERes2Net-Large tag */}
+                                <span style={{
+                                  fontSize: '.66rem', fontWeight: 700, padding: '2px 7px', borderRadius: 6,
+                                  background: p.has_eres2net ? 'hsl(280,75%,60%/.15)' : 'hsl(var(--muted)/.6)',
+                                  color: p.has_eres2net ? 'hsl(280,75%,55%)' : 'hsl(var(--pencil))',
+                                  border: `1px solid ${p.has_eres2net ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.4)'}`
+                                }}>
+                                  ERes2Net-Large {p.has_eres2net ? '✓' : '✗'}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: 4, marginLeft: 6 }}>
+                                <button
+                                  onClick={() => { setEditingId(p.id); setEditLabel(p.label) }}
+                                  title="Rename speaker profile"
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '4px' }}
+                                >
+                                  <Pencil size={13} />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(p.id)}
+                                  disabled={deletingId === p.id}
+                                  title="Delete profile"
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '4px' }}
+                                >
+                                  {deletingId === p.id ? <Loader size={13} className="spin" /> : <Trash2 size={13} />}
+                                </button>
+                              </div>
+                            </div>
                           </div>
 
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            <button onClick={() => { setEditingId(p.id); setEditLabel(p.label) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))' }}><Pencil size={12} /></button>
-                            <button onClick={() => handleDelete(p.id)} disabled={deletingId === p.id} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))' }}><Trash2 size={12} /></button>
+                          {/* Warning for legacy profiles without saved audio */}
+                          {p.has_audio === false && (
+                            <div style={{
+                              marginTop: 10, padding: '6px 10px', borderRadius: 6,
+                              background: 'hsl(35,90%,50%/.1)', border: '1px solid hsl(35,90%,50%/.3)',
+                              fontSize: '.72rem', color: 'hsl(35,90%,45%)', display: 'flex', alignItems: 'center', gap: 6
+                            }}>
+                              <AlertTriangle size={13} style={{ flexShrink: 0 }} />
+                              <span>⚠ Original voice recording unavailable — this profile was created before voice recordings were stored.</span>
+                            </div>
+                          )}
+
+                          {/* Saved Recordings List */}
+                          {p.recordings && p.recordings.length > 0 && (
+                            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              <div style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <Volume2 size={12} /> Saved Voice Recordings ({p.recordings.length}):
+                              </div>
+                              {p.recordings.map((rec, recIdx) => {
+                                const isPlaying = playingRecKey === `${p.id}_${rec.id}`
+                                return (
+                                  <div
+                                    key={rec.id || recIdx}
+                                    style={{
+                                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                      padding: '5px 10px', borderRadius: 6, background: 'hsl(var(--card)/.7)',
+                                      border: '1px solid hsl(var(--border)/.25)', fontSize: '.76rem'
+                                    }}
+                                  >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                      <button
+                                        onClick={() => handlePlayRecording(p.id, rec.id)}
+                                        title={isPlaying ? "Pause audio" : "Play recording"}
+                                        style={{
+                                          width: 24, height: 24, borderRadius: '50%', border: 'none',
+                                          background: isPlaying ? 'hsl(205,90%,55%)' : 'hsl(var(--muted)/.8)',
+                                          color: isPlaying ? '#fff' : 'hsl(var(--ink))',
+                                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                          cursor: 'pointer', flexShrink: 0
+                                        }}
+                                      >
+                                        {isPlaying ? <Pause size={11} /> : <Play size={11} style={{ marginLeft: 2 }} />}
+                                      </button>
+                                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        <span style={{ fontWeight: 600, color: 'hsl(var(--ink))' }}>{rec.filename}</span>
+                                        {rec.duration > 0 && (
+                                          <span style={{ marginLeft: 6, fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>
+                                            ({rec.duration}s)
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <button
+                                      onClick={() => handleRemoveRecording(p.id, rec.id)}
+                                      disabled={deletingRecId === rec.id}
+                                      title="Remove this recording"
+                                      style={{
+                                        background: 'none', border: 'none', cursor: 'pointer',
+                                        color: 'hsl(var(--destructive))', padding: '4px',
+                                        display: 'flex', alignItems: 'center'
+                                      }}
+                                    >
+                                      {deletingRecId === rec.id ? <Loader size={11} className="spin" /> : <Trash2 size={11} />}
+                                    </button>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+
+                          {/* Action Bar: Add More Recordings */}
+                          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <label style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 5,
+                              padding: '3px 9px', borderRadius: 6,
+                              background: 'hsl(var(--muted)/.5)', border: '1px solid hsl(var(--border)/.4)',
+                              fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--ink))',
+                              cursor: uploadingRecProfileId === p.id ? 'not-allowed' : 'pointer',
+                              transition: 'all .15s'
+                            }}>
+                              {uploadingRecProfileId === p.id ? (
+                                <>
+                                  <Loader size={11} className="spin" />
+                                  <span>Generating Embeddings...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Plus size={11} />
+                                  <span>Add More Audio</span>
+                                </>
+                              )}
+                              <input
+                                type="file"
+                                accept="audio/*"
+                                disabled={uploadingRecProfileId === p.id}
+                                style={{ display: 'none' }}
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0]
+                                  if (f) {
+                                    handleAddMoreRecording(p.id, f)
+                                    e.target.value = ''
+                                  }
+                                }}
+                              />
+                            </label>
                           </div>
                         </div>
                       )

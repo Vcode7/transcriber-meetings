@@ -81,6 +81,14 @@ def get_loaded_models() -> list:
         pass
 
     try:
+        if "services.embedding_eres2net" in sys.modules:
+            from services.embedding_eres2net import _eres2net_model
+            if _eres2net_model is not None:
+                loaded.append("ERes2Net-Large")
+    except Exception:
+        pass
+
+    try:
         if "services.ai_provider" in sys.modules:
             from services.ai_provider import QwenProvider
             if QwenProvider._pipeline is not None or QwenProvider._model is not None:
@@ -93,6 +101,22 @@ def get_loaded_models() -> list:
             import main
             if getattr(main, "_overlap_model", None) is not None:
                 loaded.append("OverlapClassifier")
+    except Exception:
+        pass
+
+    try:
+        if "services.text_embedding_service" in sys.modules:
+            from services.text_embedding_service import _embedder
+            if _embedder is not None and getattr(_embedder, "_loaded", False):
+                loaded.append("TextEmbedder")
+    except Exception:
+        pass
+
+    try:
+        if "services.ocr_engine" in sys.modules:
+            from services.ocr_engine import _OCR_ENGINE
+            if _OCR_ENGINE is not None:
+                loaded.append("RapidOCR")
     except Exception:
         pass
 

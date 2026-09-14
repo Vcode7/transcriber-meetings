@@ -94,3 +94,23 @@ export interface ChatMessage {
   }
   created_at: string
 }
+
+// ── AI Chat Tab Types ───────────────────────────
+export interface AIChatMeeting {
+  id: string
+  name: string
+  date: string
+  has_stage2?: boolean
+}
+
+export interface AIChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  metadata: {
+    meeting_sources?: AIChatMeeting[]
+    query_type?: 'direct' | 'retrieval'
+  }
+  created_at: string
+}
+

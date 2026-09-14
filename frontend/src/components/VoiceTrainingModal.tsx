@@ -237,6 +237,15 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
     setTrained(null);
     setTrainError("");
     fetchSamples(selectedSpeaker);
+
+    // If selectedSpeaker name already matches an existing profile, detect it immediately
+    api.get("/voice/check-label", { params: { label: selectedSpeaker.trim() } })
+      .then((res) => {
+        if (res.data?.exists) {
+          setExistingProfileId(res.data.profile_id || null);
+        }
+      })
+      .catch(() => {});
   }, [selectedSpeaker]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchSamples = async (speaker: string) => {
@@ -263,7 +272,7 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
     setNameError("");
     setExistingProfileId(null);
     if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
-    if (!val.trim() || val.trim() === selectedSpeaker) {
+    if (!val.trim()) {
       nameValidRef.current = true;
       return;
     }
@@ -281,8 +290,8 @@ export default function VoiceTrainingModal({ recordingId, segments, onClose, onT
         }
       } catch { nameValidRef.current = true; }
       finally { setNameChecking(false); }
-    }, 450);
-  }, [selectedSpeaker]);
+    }, 300);
+  }, []);
 
   const handleDeleteSample = (idx: number) => setSamples((prev) => prev.filter((_, i) => i !== idx));
 

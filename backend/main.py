@@ -58,9 +58,11 @@ from routers.dashboard_router import router as dashboard_router
 from routers.prompt_templates_router import router as prompt_templates_router
 from routers.collections_router import router as collections_router
 from routers.collection_ai_router import router as collection_ai_router
+from routers.ai_chat_router import router as ai_chat_router
 from routers.video_router import router as video_router
 from routers.speaker_management_router import router as speaker_management_router
 from routers.training_routes import router as training_router
+from routers.arena_router import router as arena_router
 
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
@@ -321,9 +323,11 @@ app.include_router(dashboard_router)
 app.include_router(prompt_templates_router)
 app.include_router(collections_router)
 app.include_router(collection_ai_router)
+app.include_router(ai_chat_router)
 app.include_router(video_router)
 app.include_router(speaker_management_router)
 app.include_router(training_router)
+app.include_router(arena_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):

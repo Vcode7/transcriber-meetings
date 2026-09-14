@@ -305,6 +305,21 @@ async def connect_db():
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_stage2_edits_recording ON stage2_edit_history(recording_id)"))
 
+        # ── arena_drafts — Model Arena draft prompt storage ─────────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS arena_drafts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                prompt_key TEXT NOT NULL,
+                draft_name TEXT NOT NULL DEFAULT '',
+                template TEXT NOT NULL,
+                rule_states TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_arena_drafts_user ON arena_drafts(user_id)"))
+
         # ── recording_chunks — per-chunk transcription results ──────────────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS recording_chunks (
@@ -664,6 +679,41 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
+        # ── Migration: Add multi-model speaker embedding columns to voice_profiles ──
+        # audio_paths         — JSON list of saved audio WAV file paths for this profile
+        # recordings          — JSON list of recording objects: [{id, filename, file_path, duration, created_at, metadata}]
+        # ecapa_embeddings    — JSON list of ECAPA-TDNN 192-d embeddings (dedicated column)
+        # eres2net_embeddings — JSON list of ERes2Net-Large 512-d embeddings
+        for col_def in (
+            "audio_paths TEXT DEFAULT '[]'",
+            "recordings TEXT DEFAULT '[]'",
+            "ecapa_embeddings TEXT DEFAULT NULL",
+            "eres2net_embeddings TEXT DEFAULT NULL",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE voice_profiles ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
+        # Backfill: copy existing embeddings → ecapa_embeddings for profiles that
+        # have embeddings but no ecapa_embeddings yet (one-time migration).
+        try:
+            await conn.execute(text(
+                "UPDATE voice_profiles SET ecapa_embeddings = embeddings "
+                "WHERE ecapa_embeddings IS NULL AND embeddings IS NOT NULL AND embeddings != '[]'"
+            ))
+        except Exception:
+            pass  # safe to skip
+
+        # speaker_embedding_model — active embedding model preference per user
+        try:
+            await conn.execute(text(
+                "ALTER TABLE user_settings ADD COLUMN speaker_embedding_model "
+                "TEXT NOT NULL DEFAULT 'ecapa'"
+            ))
+        except Exception:
+            pass  # column already exists
+
 
         # ── Prompt Templates — system-wide, shared by all users ─────────────────
         # Stores custom overrides for every AI prompt used in the application.
@@ -727,6 +777,21 @@ async def connect_db():
         ))
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_chat_user ON collection_chat_messages(user_id)"
+        ))
+
+        # ── Standalone AI Chat Messages ─────────────────────────────────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ai_chat_messages (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                metadata    TEXT DEFAULT '{}',
+                created_at  TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_messages(user_id)"
         ))
 
 

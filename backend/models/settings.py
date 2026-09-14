@@ -22,6 +22,7 @@ class UserSettings(BaseModel):
     rag_relative_score_cutoff: float = Field(default=0.01, ge=0.0, le=1.0)
     generate_mom_auto: bool = True
     embedding_model: str = "Qwen3-Embedding-0.6B"
+    speaker_embedding_model: str = "ecapa"  # "ecapa" | "eres2net_large"
     
     # New Ollama specific settings
     ollama_num_ctx: int = Field(default=32768, ge=512, le=131072)
@@ -147,6 +148,7 @@ class UserSettingsUpdate(BaseModel):
     rag_relative_score_cutoff: float | None = Field(default=None, ge=0.0, le=1.0)
     generate_mom_auto: bool | None = None
     embedding_model: str | None = None
+    speaker_embedding_model: str | None = None  # "ecapa" | "eres2net_large"
     
     # New Ollama settings
     ollama_num_ctx: int | None = Field(default=None, ge=512, le=131072)

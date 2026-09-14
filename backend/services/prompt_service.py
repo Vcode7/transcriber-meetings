@@ -301,14 +301,28 @@ PROMPT_META: list[dict] = [
         "name": "Short ROM Rewrite",
         "category": "ROM",
         "description": "Generates a Short ROM version per agenda. Processes all points for each agenda together. Focuses on action points and decisions only. Input fields: Point ID, Speaker, Discussion, Action Owner.",
-        "variables": ["{agenda_title}", "{points_json}", "{rules_section}"],
+        "variables": ["{agenda_title}", "{points_json}", "{rules_section}", "{mandatory_section}"],
     },
     {
         "key": "rom_version_medium",
         "name": "Medium ROM Rewrite",
         "category": "ROM",
         "description": "Generates a Medium ROM version per agenda. Processes all points for each agenda together. Produces an aggregated version with key discussion details and action points. Input fields: Point ID, Speaker, Discussion, Action Owner.",
-        "variables": ["{agenda_title}", "{points_json}", "{rules_section}"],
+        "variables": ["{agenda_title}", "{points_json}", "{rules_section}", "{mandatory_section}"],
+    },
+    {
+        "key": "rom_ai_edit_points",
+        "name": "AI Edit ROM Points",
+        "category": "ROM",
+        "description": "Edits selected Final ROM discussion points based on user instructions. Returns updated points with an explanation.",
+        "variables": ["{agenda_context}", "{selected_points}", "{user_prompt}", "{chat_history_section}"],
+    },
+    {
+        "key": "rom_ai_chat",
+        "name": "AI Chat about ROM",
+        "category": "ROM",
+        "description": "Follow-up chat about ROM content. Answers user questions about the meeting record.",
+        "variables": ["{rom_context}", "{chat_history}", "{user_message}"],
     },
 ]
 
@@ -360,6 +374,8 @@ def _defaults() -> dict[str, str]:
         MOM_DEDUPLICATE_ACTION_POINTS_PROMPT,
         ROM_VERSION_SHORT_PROMPT,
         ROM_VERSION_MEDIUM_PROMPT,
+        ROM_AI_EDIT_POINTS_PROMPT,
+        ROM_AI_CHAT_PROMPT,
     )
     return {
         "mom":                            MOM_PROMPT,
@@ -400,6 +416,8 @@ def _defaults() -> dict[str, str]:
         "rom_agenda_doc_points":          ROM_AGENDA_DOC_POINTS_PROMPT,
         "rom_version_short":              ROM_VERSION_SHORT_PROMPT,
         "rom_version_medium":             ROM_VERSION_MEDIUM_PROMPT,
+        "rom_ai_edit_points":             ROM_AI_EDIT_POINTS_PROMPT,
+        "rom_ai_chat":                    ROM_AI_CHAT_PROMPT,
     }
 
 

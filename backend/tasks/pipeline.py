@@ -94,10 +94,10 @@ def unload_all_models():
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload pyannote diarization pipeline: {e}")
         
-    # 3. Unload ECAPA-TDNN Embedding Encoder
+    # 3. Unload Speaker Embedding Encoders (ECAPA-TDNN & ERes2Net-Large)
     try:
-        from services.embedding import unload_encoder
-        unload_encoder()
+        from services.embedding_router import unload_active_encoder
+        unload_active_encoder()
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload speaker encoder: {e}")
         
@@ -166,11 +166,11 @@ async def _recover_gpu_and_run_llm(recording_id: str, task_name: str, fn_to_run)
     try:
         # 1. Ensure diarization and speaker ID models are fully unloaded
         from services.diarization import unload_diarization_pipeline
-        from services.embedding import unload_encoder
+        from services.embedding_router import unload_active_encoder
         from services.transcription import unload_whisperx_model, unload_align_model
 
         unload_diarization_pipeline()
-        unload_encoder()
+        unload_active_encoder()
         unload_whisperx_model()
         unload_align_model()
 
@@ -535,6 +535,9 @@ async def _run_pipeline_impl(
     participant_voice_ids = participant_voice_ids or []
     logger.info(f"[Pipeline] ===== START recording_id={recording_id} file={file_path} =====")
 
+    # Proactively purge any lingering AI models before starting transcription to prevent CUDA OOM
+    unload_all_models()
+
     # ── Analytics accumulators ─────────────────────────────────────────────
     _pipeline_start = time.monotonic()
     _job_created_at = dt_to_str(datetime.now(timezone.utc))
@@ -839,7 +842,13 @@ async def _run_pipeline_impl(
         voice_profiles = []
         for p in raw_profiles:
             profile = dict(p)
-            profile["embeddings"] = from_json(p["embeddings"], [])
+            profile["embeddings"] = from_json(p.get("embeddings"), [])
+            if p.get("audio_paths"):
+                profile["audio_paths"] = from_json(p["audio_paths"], [])
+            if p.get("ecapa_embeddings"):
+                profile["ecapa_embeddings"] = from_json(p["ecapa_embeddings"], [])
+            if p.get("eres2net_embeddings"):
+                profile["eres2net_embeddings"] = from_json(p["eres2net_embeddings"], [])
             voice_profiles.append(profile)
 
         # Filter to selected participants (strict) if specified
@@ -865,6 +874,31 @@ async def _run_pipeline_impl(
             logger.error(f"[Pipeline] {recording_id} — User settings load FAILED: {e}", exc_info=True)
             user_settings_row = None
 
+        active_embedding_model = (
+            user_settings_row["speaker_embedding_model"]
+            if user_settings_row and user_settings_row.get("speaker_embedding_model")
+            else "ecapa"
+        )
+        logger.info(f"[Pipeline] {recording_id} — Active speaker embedding model: {active_embedding_model}")
+
+        # Ensure profiles have embeddings for the active model (lazy generation from saved audio)
+        from services.embedding_router import ensure_profile_embeddings
+        for vp in voice_profiles:
+            old_embs = vp.get("eres2net_embeddings") if active_embedding_model == "eres2net_large" else vp.get("ecapa_embeddings")
+            if not old_embs:
+                gen_embs = ensure_profile_embeddings(vp, model=active_embedding_model)
+                if gen_embs:
+                    col_to_update = "eres2net_embeddings" if active_embedding_model == "eres2net_large" else "ecapa_embeddings"
+                    try:
+                        async with get_db_context() as db:
+                            await db.execute(
+                                text(f"UPDATE voice_profiles SET {col_to_update} = :embs WHERE id = :id"),
+                                {"embs": to_json(gen_embs), "id": vp["id"]}
+                            )
+                            await db.commit()
+                    except Exception as e:
+                        logger.warning(f"[Pipeline] Failed to persist lazily generated {active_embedding_model} embeddings: {e}")
+
         threshold = (
             float(user_settings_row["speaker_similarity_threshold"])
             if user_settings_row and user_settings_row.get("speaker_similarity_threshold") is not None
@@ -887,6 +921,7 @@ async def _run_pipeline_impl(
                     diarization_segments=diar_segs,
                     voice_profiles=voice_profiles,
                     similarity_threshold=threshold,
+                    embedding_model=active_embedding_model,
                 ),
             )
         except Exception as e:
@@ -943,20 +978,21 @@ async def _run_pipeline_impl(
 
         logger.info(f"[Pipeline] {recording_id} — Speaker segments: {len(speaker_segments)}")
 
-        # ── ECAPA refinement pass on final segments ──
-        logger.info(f"[Pipeline] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+        # ── Speaker refinement pass on final segments ──
+        logger.info(f"[Pipeline] {recording_id} — Running speaker refinement pass ({active_embedding_model}) on re-segmented transcript")
         speaker_segments = refine_transcript_speakers_with_ecapa(
             file_path=file_path,
             speaker_segments=speaker_segments,
             voice_profiles=voice_profiles,
             similarity_threshold=threshold,
             use_model_default_threshold=True,
+            embedding_model=active_embedding_model,
         )
 
         # Unload speaker embedding encoder immediately to free VRAM
         try:
-            from services.embedding import unload_encoder
-            unload_encoder()
+            from services.embedding_router import unload_active_encoder
+            unload_active_encoder()
         except Exception as e:
             logger.warning(f"[Pipeline] {recording_id} — Failed to unload speaker encoder: {e}")
 
@@ -1035,6 +1071,7 @@ async def _run_pipeline_impl(
                 _analytics["final_status"] = "done"
                 _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
                 await _emit_analytics(_analytics)
+                unload_all_models()
                 return
             else:
                 async with get_db_context() as db:
@@ -1800,6 +1837,8 @@ async def _run_finalize_pipeline_impl(
         f"[FinalPipeline] ===== START recording={recording_id} "
         f"chunks={chunk_ids} file={full_wav_path} ====="
     )
+    # Proactively purge any lingering AI models
+    unload_all_models()
 
     try:
         loop = asyncio.get_running_loop()
@@ -2197,13 +2236,20 @@ async def _run_finalize_pipeline_impl(
     voice_profiles = []
     for p in raw_profiles:
         profile = dict(p)
-        profile["embeddings"] = from_json(p["embeddings"], [])
+        profile["embeddings"] = from_json(p.get("embeddings"), [])
+        if p.get("audio_paths"):
+            profile["audio_paths"] = from_json(p["audio_paths"], [])
+        if p.get("ecapa_embeddings"):
+            profile["ecapa_embeddings"] = from_json(p["ecapa_embeddings"], [])
+        if p.get("eres2net_embeddings"):
+            profile["eres2net_embeddings"] = from_json(p["eres2net_embeddings"], [])
         voice_profiles.append(profile)
     if participant_voice_ids:
         voice_profiles = [vp for vp in voice_profiles if vp.get("id") in participant_voice_ids]
 
-    # User similarity threshold
+    # User settings and similarity threshold
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
+    active_embedding_model = "ecapa"
     try:
         async with get_db_context() as db:
             r = await db.execute(
@@ -2211,13 +2257,34 @@ async def _run_finalize_pipeline_impl(
                 {"uid": user_id},
             )
             user_settings_row = r.mappings().fetchone()
-        if user_settings_row and user_settings_row.get("speaker_similarity_threshold") is not None:
-            threshold = float(user_settings_row["speaker_similarity_threshold"])
+        if user_settings_row:
+            if user_settings_row.get("speaker_similarity_threshold") is not None:
+                threshold = float(user_settings_row["speaker_similarity_threshold"])
+            if user_settings_row.get("speaker_embedding_model"):
+                active_embedding_model = str(user_settings_row["speaker_embedding_model"]).strip().lower()
     except Exception:
         pass
 
+    # Ensure profiles have embeddings for the active model (lazy generation from saved audio)
+    from services.embedding_router import ensure_profile_embeddings
+    for vp in voice_profiles:
+        old_embs = vp.get("eres2net_embeddings") if active_embedding_model == "eres2net_large" else vp.get("ecapa_embeddings")
+        if not old_embs:
+            gen_embs = ensure_profile_embeddings(vp, model=active_embedding_model)
+            if gen_embs:
+                col_to_update = "eres2net_embeddings" if active_embedding_model == "eres2net_large" else "ecapa_embeddings"
+                try:
+                    async with get_db_context() as db:
+                        await db.execute(
+                            text(f"UPDATE voice_profiles SET {col_to_update} = :embs WHERE id = :id"),
+                            {"embs": to_json(gen_embs), "id": vp["id"]}
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.warning(f"[FinalPipeline] Failed to persist lazily generated {active_embedding_model} embeddings: {e}")
+
     # ── Step 6: Speaker identification ──────────────────────────────────
-    logger.info(f"[FinalPipeline] {recording_id} — Identifying speakers")
+    logger.info(f"[FinalPipeline] {recording_id} — Identifying speakers (model={active_embedding_model})")
     await _update_status_safe(recording_id, "processing", {"progress": "identifying_speakers"})
     _analytics_fin["voice_profiles_loaded"] = len(voice_profiles)
     _analytics_fin["similarity_threshold"] = threshold
@@ -2233,6 +2300,7 @@ async def _run_finalize_pipeline_impl(
                     diarization_segments=diar_segs,
                     voice_profiles=voice_profiles,
                     similarity_threshold=threshold,
+                    embedding_model=active_embedding_model,
                 ),
             )
         except Exception as e:
@@ -2285,8 +2353,8 @@ async def _run_finalize_pipeline_impl(
         )
         speaker_segments = _resegment_by_word_speakers(speaker_segments)
 
-    # ── ECAPA refinement pass on final segments ──
-    logger.info(f"[FinalPipeline] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+    # ── Speaker refinement pass on final segments ──
+    logger.info(f"[FinalPipeline] {recording_id} — Running speaker refinement pass ({active_embedding_model}) on re-segmented transcript")
     log_gpu_memory("Pre-ECAPA Refinement")
     speaker_segments = refine_transcript_speakers_with_ecapa(
         file_path=full_wav_path,
@@ -2294,12 +2362,13 @@ async def _run_finalize_pipeline_impl(
         voice_profiles=voice_profiles,
         similarity_threshold=threshold,
         use_model_default_threshold=True,
+        embedding_model=active_embedding_model,
     )
 
     # Unload speaker embedding encoder immediately to free VRAM
     try:
-        from services.embedding import unload_encoder
-        unload_encoder()
+        from services.embedding_router import unload_active_encoder
+        unload_active_encoder()
     except Exception as e:
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to unload speaker encoder: {e}")
     log_gpu_memory("Post-ECAPA Refinement Unload")
@@ -2377,6 +2446,7 @@ async def _run_finalize_pipeline_impl(
             _analytics_fin["final_status"] = "done"
             _analytics_fin["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)
             await _emit_analytics(_analytics_fin)
+            unload_all_models()
             return
     except Exception as e:
         logger.error(f"[FinalPipeline] {recording_id} — CRITICAL: Transcript DB save FAILED: {e}", exc_info=True)

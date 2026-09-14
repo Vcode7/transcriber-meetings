@@ -149,8 +149,8 @@ async def run_reidentify_pipeline(
         except Exception:
             pass
         try:
-            from services.embedding import unload_encoder
-            unload_encoder()
+            from services.embedding_router import unload_active_encoder
+            unload_active_encoder()
         except Exception:
             pass
         import gc
@@ -229,30 +229,58 @@ async def _run_reidentify_impl(
         voice_profiles = []
         for p in raw_profiles:
             profile = dict(p)
-            profile["embeddings"] = from_json(p["embeddings"], [])
+            profile["embeddings"] = from_json(p.get("embeddings"), [])
+            if p.get("audio_paths"):
+                profile["audio_paths"] = from_json(p["audio_paths"], [])
+            if p.get("ecapa_embeddings"):
+                profile["ecapa_embeddings"] = from_json(p["ecapa_embeddings"], [])
+            if p.get("eres2net_embeddings"):
+                profile["eres2net_embeddings"] = from_json(p["eres2net_embeddings"], [])
             voice_profiles.append(profile)
         logger.info(f"[ReID] {recording_id} — {len(voice_profiles)} voice profiles loaded")
     except Exception as e:
         logger.error(f"[ReID] {recording_id} — Voice profile load FAILED: {e}", exc_info=True)
         voice_profiles = []
 
-    # Load user similarity threshold
+    # Load user similarity threshold & embedding model
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
+    active_embedding_model = "ecapa"
     try:
         async with get_db_context() as db:
             r = await db.execute(
-                text("SELECT speaker_similarity_threshold FROM user_settings WHERE user_id = :uid"),
+                text("SELECT speaker_similarity_threshold, speaker_embedding_model FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
             )
             row = r.mappings().fetchone()
-        if row and row.get("speaker_similarity_threshold") is not None:
-            threshold = float(row["speaker_similarity_threshold"])
+        if row:
+            if row.get("speaker_similarity_threshold") is not None:
+                threshold = float(row["speaker_similarity_threshold"])
+            if row.get("speaker_embedding_model"):
+                active_embedding_model = str(row["speaker_embedding_model"]).strip().lower()
     except Exception:
         pass
-    logger.info(f"[ReID] {recording_id} — Similarity threshold: {threshold}")
+    logger.info(f"[ReID] {recording_id} — Similarity threshold: {threshold}, Embedding model: {active_embedding_model}")
+
+    # Ensure profiles have embeddings for the active model (lazy generation from saved audio)
+    from services.embedding_router import ensure_profile_embeddings
+    for vp in voice_profiles:
+        old_embs = vp.get("eres2net_embeddings") if active_embedding_model == "eres2net_large" else vp.get("ecapa_embeddings")
+        if not old_embs:
+            gen_embs = ensure_profile_embeddings(vp, model=active_embedding_model)
+            if gen_embs:
+                col_to_update = "eres2net_embeddings" if active_embedding_model == "eres2net_large" else "ecapa_embeddings"
+                try:
+                    async with get_db_context() as db:
+                        await db.execute(
+                            text(f"UPDATE voice_profiles SET {col_to_update} = :embs WHERE id = :id"),
+                            {"embs": to_json(gen_embs), "id": vp["id"]}
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.warning(f"[ReID] Failed to persist lazily generated {active_embedding_model} embeddings: {e}")
 
     # ── Stage 3: Speaker identification ───────────────────────────────────────
-    logger.info(f"[ReID] {recording_id} — STAGE 3: Speaker identification")
+    logger.info(f"[ReID] {recording_id} — STAGE 3: Speaker identification (model={active_embedding_model})")
     await _update_status_safe(recording_id, "processing", {"progress": "identifying_speakers"})
 
     try:
@@ -263,6 +291,7 @@ async def _run_reidentify_impl(
                 diarization_segments=diar_segs,
                 voice_profiles=voice_profiles,
                 similarity_threshold=threshold,
+                embedding_model=active_embedding_model,
             ),
         )
         logger.info(f"[ReID] {recording_id} — Speaker ID OK: {len(identified_segs)} segments")
@@ -305,15 +334,23 @@ async def _run_reidentify_impl(
         speaker_segments = _assign_speakers_to_words_manual(aligned_result, identified_segs)
         speaker_segments = _resegment_by_word_speakers(speaker_segments)
 
-    # ── ECAPA refinement pass on final segments ──
-    logger.info(f"[ReID] {recording_id} — Running ECAPA refinement pass on re-segmented transcript")
+    # ── Speaker refinement pass on final segments ──
+    logger.info(f"[ReID] {recording_id} — Running speaker refinement pass ({active_embedding_model}) on re-segmented transcript")
     speaker_segments = refine_transcript_speakers_with_ecapa(
         file_path=file_path,
         speaker_segments=speaker_segments,
         voice_profiles=voice_profiles,
         similarity_threshold=threshold,
         use_model_default_threshold=True,
+        embedding_model=active_embedding_model,
     )
+
+    # Unload speaker embedding encoder to free VRAM
+    try:
+        from services.embedding_router import unload_active_encoder
+        unload_active_encoder()
+    except Exception as e:
+        logger.warning(f"[ReID] {recording_id} — Failed to unload speaker encoder: {e}")
 
     # ── Stage 5: Build final segments ─────────────────────────────────────────
     final_segments = []

@@ -2421,22 +2421,30 @@ Return ONLY a JSON object:
 # ===========================================================================
 # PROMPT: ROM_VERSION_SHORT_PROMPT
 # STATUS: CURRENTLY IN USE
-# USED IN: RomService.generate_rom_version() (services/rom_service.py:4565)
+# USED IN: RomService.generate_rom_version() (services/rom_service.py)
 # TASK KEY: "rom_version_short"
-# PURPOSE: Generates the condensed 'Short' version of Final ROM, focusing strictly on decisions, action items, and outcomes.
+# PURPOSE: Generates the condensed 'Short' version of Final ROM, capturing all critical meeting content concisely.
 # ===========================================================================
 #region ROM_VERSION_SHORT_PROMPT
-ROM_VERSION_SHORT_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a SHORT version of this agenda's discussion - focused primarily on action points and decisions.
+ROM_VERSION_SHORT_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a SHORT version of this agenda's discussion — a concise summary that captures ALL critical information, not just action points.
 
 AGENDA: {agenda_title}
 
 DISCUSSION POINTS:
 {points_json}
-{rules_section}
+{rules_section}{mandatory_section}
 INSTRUCTIONS:
 - Process ALL points together for this agenda as a whole - do NOT process each point individually.
-- Focus ONLY on discussions that are related to action points, decisions, commitments, and outcomes.
-- Omit background context, side discussions, or informational exchanges that have no actionable outcome.
+- CAPTURE ALL of the following categories of important information (do NOT limit to just action points):
+  * Key decisions made and their rationale
+  * Action points, assignments, and commitments (with owners and deadlines)
+  * Important conclusions reached
+  * Critical issues, blockers, or risks raised
+  * Status updates on ongoing items or projects
+  * Escalations and dependencies noted
+  * Deadlines, milestones, and follow-up requirements
+  * Any agreements or approvals given
+- Omit only purely background/introductory context and casual side remarks that carry no substantive information.
 - Summarize and restructure the complete agenda discussion into a compact, meaningful collection of points.
 - Each output point must be a complete, standalone sentence that preserves the original fact, speaker attribution, action owner, and specific details.
 - Do NOT invent, add, or infer any information not present in the input.
@@ -2452,21 +2460,31 @@ Return ONLY a valid JSON array of rewritten point strings. No markdown, no code 
 # ===========================================================================
 # PROMPT: ROM_VERSION_MEDIUM_PROMPT
 # STATUS: CURRENTLY IN USE
-# USED IN: RomService.generate_rom_version() (services/rom_service.py:4565)
+# USED IN: RomService.generate_rom_version() (services/rom_service.py)
 # TASK KEY: "rom_version_medium"
-# PURPOSE: Generates the condensed 'Medium' version of Final ROM, preserving technical details, context, and rationale.
+# PURPOSE: Generates the condensed 'Medium' version of Final ROM, preserving all important content with context and rationale.
 # ===========================================================================
 #region ROM_VERSION_MEDIUM_PROMPT
-ROM_VERSION_MEDIUM_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a MEDIUM version of this agenda's discussion - an aggregated version that retains key discussion details alongside all action points and decisions.
+ROM_VERSION_MEDIUM_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a MEDIUM version of this agenda's discussion — an aggregated version that retains ALL important discussion details, decisions, and action points with their context.
 
 AGENDA: {agenda_title}
 
 DISCUSSION POINTS:
 {points_json}
-{rules_section}
+{rules_section}{mandatory_section}
 INSTRUCTIONS:
 - Process ALL points together for this agenda as a whole - do NOT process each point individually.
-- Include both action points/decisions AND key discussion details that provide important context or rationale.
+- RETAIN ALL of the following categories of important information:
+  * Key decisions made AND their reasoning/rationale
+  * Action points, assignments, and commitments (with owners and deadlines)
+  * Important conclusions and outcomes
+  * Critical issues, blockers, concerns, or risks raised
+  * Status updates and progress reports on ongoing items
+  * Technical decisions with supporting reasoning
+  * Escalations, dependencies, and cross-team impacts
+  * Deadlines, milestones, and follow-up requirements
+  * Agreements, approvals, and disagreements noted
+  * Key discussion context that explains WHY decisions were made
 - Merge related or redundant points into single comprehensive points.
 - Summarize and restructure the complete agenda discussion into an aggregated, meaningful collection of points.
 - Each output point must be a complete, standalone sentence that preserves the original fact, speaker attribution, action owner, and specific details.
@@ -2477,6 +2495,74 @@ INSTRUCTIONS:
 
 Return ONLY a valid JSON array of rewritten point strings. No markdown, no code fences, no extra text:
 ["point 1", "point 2", ...]"""
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_AI_EDIT_POINTS_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: RomService.ai_edit_points() (services/rom_service.py)
+# TASK KEY: "rom_ai_edit_points"
+# PURPOSE: Edits selected Final ROM discussion points based on user instructions, returns updated points with explanation.
+# ===========================================================================
+#region ROM_AI_EDIT_POINTS_PROMPT
+ROM_AI_EDIT_POINTS_PROMPT = """You are an expert meeting records editor. The user has selected specific discussion points from a meeting's Record of Meeting (ROM) and wants you to edit them based on their instructions.
+
+AGENDA CONTEXT: {agenda_context}
+
+SELECTED DISCUSSION POINTS TO EDIT:
+{selected_points}
+
+USER INSTRUCTION:
+{user_prompt}
+
+{chat_history_section}
+
+RULES:
+- Apply the user's instruction to the selected points.
+- Preserve factual accuracy: do NOT invent, add, or infer information not present in the original points unless the user explicitly asks you to add something.
+- Preserve speaker names, action owners, dates, numbers, and key facts unless the user explicitly asks to change them.
+- Each output point must be a complete, standalone sentence.
+- Write in formal, professional language.
+- Provide a clear explanation of what you changed and why.
+
+Return your response as a valid JSON object with this exact structure (no markdown, no code fences):
+{{
+  "updated_points": [
+    {{"id": "original-point-id", "text": "updated point text"}},
+    ...
+  ],
+  "explanation": "A clear, concise explanation of all changes made and the reasoning behind them."
+}}"""
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_AI_CHAT_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: rom_router.py ai-chat endpoint
+# TASK KEY: "rom_ai_chat"
+# PURPOSE: Follow-up chat about the ROM content without making edits.
+# ===========================================================================
+#region ROM_AI_CHAT_PROMPT
+ROM_AI_CHAT_PROMPT = """You are an expert meeting records assistant. You are helping the user understand and discuss the Record of Meeting (ROM) for their meeting.
+
+CURRENT ROM CONTEXT:
+{rom_context}
+
+CONVERSATION HISTORY:
+{chat_history}
+
+USER MESSAGE:
+{user_message}
+
+INSTRUCTIONS:
+- Answer the user's question about the meeting content based on the ROM context provided.
+- Be helpful, concise, and accurate.
+- If the user asks about something not covered in the ROM, say so clearly.
+- Do NOT make up information that is not in the ROM.
+- You may suggest improvements, highlight potential issues, or offer insights based on the ROM content.
+- Respond in a natural conversational tone while remaining professional."""
 #endregion
 
 
@@ -2955,10 +3041,22 @@ class QwenProvider(AIProvider):
             logger.warning(f"[QwenAI] Failed to unload diarization pipeline: {e}")
 
         try:
-            from services.embedding import unload_encoder
-            unload_encoder()
+            from services.embedding_router import unload_active_encoder
+            unload_active_encoder()
         except Exception as e:
             logger.warning(f"[QwenAI] Failed to unload speaker encoder: {e}")
+
+        try:
+            from services.text_embedding_service import unload_text_embedder
+            unload_text_embedder()
+        except Exception:
+            pass
+
+        try:
+            from services.video_processing_service import unload_video_ocr_pipeline
+            unload_video_ocr_pipeline()
+        except Exception:
+            pass
 
         try:
             from main import unload_overlap_model

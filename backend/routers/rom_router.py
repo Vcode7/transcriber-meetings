@@ -179,6 +179,7 @@ class GenerateRomVersionRequest(BaseModel):
     version: str = Field(default="short", description="'short', 'medium', or 'long'")
     writing_rules: str = Field(default="", description="Optional writing rules from a reference document")
     base_final_rom: Optional[Dict] = Field(default=None, description="Base final ROM with original Stage 2 points")
+    important_points: Optional[List[Dict]] = Field(default=None, description="List of user-marked very important points")
 
 
 class ExtractWritingRulesRequest(BaseModel):
@@ -208,6 +209,25 @@ class GenerateEditTrainingRequest(BaseModel):
 
 class ManualEditPointRequest(BaseModel):
     polished_text: str = Field(..., min_length=1)
+
+
+class AiEditPointsRequest(BaseModel):
+    point_ids: List[str] = Field(..., min_length=1, max_length=3)
+    point_details: List[Dict] = Field(..., description="Full point objects for selected points")
+    prompt: str = Field(..., min_length=1)
+    agenda_context: Optional[str] = None
+    chat_history: Optional[List[Dict]] = None
+
+
+class AiChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    chat_history: Optional[List[Dict]] = None
+
+
+class MarkImportantRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    point_id: str = Field(..., min_length=1)
+    agenda_id: str = Field(..., min_length=1)
 
 
 # ── Defensive Auth Validation Helper ──────────────────────────────────────────
@@ -2014,6 +2034,9 @@ async def generate_rom_version(
     if version not in ("short", "medium", "long"):
         raise HTTPException(status_code=400, detail="version must be 'short', 'medium', or 'long'.")
 
+    # Get important points for mandatory section
+    important_points = req.important_points if req.important_points is not None else data.get("important_points", [])
+
     loop = asyncio.get_event_loop()
     rewritten_final_rom = await loop.run_in_executor(
         None,
@@ -2021,6 +2044,7 @@ async def generate_rom_version(
             final_rom=base_rom,
             version=version,
             writing_rules=req.writing_rules or "",
+            important_points=important_points,
         )
     )
 
@@ -2076,6 +2100,192 @@ async def select_rom_version(
         "final_rom": versions[version],
         "final_rom_versions": versions,
         "rom_data": data,
+    }
+
+
+# ── AI Edit Points Endpoint ──────────────────────────────────────────────────
+
+@router.post("/{recording_id}/final/ai-edit")
+async def ai_edit_points(
+    recording_id: str,
+    req: AiEditPointsRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Edit 1-3 selected discussion points using AI based on user prompt.
+    Returns updated points with explanation. Does NOT auto-save.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    if not data.get("final_rom") or not data["final_rom"].get("agendas"):
+        raise HTTPException(status_code=400, detail="Final ROM must be generated first.")
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: rom_service.ai_edit_points(
+            points=req.point_details,
+            prompt=req.prompt,
+            agenda_context=req.agenda_context or "",
+            chat_history=req.chat_history,
+        )
+    )
+
+    return {
+        "status": "success",
+        "updated_points": result.get("updated_points", []),
+        "explanation": result.get("explanation", ""),
+    }
+
+
+# ── AI Chat Endpoint ─────────────────────────────────────────────────────────
+
+@router.post("/{recording_id}/final/ai-chat")
+async def ai_chat(
+    recording_id: str,
+    req: AiChatRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Follow-up chat about the ROM content without making edits.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    if not data.get("final_rom"):
+        raise HTTPException(status_code=400, detail="Final ROM must be generated first.")
+
+    # Build ROM context summary
+    final_rom = data["final_rom"]
+    rom_lines = []
+    for agenda in (final_rom.get("agendas") or []):
+        title = agenda.get("title", "Untitled")
+        rom_lines.append(f"\nAgenda: {title}")
+        for pt in (agenda.get("discussion_points") or []):
+            text = pt.get("text") or pt.get("polished_text") or ""
+            speaker = pt.get("speaker") or "Unknown"
+            rom_lines.append(f"  - [{speaker}] {text}")
+    rom_context = "\n".join(rom_lines)
+
+    # Build chat history
+    chat_lines = []
+    if req.chat_history:
+        for msg in req.chat_history[-10:]:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            chat_lines.append(f"{role}: {content}")
+    chat_history_str = "\n".join(chat_lines) if chat_lines else "No previous conversation."
+
+    from services.prompt_service import get_prompt_sync
+    prompt_template = get_prompt_sync("rom_ai_chat")
+    full_prompt = prompt_template.format(
+        rom_context=rom_context[:8000],  # Truncate for token limits
+        chat_history=chat_history_str,
+        user_message=req.message,
+    )
+
+    from services.ai_provider import get_provider
+    provider = get_provider()
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: provider.query(full_prompt, max_tokens=2048, temperature=0.4)
+            if hasattr(provider, "query")
+            else provider._infer(full_prompt, max_new_tokens=2048)
+        )
+
+        # Clean response
+        import re
+        response_str = str(response).strip()
+        response_str = re.sub(r'<think>.*?</think>', '', response_str, flags=re.DOTALL).strip()
+
+        return {
+            "status": "success",
+            "response": response_str,
+        }
+    finally:
+        provider.unload_model()
+
+
+# ── Mark as Important Endpoints ──────────────────────────────────────────────
+
+@router.post("/{recording_id}/final/mark-important")
+async def mark_important(
+    recording_id: str,
+    req: MarkImportantRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Mark a text section as Very Important. These marked sections
+    are passed to the LLM when generating Short/Medium ROM to ensure
+    they are never omitted.
+    """
+    import uuid
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    important_points = data.get("important_points", [])
+    new_entry = {
+        "id": str(uuid.uuid4()),
+        "text": req.text,
+        "point_id": req.point_id,
+        "agenda_id": req.agenda_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    important_points.append(new_entry)
+    data["important_points"] = important_points
+    await _save_rom_data(recording_id, user_id, data, db)
+
+    return {
+        "status": "success",
+        "important_point": new_entry,
+        "important_points": important_points,
+    }
+
+
+@router.delete("/{recording_id}/final/mark-important/{important_id}")
+async def remove_important(
+    recording_id: str,
+    important_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Remove a previously marked important point.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    important_points = data.get("important_points", [])
+    data["important_points"] = [p for p in important_points if p.get("id") != important_id]
+    await _save_rom_data(recording_id, user_id, data, db)
+
+    return {
+        "status": "success",
+        "important_points": data["important_points"],
+    }
+
+
+@router.get("/{recording_id}/final/important-points")
+async def get_important_points(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Get all marked important points for a recording.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+
+    return {
+        "status": "success",
+        "important_points": data.get("important_points", []),
     }
 
 

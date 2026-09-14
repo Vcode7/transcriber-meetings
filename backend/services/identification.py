@@ -50,6 +50,7 @@ from services.embedding import (
     extract_embedding, best_match_similarity, average_embeddings, EMBEDDING_DIM,
     vad_extract_speaker_embedding,
 )
+from services import embedding_router
 from utils.audio_utils import load_audio
 
 logger = logging.getLogger(__name__)
@@ -61,22 +62,25 @@ _stale_profile_warning_logged = False
 _LEGACY_THRESHOLD = 0.75
 
 
-def _check_embedding_dim(stored_embeddings: list, profile_label: str) -> bool:
+def _check_embedding_dim(stored_embeddings: list, profile_label: str, expected_dim: int = EMBEDDING_DIM) -> bool:
     """
     Return True if the stored embeddings have the expected dimension.
     Log a one-time warning if they appear to be from an older model.
     """
     global _stale_profile_warning_logged
-    if not stored_embeddings:
+    if stored_embeddings is None or len(stored_embeddings) == 0:
         return False
-    first = stored_embeddings[0]
-    stored_dim = len(first) if hasattr(first, "__len__") else 0
-    if stored_dim != EMBEDDING_DIM:
+    if isinstance(stored_embeddings, np.ndarray) and stored_embeddings.ndim == 1:
+        stored_dim = len(stored_embeddings)
+    else:
+        first = stored_embeddings[0]
+        stored_dim = len(first) if hasattr(first, "__len__") else 0
+    if stored_dim != expected_dim:
         if not _stale_profile_warning_logged:
             logger.warning(
                 f"[Identify] Profile '{profile_label}' has {stored_dim}-d embeddings, "
-                f"but the current model (SpeechBrain ECAPA-TDNN) produces {EMBEDDING_DIM}-d embeddings. "
-                "This profile was enrolled with an older model and is incompatible. "
+                f"but the current model expects {expected_dim}-d embeddings. "
+                "This profile was enrolled with a different model and is incompatible. "
                 "Please re-enroll all voice profiles to restore speaker identification. "
                 "(This warning is shown once.)"
             )
@@ -207,6 +211,7 @@ def identify_speakers(
     voice_profiles: List[Dict],          # from DB, each has "label", "embeddings"
     similarity_threshold: float = 0.75,
     use_model_default_threshold: bool = True,
+    embedding_model: str = None,
 ) -> List[Dict[str, Any]]:
     """
     Perform speaker identification at the SPEAKER level (not per-segment).
@@ -244,12 +249,15 @@ def identify_speakers(
         }]
     """
     # ── Step 0: Resolve effective threshold ──────────────────────────────────
-    effective_threshold, threshold_reason = _get_effective_threshold(
-        similarity_threshold, use_model_default=use_model_default_threshold
+    active_model = embedding_model or embedding_router.get_active_model()
+    active_dim = embedding_router.get_embedding_dim(active_model)
+
+    effective_threshold, threshold_reason = embedding_router.get_effective_threshold(
+        similarity_threshold, model=active_model, use_model_default=use_model_default_threshold
     )
     logger.info(
         f"[Identify] Similarity threshold: {effective_threshold:.4f} "
-        f"(reason: {threshold_reason})"
+        f"(reason: {threshold_reason}, model: {active_model})"
     )
 
     audio, sr = load_audio(file_path, target_sr=16000)
@@ -275,7 +283,7 @@ def identify_speakers(
             if len(seg_audio) < sr * 0.5:
                 # Too short for even a basic embedding — skip cheaply before VAD
                 continue
-            emb = vad_extract_speaker_embedding(seg_audio, sr=sr)
+            emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=active_model)
             if emb is not None:
                 seg_embeddings.append(emb)
         mean_emb = _average_embeddings(seg_embeddings) if seg_embeddings else None
@@ -286,25 +294,36 @@ def identify_speakers(
             f"({'OK' if mean_emb is not None else 'FAILED — too short'})"
         )
 
-    # ── Step 3: Pre-compute profile centroids ────────────────────────────────
-    # This is done once per profile, outside the speaker loop, so it's O(P)
-    # rather than O(P * S).
-    profile_centroids: Dict[str, Tuple[Optional[np.ndarray], str]] = {}
+    # ── Step 3: Pre-compute profile centroids (Strict Model Isolation) ───────
+    # We only consider profiles that have embeddings matching active_model.
+    # We NEVER fall back to another model's embeddings.
+    profile_centroids: Dict[str, Tuple[Optional[np.ndarray], str, list]] = {}
     for profile in voice_profiles:
         label = profile.get("label", "?")
-        stored = profile.get("embeddings", [])
+        stored = embedding_router.get_profile_embeddings(profile, active_model)
         if not stored:
-            logger.warning(f"[Identify] Profile '{label}' has no embeddings — skipping")
-            profile_centroids[label] = (None, "failed")
+            logger.warning(
+                f"[Identify] Profile '{label}' has no {active_model} embeddings — "
+                f"skipping profile (no cross-model fallback)."
+            )
             continue
-        if not _check_embedding_dim(stored, label):
-            profile_centroids[label] = (None, "failed")
+        if not _check_embedding_dim(stored, label, active_dim):
+            logger.warning(
+                f"[Identify] Profile '{label}' embeddings do not match active dimension "
+                f"({active_dim}-d for {active_model}) — skipping."
+            )
             continue
-        centroid, method = _compute_profile_centroid(stored)
-        profile_centroids[label] = (centroid, method)
+        centroid, method = _compute_profile_centroid(stored, expected_dim=active_dim)
+        profile_centroids[label] = (centroid, method, stored)
         logger.info(
             f"[Identify] Profile '{label}': "
-            f"{len(stored)} stored embeddings → scoring method = {method}"
+            f"{len(stored)} stored {active_model} embeddings → scoring method = {method}"
+        )
+
+    if not profile_centroids:
+        logger.error(
+            f"[Identify] No compatible speaker profiles found for active model '{active_model}' "
+            f"(expected {active_dim}-d embeddings). Speaker identification will assign generic labels."
         )
 
     # ── Step 4: Match each unique speaker against voice profiles ─────────────
@@ -313,7 +332,6 @@ def identify_speakers(
         spk: idx + 1 for idx, spk in enumerate(sorted_speakers)
     }
 
-    # ── Step 4: Match speakers against voice profiles (Greedy Global Matching) ──
     # Result: raw diarization id → (human_label, profile_id, similarity, scoring_method)
     speaker_resolution: Dict[str, tuple] = {}
 
@@ -324,25 +342,41 @@ def identify_speakers(
         if mean_emb is None:
             logger.warning(f"[Identify] Speaker '{raw_id}' has no usable embedding — generic label.")
             continue
-        if not voice_profiles:
+        if not profile_centroids:
+            continue
+
+        # Dimension safety check on query embedding
+        if len(mean_emb) != active_dim:
+            logger.error(
+                f"[Identify] Speaker '{raw_id}' embedding dimension {len(mean_emb)} does not "
+                f"match expected {active_dim} for {active_model}. Skipping similarity calculation."
+            )
             continue
 
         for profile in voice_profiles:
             label = profile.get("label", "?")
-            centroid, method = profile_centroids.get(label, (None, "failed"))
+            if label not in profile_centroids:
+                # Incompatible profile for active model — strictly skip
+                continue
+
+            centroid, method, stored = profile_centroids[label]
             profile_id = str(profile.get("_id", profile.get("id", "")))
 
-            if centroid is None:
-                stored = profile.get("embeddings", [])
-                if stored and _check_embedding_dim(stored, label):
-                    sim = best_match_similarity(mean_emb, stored)
-                    used_method = "sample_max_fallback"
-                else:
-                    continue
-            else:
+            if centroid is not None:
                 from services.embedding import cosine_similarity
+                if len(centroid) != len(mean_emb):
+                    logger.error(
+                        f"[Identify] Dimension mismatch between centroid ({len(centroid)}) "
+                        f"and query ({len(mean_emb)}). Skipping similarity."
+                    )
+                    continue
                 sim = cosine_similarity(mean_emb, centroid)
                 used_method = method
+            elif stored:
+                sim = best_match_similarity(mean_emb, stored)
+                used_method = "sample_max_fallback"
+            else:
+                continue
 
             logger.info(
                 f"[Identify] Speaker '{raw_id}' vs profile '{label}': "
@@ -501,9 +535,13 @@ def refine_transcript_speakers_with_ecapa(
     voice_profiles: List[Dict],
     similarity_threshold: float = 0.75,
     use_model_default_threshold: bool = True,
+    embedding_model: str = None,
 ) -> List[Dict[str, Any]]:
     """
-    Perform a high-confidence ECAPA segment-level refinement pass on the final re-segmented transcript segments.
+    Perform a high-confidence segment-level refinement pass on the final
+    re-segmented transcript segments.  Supports both ECAPA and ERes2Net
+    models via the embedding_router (the function name is kept for
+    backward compatibility).
     """
     if not speaker_segments:
         return speaker_segments
@@ -515,22 +553,23 @@ def refine_transcript_speakers_with_ecapa(
     except Exception:
         speaker_refinement_margin = 0.10
 
-    # 1. Resolve effective threshold (for logging Considered but Rejected)
-    effective_threshold, _ = _get_effective_threshold(
-        similarity_threshold, use_model_default=use_model_default_threshold
+    # 1. Resolve effective threshold (model-aware)
+    active_model = embedding_model or embedding_router.get_active_model()
+    active_dim = embedding_router.get_embedding_dim(active_model)
+    effective_threshold, _ = embedding_router.get_effective_threshold(
+        similarity_threshold, model=active_model, use_model_default=use_model_default_threshold
     )
 
-    # 2. Pre-compute profile centroids
-    profile_centroids: Dict[str, Tuple[Optional[np.ndarray], str]] = {}
+    # 2. Pre-compute profile centroids (Strict Model Isolation)
+    profile_centroids: Dict[str, Tuple[Optional[np.ndarray], str, list]] = {}
     if voice_profiles:
         for profile in voice_profiles:
             label = profile.get("label", "?")
-            stored = profile.get("embeddings", [])
-            if not stored or not _check_embedding_dim(stored, label):
-                profile_centroids[label] = (None, "failed")
+            stored = embedding_router.get_profile_embeddings(profile, active_model)
+            if not stored or not _check_embedding_dim(stored, label, active_dim):
                 continue
-            centroid, method = _compute_profile_centroid(stored)
-            profile_centroids[label] = (centroid, method)
+            centroid, method = _compute_profile_centroid(stored, expected_dim=active_dim)
+            profile_centroids[label] = (centroid, method, stored)
 
     # 3. Load audio once
     try:
@@ -558,9 +597,9 @@ def refine_transcript_speakers_with_ecapa(
         e_idx = int(end * sr)
         seg_audio = audio[s_idx:e_idx]
 
-        segment_emb = vad_extract_speaker_embedding(seg_audio, sr=sr)
+        segment_emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=active_model)
         if segment_emb is None:
-            segment_emb = extract_embedding(seg_audio, sr=sr)
+            segment_emb = embedding_router.extract_embedding(seg_audio, sr=sr, model=active_model)
 
         if segment_emb is not None:
             segment_embeddings[i] = segment_emb
@@ -594,6 +633,13 @@ def refine_transcript_speakers_with_ecapa(
         if segment_emb is None:
             continue
 
+        # Dimension safety check
+        if len(segment_emb) != active_dim:
+            logger.error(
+                f"[Refine] Segment {i} embedding dimension {len(segment_emb)} != {active_dim}. Skipping."
+            )
+            continue
+
         start = seg["start"]
         end = seg["end"]
 
@@ -614,19 +660,18 @@ def refine_transcript_speakers_with_ecapa(
         if voice_profiles:
             for profile in voice_profiles:
                 label = profile.get("label", "?")
-                centroid, method = profile_centroids.get(label, (None, "failed"))
                 profile_id = str(profile.get("_id", profile.get("id", "")))
 
                 if (label == original_label) or (original_profile_id and profile_id == original_profile_id):
-                    if centroid is None:
-                        stored = profile.get("embeddings", [])
-                        if stored and _check_embedding_dim(stored, label):
+                    if label in profile_centroids:
+                        centroid, method, stored = profile_centroids[label]
+                        if centroid is not None:
+                            from services.embedding import cosine_similarity
+                            original_label_sim = cosine_similarity(segment_emb, centroid)
+                            found_original_sim = True
+                        elif stored:
                             original_label_sim = best_match_similarity(segment_emb, stored)
                             found_original_sim = True
-                    else:
-                        from services.embedding import cosine_similarity
-                        original_label_sim = cosine_similarity(segment_emb, centroid)
-                        found_original_sim = True
                     break
 
         # Fallback to conversation centroid of the original speaker if not matching profiles
@@ -636,22 +681,22 @@ def refine_transcript_speakers_with_ecapa(
                 original_label_sim = cosine_similarity(segment_emb, conversation_centroids[original_spk_key])
                 found_original_sim = True
 
-        # 1. Compare against saved profiles
+        # 1. Compare against saved profiles (Strict Model Isolation)
         if voice_profiles:
             for profile in voice_profiles:
                 label = profile.get("label", "?")
-                centroid, method = profile_centroids.get(label, (None, "failed"))
+                if label not in profile_centroids:
+                    continue
+                centroid, method, stored = profile_centroids[label]
                 profile_id = str(profile.get("_id", profile.get("id", "")))
 
-                if centroid is None:
-                    stored = profile.get("embeddings", [])
-                    if stored and _check_embedding_dim(stored, label):
-                        sim_val = best_match_similarity(segment_emb, stored)
-                    else:
-                        continue
-                else:
+                if centroid is not None:
                     from services.embedding import cosine_similarity
                     sim_val = cosine_similarity(segment_emb, centroid)
+                elif stored:
+                    sim_val = best_match_similarity(segment_emb, stored)
+                else:
+                    continue
 
                 if sim_val > best_profile_sim:
                     best_profile_sim = sim_val

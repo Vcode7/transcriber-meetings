@@ -4,6 +4,7 @@ import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
   Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video, BrainCircuit,
+  MessageSquare, FlaskConical,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
@@ -20,6 +21,8 @@ const NAV = [
   { to: '/dashboard/dictionary', icon: BookOpen, label: 'Dictionary' },
   { to: '/dashboard/global-context', icon: Database, label: 'Global Context' },
   { to: '/dashboard/training', icon: BrainCircuit, label: 'Training' },
+  { to: '/dashboard/ai-chat', icon: MessageSquare, label: 'AI Chat' },
+  { to: '/dashboard/model-arena', icon: FlaskConical, label: 'Model Arena' },
 ]
 const VOICE_NAV = [
   { to: '/dashboard/add-voice', icon: UserPlus, label: 'Add Voice' },

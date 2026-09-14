@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     # ECAPA-TDNN cosine scores differ from CAM++ — 0.75 is a good starting point.
     SPEAKER_SIMILARITY_THRESHOLD: float = 0.75          # backward-compat user default
     SPEAKER_SIMILARITY_THRESHOLD_ECAPA_TDNN: float = 0.72  # model-specific default
+    SPEAKER_SIMILARITY_THRESHOLD_ERES2NET: float = 0.55   # ERes2Net-Large default (different score distribution)
 
     MIN_SEGMENT_DURATION: float = 1.5  # seconds
 

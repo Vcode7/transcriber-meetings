@@ -4603,6 +4603,7 @@ class RomService:
         final_rom: Dict,
         version: str,
         writing_rules: str = "",
+        important_points: list = None,
     ) -> Dict:
         """
         Generate a condensed Short or Medium version of the Final ROM.
@@ -4676,10 +4677,26 @@ class RomService:
                     )
                 points_json = "\n\n".join(lines)
 
+                # Build mandatory section from important points for this agenda
+                agenda_id = agenda.get("agenda_id", "")
+                mandatory_items = []
+                if important_points:
+                    for imp in important_points:
+                        if imp.get("agenda_id") == agenda_id or not imp.get("agenda_id"):
+                            mandatory_items.append(imp.get("text", ""))
+                if mandatory_items:
+                    mandatory_section = "\n\nMANDATORY POINTS (MUST NOT be omitted or removed):\n"
+                    for mi in mandatory_items:
+                        mandatory_section += f"- {mi}\n"
+                    mandatory_section += "These points are marked as critically important by the user and MUST appear in the output, even in the Short version. Do NOT remove, skip, or summarize away these points.\n"
+                else:
+                    mandatory_section = ""
+
                 prompt = prompt_template.format(
                     agenda_title=agenda_title,
                     points_json=points_json,
                     rules_section=rules_section,
+                    mandatory_section=mandatory_section,
                 )
 
                 try:
@@ -4743,6 +4760,107 @@ class RomService:
             gc.collect()
 
         return rewritten
+
+    # -- AI Edit Points (Edit with AI feature) ---------------------------------
+
+    def ai_edit_points(
+        self,
+        points: list,
+        prompt: str,
+        agenda_context: str = "",
+        chat_history: list = None,
+    ) -> Dict:
+        """
+        Edit selected discussion points using AI based on user instructions.
+
+        Returns a dict with 'updated_points' and 'explanation'.
+        """
+        import json
+        from services.prompt_service import get_prompt_sync
+
+        prompt_template = get_prompt_sync("rom_ai_edit_points")
+
+        # Build selected points text
+        selected_lines = []
+        for i, pt in enumerate(points):
+            pt_id = pt.get("id", f"P{i+1}")
+            speaker = (
+                pt.get("speaker") or
+                (pt.get("speakers") or [None])[0] or
+                "Unknown"
+            )
+            text = (pt.get("text") or pt.get("polished_text") or "").strip()
+            selected_lines.append(
+                f"[Point {i+1}] ID={pt_id} | Speaker={speaker}\n{text}"
+            )
+        selected_points_str = "\n\n".join(selected_lines)
+
+        # Build chat history section
+        chat_history_section = ""
+        if chat_history and len(chat_history) > 0:
+            chat_lines = []
+            for msg in chat_history[-10:]:  # Last 10 messages for context
+                role = msg.get("role", "user").upper()
+                content = msg.get("content", "")
+                chat_lines.append(f"{role}: {content}")
+            chat_history_section = "PREVIOUS CONVERSATION:\n" + "\n".join(chat_lines)
+
+        full_prompt = prompt_template.format(
+            agenda_context=agenda_context or "General Discussion",
+            selected_points=selected_points_str,
+            user_prompt=prompt,
+            chat_history_section=chat_history_section,
+        )
+
+        from services.ai_provider import get_provider
+        provider = get_provider()
+        try:
+            if hasattr(provider, "query"):
+                raw = provider.query(full_prompt, max_tokens=4096, temperature=0.3)
+            else:
+                raw = provider._infer(full_prompt, max_new_tokens=4096)
+
+            # Parse JSON response
+            raw_str = str(raw).strip()
+
+            # Remove <think>...</think> blocks if present
+            import re
+            raw_str = re.sub(r'<think>.*?</think>', '', raw_str, flags=re.DOTALL).strip()
+
+            # Remove markdown fences if present
+            if raw_str.startswith("```"):
+                lines = raw_str.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                raw_str = "\n".join(lines).strip()
+
+            # Try to find JSON object
+            json_match = re.search(r'\{[\s\S]*\}', raw_str)
+            if json_match:
+                raw_str = json_match.group(0)
+
+            result = json.loads(raw_str)
+
+            updated_points = result.get("updated_points", [])
+            explanation = result.get("explanation", "Points have been updated based on your instructions.")
+
+            return {
+                "updated_points": updated_points,
+                "explanation": explanation,
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[RomService] ai_edit_points: Failed to parse JSON response: {e}. Raw: {str(raw)[:300]}")
+            # Fallback: return original points with error explanation
+            return {
+                "updated_points": [{"id": pt.get("id", ""), "text": pt.get("text") or pt.get("polished_text", "")} for pt in points],
+                "explanation": f"AI response could not be parsed. Original points retained. Error: {str(e)}",
+            }
+        except Exception as e:
+            logger.error(f"[RomService] ai_edit_points: Error: {e}")
+            raise
+        finally:
+            provider.unload_model()
+            gc.collect()
 
     # -- Public rewrite entry-point --------------------------------------------
 

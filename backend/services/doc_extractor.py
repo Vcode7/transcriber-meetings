@@ -938,6 +938,14 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
         logger.warning(f"[DocExtractor] Unknown extension '{ext}' for '{filename}' — skipping.")
         return ""
 
+    # If OCR could have been used, unload RapidOCR sessions to release ONNX / CUDA resources
+    if ext in (".pdf", ".docx", ".pptx", ".doc", ".ppt", ".png", ".jpg", ".jpeg", ".webp"):
+        try:
+            from services.ocr_engine import unload_ocr_engine
+            unload_ocr_engine()
+        except Exception:
+            pass
+
     logger.info(f"[DocExtractor] Extracted {len(text)} chars from '{filename}' (format={ext})")
     return text
 

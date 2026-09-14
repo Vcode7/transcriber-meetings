@@ -1,6 +1,13 @@
 from pathlib import Path
 
-models = Path("backend/runtime/models")
+def _resolve_models_dir() -> Path:
+    root = Path(__file__).resolve().parent.parent
+    app_models = root / "Application" / "runtime" / "models"
+    if app_models.is_dir():
+        return app_models
+    return root / "backend" / "runtime" / "models"
+
+models = _resolve_models_dir()
 
 checks = [
     ("audio_context/config.yaml",                   "pipeline config"),
@@ -10,6 +17,11 @@ checks = [
     ("audio_context/plda/xvec_transform.npz",       "x-vector transform"),
     ("ecapa_tdnn/hyperparams.yaml",                 "ECAPA-TDNN config"),
     ("ecapa_tdnn/embedding_model.ckpt",             "ECAPA-TDNN weights"),
+]
+
+optional_checks = [
+    ("eres2net_large/configuration.json",           "ERes2Net-Large config (optional)"),
+    ("eres2net_large/eres2net_large_model.ckpt",    "ERes2Net-Large weights (optional)"),
 ]
 
 print()
@@ -25,6 +37,12 @@ for rel, desc in checks:
     print(f"[{status:<8}] {rel:<45} ({desc})")
     if not ok:
         all_ok = False
+
+for rel, desc in optional_checks:
+    p = models / rel
+    ok = p.exists()
+    status = "OK" if ok else "OPTIONAL"
+    print(f"[{status:<8}] {rel:<45} ({desc})")
 
 print("=" * 70)
 print("Result:", "READY" if all_ok else "INCOMPLETE - run download_speaker_models.py")

@@ -7,7 +7,8 @@ import {
   ChevronUp, ChevronDown, ArrowRightLeft, Tag, Trash2, Sliders,
   RotateCcw, RotateCw, WandSparkles, FileUp, Search, Replace, History,
   Merge, Scissors, Check, CornerDownRight, GitMerge,
-  BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks, Zap
+  BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks, Zap,
+  Star, Send, MessageCircle
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -310,6 +311,13 @@ interface RomData {
     stage3?: string
     final_rom?: string
   }
+  important_points?: Array<{
+    id: string
+    text: string
+    point_id: string
+    agenda_id: string
+    created_at?: string
+  }>
 }
 
 type ProcessState = 'idle' | 'processing' | 'done' | 'error'
@@ -1006,6 +1014,39 @@ export default function RomPage() {
   const [splittingPoint, setSplittingPoint] = useState(false)
   const [deletingText, setDeletingText] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; pointId: string; selectedText: string } | null>(null)
+
+  // Final ROM context menu (for Mark as Important)
+  const [finalRomContextMenu, setFinalRomContextMenu] = useState<{
+    x: number
+    y: number
+    pointId: string
+    agendaId: string
+    selectedText: string
+  } | null>(null)
+
+  // AI Edit with AI state
+  const [aiEditSelectedIds, setAiEditSelectedIds] = useState<Set<string>>(new Set())
+  const [aiEditPrompt, setAiEditPrompt] = useState('')
+  const [aiEditLoading, setAiEditLoading] = useState(false)
+  const [showAiChatPanel, setShowAiChatPanel] = useState(false)
+  const [aiChatMessages, setAiChatMessages] = useState<Array<{
+    role: 'user' | 'ai'
+    content: string
+    timestamp: Date
+    pointUpdates?: Array<{ id: string; text: string }>
+  }>>([])
+  const [aiChatInput, setAiChatInput] = useState('')
+  const [aiChatLoading, setAiChatLoading] = useState(false)
+
+  // Mark as Very Important state
+  const [importantPoints, setImportantPoints] = useState<Array<{
+    id: string
+    text: string
+    point_id: string
+    agenda_id: string
+    created_at?: string
+  }>>([])
+  const [showImportantPanel, setShowImportantPanel] = useState(false)
   const [showChangeHistory, setShowChangeHistory] = useState(false)
   const [changeHistory, setChangeHistory] = useState<any[]>([])
   const [loadingHistory, setLoadingHistory] = useState(false)
@@ -1025,10 +1066,11 @@ export default function RomPage() {
   useEffect(() => {
     const handleScrollOrClick = () => {
       if (contextMenu) setContextMenu(null)
+      if (finalRomContextMenu) setFinalRomContextMenu(null)
     }
     window.addEventListener('scroll', handleScrollOrClick, true)
     return () => window.removeEventListener('scroll', handleScrollOrClick, true)
-  }, [contextMenu])
+  }, [contextMenu, finalRomContextMenu])
 
   // Stage 3 controls
   const [agendaText, setAgendaText] = useState('')
@@ -1798,6 +1840,10 @@ export default function RomPage() {
           setSpeakerMappings(mappings)
         }
 
+        if (Array.isArray(data.important_points)) {
+          setImportantPoints(data.important_points)
+        }
+
         if (data.final_rom) {
           setActiveTab('final')
           // Snapshot the original final_rom so Revert always works
@@ -2246,6 +2292,7 @@ export default function RomPage() {
 
   const [generatingVersion, setGeneratingVersion] = useState(false)
 
+
   const downloadDocx = async (stage: string) => {
     try {
       const queryParam = stage === 'final'
@@ -2333,6 +2380,7 @@ export default function RomPage() {
         version: targetVersion,
         writing_rules: writingRules || '',
         base_final_rom: baseRom,
+        important_points: importantPoints,
       })
       const rewrittenFinalRom = res.data.rewritten_final_rom || res.data.final_rom
       if (rewrittenFinalRom && rewrittenFinalRom.agendas?.length) {
@@ -2462,6 +2510,235 @@ export default function RomPage() {
     setIsRewritten(false)
     setRewriteStatus('idle')
     toast.success('Reverted to original ROM')
+  }
+
+  // ── AI Edit, AI Chat, & Mark Important Handlers ────────────────────────────
+
+  // Toggle selection of a point for Edit with AI (max 3 points)
+  const handleToggleAiEditPoint = (pointId: string) => {
+    setAiEditSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(pointId)) {
+        next.delete(pointId)
+      } else {
+        if (next.size >= 3) {
+          toast.error('You can select at most 3 points for AI Edit')
+          return prev
+        }
+        next.add(pointId)
+      }
+      return next
+    })
+  }
+
+  // Submit AI Edit request for selected points
+  const handleAiEditSubmit = async () => {
+    if (!id || aiEditSelectedIds.size === 0 || !aiEditPrompt.trim()) return
+    const activeRom = romVersion === 'long'
+      ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+      : romData?.final_rom_versions?.[romVersion]
+    if (!activeRom?.agendas) return
+
+    // Find all selected points and their agenda context
+    const selectedPoints: any[] = []
+    let detectedAgendaContext = ''
+    for (const ag of activeRom.agendas) {
+      for (const pt of (ag.discussion_points || [])) {
+        if (aiEditSelectedIds.has(pt.id)) {
+          selectedPoints.push({
+            ...pt,
+            agenda_id: ag.agenda_id,
+            agenda_title: ag.title,
+          })
+          if (!detectedAgendaContext) {
+            detectedAgendaContext = `${ag.agenda_id}: ${ag.title}`
+          }
+        }
+      }
+    }
+
+    if (selectedPoints.length === 0) {
+      toast.error('Could not locate selected points in current ROM')
+      return
+    }
+
+    const currentPrompt = aiEditPrompt.trim()
+    setAiEditLoading(true)
+    // Add user's message to chat history immediately
+    const userMsg = {
+      role: 'user' as const,
+      content: `[Edit ${selectedPoints.length} point(s)]: ${currentPrompt}`,
+      timestamp: new Date()
+    }
+    setAiChatMessages(prev => [...prev, userMsg])
+    setShowAiChatPanel(true)
+
+    try {
+      const res = await api.post(`/rom/${id}/final/ai-edit`, {
+        point_ids: Array.from(aiEditSelectedIds),
+        point_details: selectedPoints,
+        prompt: currentPrompt,
+        agenda_context: detectedAgendaContext,
+        chat_history: aiChatMessages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+      })
+
+      const updatedPoints = res.data?.updated_points || []
+      const explanation = res.data?.explanation || 'Points have been updated by AI.'
+
+      if (updatedPoints.length > 0) {
+        const updateMap = new Map<string, string>()
+        for (const up of updatedPoints) {
+          const txt = up.text || up.polished_text || ''
+          if (up.id && txt) {
+            updateMap.set(up.id, txt)
+          }
+        }
+
+        const newRom = JSON.parse(JSON.stringify(activeRom))
+        for (const ag of newRom.agendas || []) {
+          for (const pt of (ag.discussion_points || [])) {
+            if (updateMap.has(pt.id)) {
+              const newText = updateMap.get(pt.id)!
+              pt.text = newText
+              pt.polished_text = newText
+            }
+          }
+        }
+
+        setRomData(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            final_rom: newRom,
+            final_rom_versions: {
+              ...(prev.final_rom_versions || {}),
+              [romVersion]: newRom
+            }
+          }
+        })
+
+        // Add AI response to chat
+        const aiMsg = {
+          role: 'ai' as const,
+          content: explanation,
+          timestamp: new Date(),
+          pointUpdates: updatedPoints
+        }
+        setAiChatMessages(prev => [...prev, aiMsg])
+
+        // Clear prompt and selection
+        setAiEditPrompt('')
+        setAiEditSelectedIds(new Set())
+        toast.success('Points updated with AI! Click "Save Changes" to persist.')
+      } else {
+        throw new Error('No updated points returned by AI')
+      }
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to edit points with AI')
+      setAiChatMessages(prev => [
+        ...prev,
+        {
+          role: 'ai',
+          content: `Failed to apply edit: ${getApiErrorDetail(e) || 'Unknown error occurred'}`,
+          timestamp: new Date()
+        }
+      ])
+    } finally {
+      setAiEditLoading(false)
+    }
+  }
+
+  // Follow-up chat inside AI Assistant panel
+  const handleAiChatSend = async () => {
+    if (!id || !aiChatInput.trim() || aiChatLoading) return
+    const msg = aiChatInput.trim()
+    setAiChatInput('')
+    const userMsg = { role: 'user' as const, content: msg, timestamp: new Date() }
+    setAiChatMessages(prev => [...prev, userMsg])
+    setAiChatLoading(true)
+
+    try {
+      const res = await api.post(`/rom/${id}/final/ai-chat`, {
+        message: msg,
+        chat_history: [...aiChatMessages, userMsg].slice(-10).map(m => ({ role: m.role, content: m.content })),
+      })
+
+      const reply = res.data?.response || 'No response from assistant.'
+      setAiChatMessages(prev => [...prev, { role: 'ai' as const, content: reply, timestamp: new Date() }])
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'AI chat request failed')
+      setAiChatMessages(prev => [
+        ...prev,
+        { role: 'ai' as const, content: `Error: ${getApiErrorDetail(e) || 'Failed to generate response'}`, timestamp: new Date() }
+      ])
+    } finally {
+      setAiChatLoading(false)
+    }
+  }
+
+  // Handle right-click context menu in Final ROM (Long view)
+  const handleFinalRomContextMenu = (e: React.MouseEvent, pointId: string, agendaId: string) => {
+    const selection = window.getSelection()
+    const selectedText = selection?.toString()?.trim() || ''
+    if (!selectedText) return
+    e.preventDefault()
+    setFinalRomContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      pointId,
+      agendaId,
+      selectedText,
+    })
+  }
+
+  // Mark selected text as Very Important
+  const handleMarkAsImportant = async () => {
+    if (!id || !finalRomContextMenu) return
+    const { selectedText, pointId, agendaId } = finalRomContextMenu
+    setFinalRomContextMenu(null)
+
+    try {
+      const res = await api.post(`/rom/${id}/final/mark-important`, {
+        text: selectedText,
+        point_id: pointId,
+        agenda_id: agendaId,
+      })
+
+      const newEntry = res.data?.important_point
+      if (newEntry) {
+        setImportantPoints(prev => [...prev, newEntry])
+        setRomData(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            important_points: [...(prev.important_points || []), newEntry]
+          }
+        })
+        setShowImportantPanel(true)
+        toast.success('Marked as Very Important! It will be preserved in Short & Medium ROMs.')
+      }
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to mark as important')
+    }
+  }
+
+  // Remove marked important point
+  const handleRemoveImportant = async (importantId: string) => {
+    if (!id) return
+    try {
+      await api.delete(`/rom/${id}/final/mark-important/${importantId}`)
+      setImportantPoints(prev => prev.filter(p => p.id !== importantId))
+      setRomData(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          important_points: (prev.important_points || []).filter(p => p.id !== importantId)
+        }
+      })
+      toast.success('Important point marker removed')
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Failed to remove important mark')
+    }
   }
 
   if (loadingRec) {
@@ -4502,7 +4779,39 @@ export default function RomPage() {
                       <span>Include Action Points</span>
                     </label>
                   </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => setShowAiChatPanel(prev => !prev)}
+                      style={{
+                        padding: '.35rem .85rem', borderRadius: 8,
+                        background: showAiChatPanel ? 'hsl(280,75%,60%/.22)' : 'hsl(280,75%,60%/.1)',
+                        color: 'hsl(280,75%,55%)', border: `1.5px solid ${showAiChatPanel ? 'hsl(280,75%,60%)' : 'hsl(280,75%,60%/.35)'}`,
+                        fontWeight: 700, fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6,
+                        cursor: 'pointer', fontFamily: 'Inter', transition: 'all .15s ease'
+                      }}
+                    >
+                      <Sparkles size={12} /> {showAiChatPanel ? 'Hide Assistant' : 'AI Assistant'}
+                      {aiChatMessages.length > 0 && (
+                        <span style={{ fontSize: '.64rem', padding: '0 5px', borderRadius: 6, background: 'hsl(280,75%,60%)', color: 'white' }}>
+                          {aiChatMessages.length}
+                        </span>
+                      )}
+                    </button>
+                    {importantPoints.length > 0 && (
+                      <button
+                        onClick={() => setShowImportantPanel(prev => !prev)}
+                        style={{
+                          padding: '.35rem .85rem', borderRadius: 8,
+                          background: showImportantPanel ? 'hsl(45,100%,50%/.22)' : 'hsl(45,100%,50%/.1)',
+                          color: 'hsl(38,95%,40%)', border: `1.5px solid ${showImportantPanel ? 'hsl(45,100%,50%/.7)' : 'hsl(45,100%,50%/.35)'}`,
+                          fontWeight: 700, fontSize: '.76rem', display: 'flex', alignItems: 'center', gap: 6,
+                          cursor: 'pointer', fontFamily: 'Inter', transition: 'all .15s ease'
+                        }}
+                      >
+                        <Star size={12} fill={showImportantPanel ? 'currentColor' : 'none'} />
+                        Important Points ({importantPoints.length})
+                      </button>
+                    )}
                     <button
                       onClick={() => saveFinalRom(activeVersionRom)}
                       disabled={savingRom || !isCurrentVersionGenerated}
@@ -4642,6 +4951,91 @@ export default function RomPage() {
                     </span>
                   </div>
                 </div>
+
+                {/* ── Collapsible Very Important Points Summary Panel ── */}
+                {showImportantPanel && importantPoints.length > 0 && (
+                  <div style={{
+                    borderRadius: 10,
+                    border: '1.5px solid hsl(45,100%,50%/.45)',
+                    background: 'hsl(45,100%,50%/.05)',
+                    padding: '.85rem 1rem',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '.6rem'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <Star size={15} fill="hsl(45,100%,50%)" style={{ color: 'hsl(38,95%,45%)' }} />
+                        <span style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(38,95%,35%)' }}>
+                          Marked as Very Important ({importantPoints.length})
+                        </span>
+                        <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>
+                          — Mandatory text preserved across Short & Medium ROM generation
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setShowImportantPanel(false)}
+                        title="Close panel"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 8 }}>
+                      {importantPoints.map((ip) => (
+                        <div
+                          key={ip.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            padding: '.5rem .75rem',
+                            borderRadius: 8,
+                            background: 'hsl(var(--card))',
+                            border: '1px solid hsl(45,100%,50%/.3)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                            <span style={{
+                              fontSize: '.68rem',
+                              fontWeight: 700,
+                              background: 'hsl(30,90%,55%/.15)',
+                              color: 'hsl(30,90%,45%)',
+                              padding: '1px 6px',
+                              borderRadius: 4,
+                              flexShrink: 0,
+                              fontFamily: 'JetBrains Mono'
+                            }}>
+                              {ip.agenda_id}
+                            </span>
+                            <span style={{ fontSize: '.79rem', color: 'hsl(var(--ink))', fontStyle: 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ip.text}>
+                              "{ip.text}"
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => handleRemoveImportant(ip.id)}
+                            title="Remove important marker"
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'hsl(var(--destructive))',
+                              cursor: 'pointer',
+                              padding: '2px 4px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              flexShrink: 0
+                            }}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* If version is NOT generated, show the prominent Generate button card */}
                 {!isCurrentVersionGenerated ? (
@@ -4954,9 +5348,24 @@ export default function RomPage() {
                       )}
                     </div>
 
-                    {/* Final ROM agendas */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                      {activeVersionRom.agendas.map((agenda: any, aIdx: number) => {
+                    {/* ── Main Content Area: Agendas on Left, AI Assistant on Right ── */}
+                    <div style={{
+                      display: 'flex',
+                      gap: '1.25rem',
+                      alignItems: 'flex-start',
+                      width: '100%',
+                      position: 'relative'
+                    }}>
+                      {/* Left Column: Final ROM agendas */}
+                      <div style={{
+                        flex: showAiChatPanel ? '1 1 65%' : '1 1 100%',
+                        minWidth: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '1rem',
+                        transition: 'flex 0.2s ease'
+                      }}>
+                        {activeVersionRom.agendas.map((agenda: any, aIdx: number) => {
                         const pts = agenda.discussion_points || []
                         const isSkipped = agenda.skipped === true
 
@@ -5036,15 +5445,43 @@ export default function RomPage() {
                                     const ptText = pt.text || pt.polished_text || ''
                                     const spk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '—')
                                     const isDocPoint = pt.is_doc_point
+                                    const isSelectedForAi = aiEditSelectedIds.has(pt.id)
+                                    const ptImportantMarks = importantPoints.filter(ip => ip.point_id === pt.id)
 
                                     return (
                                       <div key={pt.id || `${agenda.agenda_id || aIdx}-pt-${pIdx}`}>
-                                        <div style={{ borderRadius: 8, border: `1px solid ${isDocPoint ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.3)'}`, background: isDocPoint ? 'hsl(280,75%,60%/.05)' : 'hsl(var(--paper)/.4)', padding: '.6rem .8rem' }}>
+                                        <div style={{
+                                          borderRadius: 8,
+                                          border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : isDocPoint ? 'hsl(280,75%,60%/.3)' : ptImportantMarks.length > 0 ? 'hsl(45,100%,50%/.55)' : 'hsl(var(--border)/.3)'}`,
+                                          background: isSelectedForAi ? 'hsl(280,75%,60%/.07)' : isDocPoint ? 'hsl(280,75%,60%/.05)' : ptImportantMarks.length > 0 ? 'hsl(45,100%,50%/.04)' : 'hsl(var(--paper)/.4)',
+                                          padding: '.6rem .8rem',
+                                          transition: 'all .15s ease'
+                                        }}>
                                           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                                            {/* Bullet marker (no point IDs) */}
-                                            <span style={{ color: 'hsl(var(--pencil))', fontSize: '1rem', lineHeight: '1.2rem', flexShrink: 0, marginTop: 1, userSelect: 'none' }}>
-                                              •
-                                            </span>
+                                            {/* AI Edit Checkbox */}
+                                            <button
+                                              type="button"
+                                              onClick={() => handleToggleAiEditPoint(pt.id)}
+                                              title={isSelectedForAi ? 'Deselect for AI Edit' : 'Select for AI Edit (1–3 points)'}
+                                              style={{
+                                                background: isSelectedForAi ? 'hsl(280,75%,60%)' : 'transparent',
+                                                border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : 'hsl(var(--border)/.8)'}`,
+                                                color: 'white',
+                                                borderRadius: 4,
+                                                width: 17,
+                                                height: 17,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                cursor: 'pointer',
+                                                flexShrink: 0,
+                                                marginTop: 2,
+                                                padding: 0,
+                                                transition: 'all .15s ease'
+                                              }}
+                                            >
+                                              {isSelectedForAi && <Check size={11} strokeWidth={3} />}
+                                            </button>
 
                                             {/* Point content */}
                                             <div style={{ flex: 1 }}>
@@ -5085,13 +5522,48 @@ export default function RomPage() {
                                                   </div>
                                                 </div>
                                               ) : (
-                                                <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{ptText}</div>
+                                                <div
+                                                  onContextMenu={(e) => {
+                                                    if (romVersion === 'long') {
+                                                      handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`)
+                                                    }
+                                                  }}
+                                                  title={romVersion === 'long' ? 'Tip: Select text and right-click to Mark as Very Important' : undefined}
+                                                  style={{
+                                                    color: 'hsl(var(--ink))',
+                                                    lineHeight: 1.45,
+                                                    fontSize: '.83rem',
+                                                    cursor: romVersion === 'long' ? 'text' : 'inherit',
+                                                    userSelect: 'text'
+                                                  }}
+                                                >
+                                                  {ptText}
+                                                </div>
                                               )}
 
-                                              {/* Speaker */}
-                                              <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                                <User size={10} />{spk}
+                                              {/* Speaker & Badges */}
+                                              <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><User size={10} />{spk}</span>
                                                 {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
+                                                {ptImportantMarks.length > 0 && (
+                                                  <span
+                                                    title={`Marked as Very Important: ${ptImportantMarks.map(m => `"${m.text}"`).join(', ')}`}
+                                                    style={{
+                                                      display: 'inline-flex',
+                                                      alignItems: 'center',
+                                                      gap: 3,
+                                                      fontSize: '.65rem',
+                                                      padding: '1px 6px',
+                                                      borderRadius: 4,
+                                                      background: 'hsl(45,100%,50%/.18)',
+                                                      color: 'hsl(38,95%,40%)',
+                                                      border: '1px solid hsl(45,100%,50%/.4)',
+                                                      fontWeight: 700
+                                                    }}
+                                                  >
+                                                    <Star size={9} fill="currentColor" /> Very Important ({ptImportantMarks.length})
+                                                  </span>
+                                                )}
                                               </div>
                                             </div>
 
@@ -5176,6 +5648,359 @@ export default function RomPage() {
                         )
                       })}
                     </div>
+
+                      {/* Right Column: AI Chat Panel (Final ROM only) */}
+                      {showAiChatPanel && (
+                        <div style={{
+                          flex: '0 0 35%',
+                          minWidth: 320,
+                          maxWidth: 440,
+                          position: 'sticky',
+                          top: '1rem',
+                          height: 'calc(100vh - 150px)',
+                          maxHeight: '820px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          background: 'hsl(var(--card))',
+                          borderRadius: 12,
+                          border: '1.5px solid hsl(280,75%,60%/.35)',
+                          boxShadow: '0 8px 30px rgba(120,40,180,0.1), 0 2px 8px rgba(0,0,0,0.04)',
+                          overflow: 'hidden',
+                          zIndex: 20
+                        }}>
+                          {/* Chat Header */}
+                          <div style={{
+                            padding: '.75rem 1rem',
+                            background: 'linear-gradient(135deg, hsl(280,75%,60%/.15), hsl(300,75%,55%/.08))',
+                            borderBottom: '1px solid hsl(var(--border)/.5)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between'
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: 8,
+                                background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                color: 'white'
+                              }}>
+                                <Sparkles size={15} />
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '.84rem', fontWeight: 800, color: 'hsl(var(--ink))', lineHeight: 1.2 }}>
+                                  Final ROM Assistant
+                                </div>
+                                <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>
+                                  AI edit explanations & follow-up chat
+                                </div>
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              {aiChatMessages.length > 0 && (
+                                <button
+                                  onClick={() => setAiChatMessages([])}
+                                  title="Clear chat history"
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '4px', borderRadius: 4 }}
+                                >
+                                  <RotateCcw size={13} />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => setShowAiChatPanel(false)}
+                                title="Close AI Assistant"
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '4px', borderRadius: 4 }}
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Chat Messages */}
+                          <div style={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            padding: '.85rem 1rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '.75rem'
+                          }}>
+                            {aiChatMessages.length === 0 ? (
+                              <div style={{
+                                margin: 'auto 0',
+                                textAlign: 'center',
+                                padding: '1.5rem 1rem',
+                                color: 'hsl(var(--pencil))',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                gap: 10
+                              }}>
+                                <div style={{ width: 44, height: 44, borderRadius: 22, background: 'hsl(280,75%,60%/.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(280,75%,60%)' }}>
+                                  <MessageCircle size={22} />
+                                </div>
+                                <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
+                                  How to Edit with AI
+                                </div>
+                                <div style={{ fontSize: '.76rem', lineHeight: 1.5, textAlign: 'left', background: 'hsl(var(--muted)/.25)', padding: '.75rem .9rem', borderRadius: 8, border: '1px solid hsl(var(--border)/.4)' }}>
+                                  <div style={{ marginBottom: 4 }}>1. Select <strong>1 to 3 discussion points</strong> using the checkboxes on the left.</div>
+                                  <div style={{ marginBottom: 4 }}>2. Type your instructions in the bottom bar and press <strong>Enter</strong>.</div>
+                                  <div>3. The AI updates the points directly and explains all changes right here.</div>
+                                </div>
+                                <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>
+                                  You can also ask questions about the ROM in the chat box below.
+                                </div>
+                              </div>
+                            ) : (
+                              aiChatMessages.map((msg, idx) => {
+                                const isUser = msg.role === 'user'
+                                return (
+                                  <div
+                                    key={idx}
+                                    style={{
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                      alignItems: isUser ? 'flex-end' : 'flex-start',
+                                      gap: 3
+                                    }}
+                                  >
+                                    <div style={{
+                                      fontSize: '.66rem',
+                                      color: 'hsl(var(--pencil))',
+                                      padding: '0 4px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 4
+                                    }}>
+                                      {isUser ? 'You' : <><Sparkles size={10} style={{ color: 'hsl(280,75%,60%)' }} /> Assistant</>}
+                                    </div>
+                                    <div style={{
+                                      maxWidth: '92%',
+                                      padding: '.65rem .85rem',
+                                      borderRadius: isUser ? '10px 10px 2px 10px' : '10px 10px 10px 2px',
+                                      background: isUser ? 'hsl(280,75%,60%/.14)' : 'hsl(var(--paper))',
+                                      border: `1px solid ${isUser ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.6)'}`,
+                                      color: 'hsl(var(--ink))',
+                                      fontSize: '.82rem',
+                                      lineHeight: 1.45,
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word'
+                                    }}>
+                                      {msg.content}
+
+                                      {/* If message includes updated points */}
+                                      {msg.pointUpdates && msg.pointUpdates.length > 0 && (
+                                        <div style={{
+                                          marginTop: 8,
+                                          paddingTop: 8,
+                                          borderTop: '1px solid hsl(var(--border)/.4)',
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: 6
+                                        }}>
+                                          <div style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(280,75%,55%)' }}>
+                                            Updated Points ({msg.pointUpdates.length}):
+                                          </div>
+                                          {msg.pointUpdates.map((pu: any, puIdx: number) => (
+                                            <div
+                                              key={puIdx}
+                                              style={{
+                                                padding: '4px 8px',
+                                                borderRadius: 6,
+                                                background: 'hsl(280,75%,60%/.06)',
+                                                border: '1px solid hsl(280,75%,60%/.2)',
+                                                fontSize: '.76rem',
+                                                lineHeight: 1.35
+                                              }}
+                                            >
+                                              <span style={{ fontWeight: 700, color: 'hsl(280,75%,55%)' }}>
+                                                {pu.id}:{' '}
+                                              </span>
+                                              {pu.text || pu.polished_text}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                )
+                              })
+                            )}
+                            {aiChatLoading && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '.6rem .8rem', borderRadius: 8, background: 'hsl(var(--paper))', border: '1px solid hsl(var(--border)/.5)', alignSelf: 'flex-start' }}>
+                                <Loader size={13} className="spin" style={{ color: 'hsl(280,75%,60%)' }} />
+                                <span style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))' }}>AI is thinking...</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Chat Footer Input */}
+                          <div style={{
+                            padding: '.65rem .8rem',
+                            borderTop: '1px solid hsl(var(--border)/.5)',
+                            background: 'hsl(var(--muted)/.2)',
+                            display: 'flex',
+                            gap: 6,
+                            alignItems: 'flex-end'
+                          }}>
+                            <textarea
+                              value={aiChatInput}
+                              onChange={e => setAiChatInput(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && !e.shiftKey && !aiChatLoading && aiChatInput.trim()) {
+                                  e.preventDefault()
+                                  handleAiChatSend()
+                                }
+                              }}
+                              placeholder="Ask a question about the ROM..."
+                              rows={2}
+                              disabled={aiChatLoading}
+                              style={{
+                                flex: 1,
+                                resize: 'none',
+                                borderRadius: 8,
+                                border: '1px solid hsl(var(--border))',
+                                padding: '6px 8px',
+                                fontSize: '.8rem',
+                                fontFamily: 'Inter',
+                                background: 'hsl(var(--paper))',
+                                color: 'hsl(var(--ink))',
+                                outline: 'none'
+                              }}
+                            />
+                            <button
+                              onClick={handleAiChatSend}
+                              disabled={aiChatLoading || !aiChatInput.trim()}
+                              style={{
+                                padding: '.55rem .75rem',
+                                borderRadius: 8,
+                                background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
+                                color: 'white',
+                                border: 'none',
+                                cursor: (aiChatLoading || !aiChatInput.trim()) ? 'not-allowed' : 'pointer',
+                                opacity: (aiChatLoading || !aiChatInput.trim()) ? 0.5 : 1,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0
+                              }}
+                            >
+                              <Send size={13} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Floating "Edit with AI" bar */}
+                    {aiEditSelectedIds.size > 0 && (
+                      <div style={{
+                        position: 'fixed',
+                        bottom: '2rem',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 150,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '.75rem 1.15rem',
+                        borderRadius: 14,
+                        background: 'hsl(var(--card))',
+                        border: '1.5px solid hsl(280,75%,60%)',
+                        boxShadow: '0 12px 36px rgba(120,40,180,0.25), 0 4px 12px rgba(0,0,0,0.12)',
+                        minWidth: 540,
+                        maxWidth: '90vw'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          background: 'hsl(280,75%,60%/.15)',
+                          color: 'hsl(280,75%,55%)',
+                          padding: '4px 10px',
+                          borderRadius: 8,
+                          fontSize: '.76rem',
+                          fontWeight: 700,
+                          flexShrink: 0
+                        }}>
+                          <Sparkles size={14} />
+                          <span>{aiEditSelectedIds.size} point{aiEditSelectedIds.size > 1 ? 's' : ''} selected</span>
+                        </div>
+
+                        <input
+                          type="text"
+                          value={aiEditPrompt}
+                          onChange={e => setAiEditPrompt(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey && !aiEditLoading && aiEditPrompt.trim()) {
+                              e.preventDefault()
+                              handleAiEditSubmit()
+                            }
+                          }}
+                          placeholder="Instruction for AI (e.g., 'Make concise and formal', 'Add outcome note')... (Press Enter)"
+                          disabled={aiEditLoading}
+                          autoFocus
+                          style={{
+                            flex: 1,
+                            border: '1px solid hsl(var(--border))',
+                            borderRadius: 8,
+                            padding: '.5rem .8rem',
+                            fontSize: '.84rem',
+                            background: 'hsl(var(--paper))',
+                            color: 'hsl(var(--ink))',
+                            outline: 'none',
+                            fontFamily: 'Inter'
+                          }}
+                        />
+
+                        <button
+                          onClick={handleAiEditSubmit}
+                          disabled={aiEditLoading || !aiEditPrompt.trim()}
+                          style={{
+                            padding: '.5rem 1.1rem',
+                            borderRadius: 8,
+                            background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
+                            color: 'white',
+                            border: 'none',
+                            fontWeight: 700,
+                            fontSize: '.8rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            cursor: (aiEditLoading || !aiEditPrompt.trim()) ? 'not-allowed' : 'pointer',
+                            opacity: (aiEditLoading || !aiEditPrompt.trim()) ? 0.6 : 1,
+                            flexShrink: 0,
+                            fontFamily: 'Inter'
+                          }}
+                        >
+                          {aiEditLoading ? <Loader size={14} className="spin" /> : <Send size={13} />}
+                          {aiEditLoading ? 'Editing...' : 'Edit with AI'}
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setAiEditSelectedIds(new Set())
+                            setAiEditPrompt('')
+                          }}
+                          title="Clear selection"
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: 'hsl(var(--pencil))',
+                            cursor: 'pointer',
+                            padding: '4px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            borderRadius: 6
+                          }}
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -5215,6 +6040,54 @@ export default function RomPage() {
             >
               {deletingText ? <Loader size={14} className="spin" /> : <Trash2 size={14} />}
               Delete Selected Text
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Final ROM Context Menu (Mark as Very Important) ── */}
+      {finalRomContextMenu && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 199 }}
+            onClick={() => setFinalRomContextMenu(null)}
+          />
+          <div
+            className="stage2-context-menu"
+            style={{
+              left: Math.min(finalRomContextMenu.x, window.innerWidth - 220),
+              top: Math.min(finalRomContextMenu.y, window.innerHeight - 80),
+              zIndex: 200,
+              minWidth: 200,
+              padding: '6px',
+              borderRadius: 8,
+              background: 'hsl(var(--card))',
+              border: '1px solid hsl(var(--border))',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+              position: 'fixed'
+            }}
+          >
+            <button
+              className="stage2-context-menu-item"
+              onClick={handleMarkAsImportant}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '7px 10px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                borderRadius: 6,
+                fontSize: '.8rem',
+                fontWeight: 600,
+                color: 'hsl(38,95%,40%)',
+                textAlign: 'left'
+              }}
+            >
+              <Star size={14} fill="currentColor" />
+              Mark as Very Important
             </button>
           </div>
         </>

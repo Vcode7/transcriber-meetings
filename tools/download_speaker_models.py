@@ -216,6 +216,63 @@ def download_ecapa_tdnn(models_dir: Path, token: str) -> None:
         sys.exit(1)
 
 
+def download_eres2net_large(models_dir: Path) -> None:
+    """
+    Download 3D-Speaker ERes2Net-Large speaker embedding model for speaker identification.
+
+    Source: iic/speech_eres2net_large_sv_zh-cn_3dspeaker_16k
+    Saved as: runtime/models/eres2net_large/
+
+    Required files:
+      configuration.json          — model architecture and pipeline configuration
+      eres2net_large_model.ckpt   — ERes2Net-Large PyTorch model weights
+    """
+    dest = models_dir / "eres2net_large"
+    required_files = [
+        dest / "configuration.json",
+        dest / "eres2net_large_model.ckpt",
+    ]
+    missing = [p for p in required_files if not p.exists()]
+    if not missing:
+        logger.info(f"[SKIP] ERes2Net-Large — all required files present at {dest}")
+        return
+
+    dest.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[DOWNLOAD] iic/speech_eres2net_large_sv_zh-cn_3dspeaker_16k → {dest}")
+
+    try:
+        from modelscope.hub.file_download import model_file_download
+    except ImportError:
+        logger.error("modelscope is not installed. Run: pip install modelscope")
+        sys.exit(1)
+
+    model_id = "iic/speech_eres2net_large_sv_zh-cn_3dspeaker_16k"
+    files_to_download = [
+        "configuration.json",
+        "eres2net_large_model.ckpt",
+    ]
+
+    try:
+        for fname in files_to_download:
+            target_f = dest / fname
+            if not target_f.exists():
+                logger.info(f"Downloading {fname}...")
+                model_file_download(
+                    model_id=model_id,
+                    file_path=fname,
+                    local_dir=str(dest),
+                )
+        logger.info(f"[OK] ERes2Net-Large ready at {dest}")
+    except Exception as e:
+        logger.error(
+            f"Could not download ERes2Net-Large: {e}\n"
+            f"Please manually download {model_id}\n"
+            f"and place the files at: {dest}\n"
+            "Required files: configuration.json, eres2net_large_model.ckpt"
+        )
+        sys.exit(1)
+
+
 def verify_models(models_dir: Path) -> bool:
     """Print a summary of all required files and whether they exist."""
     checks = [
@@ -228,6 +285,10 @@ def verify_models(models_dir: Path) -> bool:
         ("ecapa_tdnn/hyperparams.yaml",                 "ECAPA-TDNN config (speaker ID)"),
         ("ecapa_tdnn/embedding_model.ckpt",             "ECAPA-TDNN weights (speaker ID)"),
     ]
+    optional_checks = [
+        ("eres2net_large/configuration.json",           "ERes2Net-Large config (optional)"),
+        ("eres2net_large/eres2net_large_model.ckpt",    "ERes2Net-Large weights (optional)"),
+    ]
     all_ok = True
     print("\n================== Model Verification ==================")
     for rel_path, desc in checks:
@@ -237,6 +298,13 @@ def verify_models(models_dir: Path) -> bool:
         print(f"  [{status:<8}]  {rel_path:<45} ({desc})")
         if not ok:
             all_ok = False
+
+    for rel_path, desc in optional_checks:
+        p = models_dir / rel_path
+        ok = p.exists()
+        status = "OK" if ok else "OPTIONAL"
+        print(f"  [{status:<8}]  {rel_path:<45} ({desc})")
+
     print("========================================================\n")
     return all_ok
 
@@ -267,10 +335,17 @@ def main() -> None:
         action="store_true",
         help="Skip downloading SpeechBrain ECAPA-TDNN embedding model (ecapa_tdnn/)",
     )
+    parser.add_argument(
+        "--with-eres2net",
+        "--download-eres2net",
+        action="store_true",
+        dest="with_eres2net",
+        help="Also download 3D-Speaker ERes2Net-Large speaker embedding model (eres2net_large/)",
+    )
     args = parser.parse_args()
 
     token = args.hf_token
-    if not token:
+    if not token and not args.skip_diarization:
         logger.warning(
             "No HF_TOKEN provided. Downloads from gated HuggingFace repos will fail.\n"
             "Set --hf-token or export HF_TOKEN=hf_..."
@@ -278,21 +353,27 @@ def main() -> None:
 
     mdir = _models_dir(args.models_dir)
 
+    step_count = 3 if args.with_eres2net else 2
+
     if not args.skip_diarization:
-        logger.info("=== Step 1/2: pyannote/speaker-diarization-community-1 (complete snapshot) ===")
+        logger.info(f"=== Step 1/{step_count}: pyannote/speaker-diarization-community-1 (complete snapshot) ===")
         download_audio_context(mdir, token)
     else:
         logger.info("[SKIP] Diarization models (--skip-diarization)")
 
     if not args.skip_ecapa:
-        logger.info("=== Step 2/2: SpeechBrain ECAPA-TDNN (speaker identification) ===")
+        logger.info(f"=== Step 2/{step_count}: SpeechBrain ECAPA-TDNN (speaker identification) ===")
         download_ecapa_tdnn(mdir, token)
     else:
         logger.info("[SKIP] ECAPA-TDNN model (--skip-ecapa)")
 
+    if args.with_eres2net:
+        logger.info(f"=== Step 3/{step_count}: 3D-Speaker ERes2Net-Large (alternative speaker embedding) ===")
+        download_eres2net_large(mdir)
+
     ok = verify_models(mdir)
     if ok:
-        logger.info("All speaker models ready. Backend can now run fully offline.")
+        logger.info("All core speaker models ready. Backend can now run fully offline.")
     else:
         logger.error("Some models are missing — see above. Re-run this script to retry.")
         sys.exit(1)

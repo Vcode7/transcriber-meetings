@@ -262,14 +262,21 @@ def verify_all_models() -> Dict[str, bool]:
         "align_engine",    # facebook/wav2vec2-base-960h
         "nlp_engine",      # Qwen3-4B
     ]
+    optional = [
+        "eres2net_large",  # 3D-Speaker ERes2Net-Large (alternative speaker embedding)
+    ]
     results: Dict[str, bool] = {}
     for name in expected:
         path = ModelLoader.get_model_path(name)
         present = path is not None and path.exists()
         results[name] = present
 
-    present_list = [n for n, ok in results.items() if ok]
-    missing_list = [n for n, ok in results.items() if not ok]
+    for name in optional:
+        path = ModelLoader.get_model_path(name)
+        results[name] = path is not None and path.exists()
+
+    present_list = [n for n in expected if results[n]]
+    missing_list = [n for n in expected if not results[n]]
 
     if missing_list:
         logger.error(
@@ -278,7 +285,12 @@ def verify_all_models() -> Dict[str, bool]:
             + "\n  The application may fail or degrade for features requiring these models."
         )
     else:
-        logger.info(f"[ModelLoader] ✓ All {len(present_list)} models present in MODELS_DIR.")
+        logger.info(f"[ModelLoader] ✓ All {len(present_list)} core models present in MODELS_DIR.")
+
+    if results.get("eres2net_large"):
+        logger.info("[ModelLoader] ✓ Optional ERes2Net-Large model is present.")
+    else:
+        logger.info("[ModelLoader] ℹ Optional ERes2Net-Large model not installed (ECAPA-TDNN is active default).")
 
     logger.info(
         "[ModelLoader] Model presence summary: "
@@ -301,8 +313,10 @@ def setup_offline_hf_environment():
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
     os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["MODELSCOPE_OFFLINE"] = "1"
+    os.environ["MODELSCOPE_HUB_OFFLINE"] = "1"
 
-    logger.info("[ModelLoader] HuggingFace offline mode enforced (no internet calls).")
+    logger.info("[ModelLoader] Offline mode enforced for HuggingFace and ModelScope (no internet calls).")
 
     # Restore/verify cache directories from local model folders (for libraries that
     # require HF hub cache layout, such as older whisperx align model loading)

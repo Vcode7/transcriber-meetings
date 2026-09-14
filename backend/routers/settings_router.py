@@ -59,6 +59,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rag_relative_score_cutoff": 0.01,
         "generate_mom_auto": True,
         "embedding_model": "Qwen3-Embedding-0.6B",
+        "speaker_embedding_model": "ecapa",
         "ollama_num_ctx": 32768,
         "ollama_dynamic_ctx": True,
         "ollama_think": False,
@@ -171,6 +172,14 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
             settings.EMBEDDING_MODEL = res["embedding_model"]
             settings.QWEN_EMBEDDING_MODEL_NAME = res["embedding_model"]
 
+    # Sync speaker embedding model with embedding router
+    if res.get("speaker_embedding_model"):
+        try:
+            from services.embedding_router import set_active_model
+            set_active_model(res["speaker_embedding_model"])
+        except Exception:
+            pass
+
     return res
 
 
@@ -251,6 +260,18 @@ async def update_settings(
                     unload_text_embedder()
                 except Exception:
                     pass
+
+    # Validate and sync speaker_embedding_model setting
+    if "speaker_embedding_model" in patch and patch["speaker_embedding_model"]:
+        val = str(patch["speaker_embedding_model"]).strip().lower()
+        if val not in ("ecapa", "eres2net_large"):
+            val = "ecapa"  # fallback to safe default
+        patch["speaker_embedding_model"] = val
+        try:
+            from services.embedding_router import set_active_model
+            set_active_model(val)
+        except Exception:
+            pass
 
     # Build SET clause dynamically from provided fields
     set_parts = [f"{k} = :{k}" for k in patch]
