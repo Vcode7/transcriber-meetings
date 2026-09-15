@@ -536,6 +536,10 @@ def refine_transcript_speakers_with_ecapa(
     similarity_threshold: float = 0.75,
     use_model_default_threshold: bool = True,
     embedding_model: str = None,
+    refinement_margin: Optional[float] = None,
+    refinement_high_threshold: Optional[float] = None,
+    refinement_min_threshold: Optional[float] = None,
+    restrict_to_meeting_speakers: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """
     Perform a high-confidence segment-level refinement pass on the final
@@ -546,18 +550,85 @@ def refine_transcript_speakers_with_ecapa(
     if not speaker_segments:
         return speaker_segments
 
-    # Resolve speaker refinement margin
-    try:
-        from config import settings
-        speaker_refinement_margin = settings.speaker_refinement_margin
-    except Exception:
-        speaker_refinement_margin = 0.10
+    # Resolve restrict_to_meeting_speakers setting if not explicitly provided
+    if restrict_to_meeting_speakers is None:
+        try:
+            from config import settings
+            restrict_to_meeting_speakers = getattr(settings, "RESTRICT_REASSIGNMENT_TO_MEETING_SPEAKERS", False)
+        except Exception:
+            restrict_to_meeting_speakers = False
+
+    # Build meeting speaker ID <-> profile/label mapping from the meeting's segments
+    meeting_profile_ids: Set[str] = set()
+    meeting_profile_labels: Set[str] = set()
+    profile_to_spk_id: Dict[str, str] = {}
+    label_to_spk_id: Dict[str, str] = {}
+
+    for seg in speaker_segments:
+        raw_spk = seg.get("speaker")
+        lbl = seg.get("speaker_label") or raw_spk
+        pid = seg.get("speaker_profile_id")
+        if pid:
+            pid_str = str(pid)
+            meeting_profile_ids.add(pid_str)
+            if raw_spk and pid_str not in profile_to_spk_id:
+                profile_to_spk_id[pid_str] = raw_spk
+        if lbl:
+            if pid:
+                meeting_profile_labels.add(lbl)
+            if raw_spk and lbl not in label_to_spk_id:
+                label_to_spk_id[lbl] = raw_spk
+
+    # If restrict_to_meeting_speakers is enabled, filter voice_profiles to ONLY those assigned to this meeting
+    if restrict_to_meeting_speakers:
+        filtered_profiles = []
+        for p in (voice_profiles or []):
+            pid = str(p.get("_id", p.get("id", "")))
+            plabel = p.get("label", "")
+            if pid in meeting_profile_ids or plabel in meeting_profile_labels:
+                filtered_profiles.append(p)
+        logger.info(
+            f"[Refine] Restricted reassignment to meeting speakers: "
+            f"{len(filtered_profiles)}/{len(voice_profiles or [])} profiles retained "
+            f"(meeting profiles: {meeting_profile_labels or meeting_profile_ids})"
+        )
+        voice_profiles = filtered_profiles
 
     # 1. Resolve effective threshold (model-aware)
     active_model = embedding_model or embedding_router.get_active_model()
     active_dim = embedding_router.get_embedding_dim(active_model)
     effective_threshold, _ = embedding_router.get_effective_threshold(
         similarity_threshold, model=active_model, use_model_default=use_model_default_threshold
+    )
+
+    # 2. Resolve speaker refinement parameters (configurable per-call or from settings)
+    try:
+        from config import settings
+    except Exception:
+        settings = None
+
+    if refinement_margin is not None:
+        speaker_refinement_margin = refinement_margin
+    else:
+        speaker_refinement_margin = getattr(settings, "speaker_refinement_margin", 0.30) if settings else 0.30
+
+    if refinement_high_threshold is not None:
+        high_threshold = refinement_high_threshold
+    elif active_model == "eres2net_large":
+        high_threshold = getattr(settings, "speaker_refinement_high_threshold_eres2net", 0.70) if settings else 0.70
+    else:
+        high_threshold = getattr(settings, "speaker_refinement_high_threshold", 0.82) if settings else 0.82
+
+    if refinement_min_threshold is not None:
+        min_threshold = refinement_min_threshold
+    elif active_model == "eres2net_large":
+        min_threshold = getattr(settings, "speaker_refinement_min_threshold_eres2net", 0.15) if settings else 0.15
+    else:
+        min_threshold = getattr(settings, "speaker_refinement_min_threshold", 0.20) if settings else 0.20
+
+    logger.info(
+        f"[Refine] Refinement parameters ({active_model}): margin={speaker_refinement_margin:.2f}, "
+        f"high_threshold={high_threshold:.2f}, min_threshold={min_threshold:.2f}"
     )
 
     # 2. Pre-compute profile centroids (Strict Model Isolation)
@@ -606,10 +677,11 @@ def refine_transcript_speakers_with_ecapa(
             spk_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
             spk_profile_id = seg.get("speaker_profile_id")
             spk_key = spk_profile_id if spk_profile_id else spk_label
+            raw_spk = seg.get("speaker")
 
             speaker_to_embs.setdefault(spk_key, []).append(segment_emb)
             if spk_key not in speaker_key_to_meta:
-                speaker_key_to_meta[spk_key] = (spk_label, spk_profile_id)
+                speaker_key_to_meta[spk_key] = (spk_label, spk_profile_id, raw_spk)
 
     conversation_centroids: Dict[str, np.ndarray] = {}
     for spk_key, embs in speaker_to_embs.items():
@@ -652,8 +724,8 @@ def refine_transcript_speakers_with_ecapa(
         original_profile_id = seg.get("speaker_profile_id")
         original_spk_key = original_profile_id if original_profile_id else original_label
 
-        # Calculate original_label_sim against original representation
-        original_label_sim = 1.0
+        # Calculate original_label_sim against original representation (default 0.0 if no evidence exists)
+        original_label_sim = 0.0
         found_original_sim = False
 
         # Try to find original similarity from saved profiles
@@ -674,12 +746,19 @@ def refine_transcript_speakers_with_ecapa(
                             found_original_sim = True
                     break
 
-        # Fallback to conversation centroid of the original speaker if not matching profiles
-        if not found_original_sim:
+        # Fallback to conversation centroid of the original speaker ONLY if original had an enrolled profile
+        # (For generic/unmeasured labels, original_label_sim remains 0.0 so confident enrolled matches can override)
+        if not found_original_sim and original_profile_id:
             if original_spk_key in conversation_centroids:
                 from services.embedding import cosine_similarity
                 original_label_sim = cosine_similarity(segment_emb, conversation_centroids[original_spk_key])
                 found_original_sim = True
+
+        if not found_original_sim:
+            logger.debug(
+                f"[Refine] No baseline representation for '{original_label}' (key: {original_spk_key}) — "
+                f"original_label_sim treated as 0.0"
+            )
 
         # 1. Compare against saved profiles (Strict Model Isolation)
         if voice_profiles:
@@ -704,16 +783,22 @@ def refine_transcript_speakers_with_ecapa(
                     best_profile_id = profile_id
                     match_source = "saved_profile"
 
-        # 2. Compare against conversation speaker centroids
+        # 2. Compare against other conversation speaker centroids (skip self)
         for spk_key, centroid in conversation_centroids.items():
+            if spk_key == original_spk_key:
+                continue
             from services.embedding import cosine_similarity
             sim_val = cosine_similarity(segment_emb, centroid)
 
             if sim_val > best_profile_sim:
                 best_profile_sim = sim_val
-                lbl, pid = speaker_key_to_meta.get(spk_key, (spk_key, None))
-                best_profile_label = lbl
-                best_profile_id = pid
+                meta = speaker_key_to_meta.get(spk_key)
+                if meta:
+                    best_profile_label = meta[0]
+                    best_profile_id = meta[1]
+                else:
+                    best_profile_label = spk_key
+                    best_profile_id = None
                 match_source = "conversation_speaker"
 
         if best_profile_label is None:
@@ -723,9 +808,9 @@ def refine_transcript_speakers_with_ecapa(
        
         if is_different:
             if (
-                best_profile_sim >= 0.82
+                best_profile_sim >= high_threshold
                 or (
-                    best_profile_sim > 0.20
+                    best_profile_sim > min_threshold
                     and (best_profile_sim - original_label_sim) > speaker_refinement_margin
                 )
             ):
@@ -734,12 +819,35 @@ def refine_transcript_speakers_with_ecapa(
                 seg["speaker_profile_id"] = best_profile_id
                 seg["similarity"] = round(best_profile_sim, 4)
 
+                # When restrict_to_meeting_speakers is enabled, preserve the meeting's speaker ID ↔ profile mapping
+                if restrict_to_meeting_speakers:
+                    target_spk_id = None
+                    if best_profile_id and str(best_profile_id) in profile_to_spk_id:
+                        target_spk_id = profile_to_spk_id[str(best_profile_id)]
+                    elif best_profile_label in label_to_spk_id:
+                        target_spk_id = label_to_spk_id[best_profile_label]
+                    elif match_source == "conversation_speaker":
+                        meta = speaker_key_to_meta.get(best_profile_id or best_profile_label)
+                        if meta and len(meta) > 2 and meta[2]:
+                            target_spk_id = meta[2]
+
+                    if target_spk_id:
+                        seg["speaker"] = target_spk_id
+
+                    for w in seg.get("words", []):
+                        if isinstance(w, dict):
+                            w["speaker_label"] = best_profile_label
+                            if target_spk_id and ("speaker" in w or seg.get("speaker")):
+                                w["speaker"] = target_spk_id
+
                 logger.info(
-                    f"[Identify] Override Applied: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | Similarity: {best_profile_sim:.4f}"
+                    f"[Identify] Override Applied: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | "
+                    f"Similarity: {best_profile_sim:.4f} (original_sim: {original_label_sim:.4f})"
                 )
             else:
                 logger.info(
-                    f"[Identify] Rejected: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | Similarity: {best_profile_sim:.4f} (similarity < 0.82 and margin check <= {speaker_refinement_margin:.2f})"
+                    f"[Identify] Rejected: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | "
+                    f"Similarity: {best_profile_sim:.4f} (similarity < {high_threshold:.2f} and margin check <= {speaker_refinement_margin:.2f})"
                 )
 
     return speaker_segments

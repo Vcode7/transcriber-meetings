@@ -4596,6 +4596,52 @@ class RomService:
 
         return bullet_pts
 
+    # -- Very Important Point helper ------------------------------------------
+
+    @staticmethod
+    def _is_point_very_important(pt: dict, agenda_id: str, important_points: list) -> bool:
+        """
+        Check if a discussion point is marked as 'Very Important'.
+        Matches against direct flags on the point (is_very_important, is_important)
+        or against any entry in important_points by point_id, agenda_id, or text matching.
+        """
+        if not isinstance(pt, dict):
+            return False
+        if pt.get("is_very_important") is True or pt.get("is_important") is True:
+            return True
+        if not important_points:
+            return False
+
+        pt_id = str(pt.get("id") or "").strip()
+        pt_text = (pt.get("polished_text") or pt.get("text") or "").strip()
+        pt_text_lower = pt_text.lower()
+
+        for imp in important_points:
+            if isinstance(imp, str):
+                imp_clean = imp.strip().lower()
+                if imp_clean and (imp_clean == pt_id.lower() or imp_clean in pt_text_lower or pt_text_lower in imp_clean):
+                    return True
+            elif isinstance(imp, dict):
+                imp_agenda = str(imp.get("agenda_id") or "").strip()
+                imp_pt_id = str(imp.get("point_id") or imp.get("id") or "").strip()
+                imp_text = str(imp.get("text") or "").strip()
+                imp_text_lower = imp_text.lower()
+
+                # If point_id matches directly, it's a match
+                if pt_id and imp_pt_id and pt_id == imp_pt_id:
+                    return True
+
+                # If agenda_id is specified and does not match, skip text matching for other agendas
+                if imp_agenda and agenda_id and imp_agenda != agenda_id:
+                    continue
+
+                # Text substring matching
+                if imp_text_lower and pt_text_lower:
+                    if imp_text_lower in pt_text_lower or pt_text_lower in imp_text_lower:
+                        return True
+
+        return False
+
     # -- Public generate-version entry-point -----------------------------------
 
     def generate_rom_version(
@@ -4610,13 +4656,17 @@ class RomService:
 
         Each agenda's discussion points are passed together (agenda-wise) to the LLM,
         which returns a reduced set of meaningful, properly structured points.
+        Every point marked as 'Very Important' is guaranteed to be included in the output
+        without any summarization, preserving its complete original content fully intact.
 
         version: 'short' or 'medium'
         writing_rules: Optional writing rules extracted from a reference document.
+        important_points: Optional list of user-marked important points.
 
         Returns a deep-copy with the new points; original is NOT modified.
         """
         import copy
+        import re
         from services.prompt_service import get_prompt_sync
 
         if not final_rom or not isinstance(final_rom, dict):
@@ -4659,8 +4709,15 @@ class RomService:
                     continue
 
                 agenda_title = agenda.get("title", "General Discussion")
+                agenda_id = agenda.get("agenda_id", "")
 
-                # Build structured input per point: Point ID, Speaker, Discussion, Action Owner
+                # 1. Identify all points in this agenda marked as Very Important
+                marked_pts = []
+                for pt in pts:
+                    if self._is_point_very_important(pt, agenda_id, important_points):
+                        marked_pts.append(pt)
+
+                # 2. Build structured input per point: Point ID, Speaker, Discussion, Action Owner
                 lines = []
                 for i, pt in enumerate(pts):
                     pt_id = pt.get("id", f"P{i+1}")
@@ -4671,24 +4728,31 @@ class RomService:
                     )
                     discussion = (pt.get("polished_text") or pt.get("text") or "").strip()
                     action_owner = pt.get("action_owner") or "N/A"
+                    is_pt_marked = pt in marked_pts
+                    imp_tag = " | *** VERY IMPORTANT - PRESERVE INTACT WITHOUT SUMMARIZATION ***" if is_pt_marked else ""
                     lines.append(
                         f"[Point {i+1}] ID={pt_id} | Speaker={speaker} | "
-                        f"Action Owner={action_owner}\n{discussion}"
+                        f"Action Owner={action_owner}{imp_tag}\n{discussion}"
                     )
                 points_json = "\n\n".join(lines)
 
-                # Build mandatory section from important points for this agenda
-                agenda_id = agenda.get("agenda_id", "")
-                mandatory_items = []
-                if important_points:
-                    for imp in important_points:
-                        if imp.get("agenda_id") == agenda_id or not imp.get("agenda_id"):
-                            mandatory_items.append(imp.get("text", ""))
-                if mandatory_items:
-                    mandatory_section = "\n\nMANDATORY POINTS (MUST NOT be omitted or removed):\n"
-                    for mi in mandatory_items:
-                        mandatory_section += f"- {mi}\n"
-                    mandatory_section += "These points are marked as critically important by the user and MUST appear in the output, even in the Short version. Do NOT remove, skip, or summarize away these points.\n"
+                # 3. Build mandatory section from marked Very Important points
+                if marked_pts:
+                    mandatory_section = (
+                        "\n\nMANDATORY VERY IMPORTANT POINTS (MUST BE INCLUDED VERBATIM WITHOUT ANY SUMMARIZATION):\n"
+                    )
+                    for idx, m_pt in enumerate(marked_pts, 1):
+                        m_text = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                        m_spk = m_pt.get("speaker") or (m_pt.get("speakers") or [None])[0] or "Unknown"
+                        m_act = m_pt.get("action_owner") or "N/A"
+                        mandatory_section += f"- Point {idx} (Speaker: {m_spk}, Action Owner: {m_act}):\n  \"{m_text}\"\n"
+                    mandatory_section += (
+                        "STRICT RULES FOR VERY IMPORTANT POINTS:\n"
+                        "1. EVERY point marked as 'Very Important' above MUST be included in the output JSON array.\n"
+                        "2. You MUST preserve the COMPLETE ORIGINAL CONTENT of each marked point fully intact.\n"
+                        "3. Do NOT summarize, shorten, merge, paraphrase, or omit any Very Important point.\n"
+                        "4. Output each marked point VERBATIM alongside the condensed summary of the other points.\n"
+                    )
                 else:
                     mandatory_section = ""
 
@@ -4714,34 +4778,121 @@ class RomService:
                         )
                         continue
 
-                    new_pts = []
-                    for j, new_text in enumerate(parsed_texts):
-                        new_text = str(new_text).strip()
-                        if not new_text:
+                    # 4. Guarantee every marked Very Important point is preserved intact without summarization
+                    claimed_parsed_indices = set()
+                    pt_matches = {}  # m_idx -> parsed_text_idx
+
+                    for m_idx, m_pt in enumerate(marked_pts):
+                        orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                        if not orig_content:
                             continue
-                        src = pts[min(j, len(pts) - 1)]
-                        new_pt = {
-                            "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
-                            "text": new_text,
-                            "polished_text": new_text,
-                            "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
-                            "speakers": src.get("speakers") or [],
-                            "action_owner": src.get("action_owner"),
-                            "action_items": src.get("action_items") or [],
-                            "timeline_start": src.get("timeline_start", 0.0),
-                            "timeline_end": src.get("timeline_end", 0.0),
-                            "references": src.get("references") or [],
-                            "technical_terms": [],
-                            "dates": [],
-                            "numbers": [],
-                        }
+                        orig_norm = re.sub(r'[\s\W_]+', ' ', orig_content.lower()).strip()
+                        orig_words = set(orig_norm.split())
+
+                        best_idx = None
+                        best_score = 0.0
+
+                        for p_idx, p_text in enumerate(parsed_texts):
+                            if p_idx in claimed_parsed_indices:
+                                continue
+                            cand_norm = re.sub(r'[\s\W_]+', ' ', str(p_text).lower()).strip()
+                            if not cand_norm:
+                                continue
+
+                            # Exact or substring containment
+                            if cand_norm == orig_norm or cand_norm in orig_norm or orig_norm in cand_norm:
+                                score = 1.0
+                            else:
+                                cand_words = set(cand_norm.split())
+                                overlap = len(orig_words & cand_words)
+                                orig_ratio = overlap / max(1, len(orig_words))
+                                cand_ratio = overlap / max(1, len(cand_words))
+                                score = max(orig_ratio, cand_ratio)
+
+                            if score > best_score and score >= 0.35:
+                                best_score = score
+                                best_idx = p_idx
+
+                        if best_idx is not None:
+                            pt_matches[m_idx] = best_idx
+                            claimed_parsed_indices.add(best_idx)
+
+                    # Build initial list of point representations: (text, src_pt_or_m_pt, is_marked)
+                    parsed_to_marked = {p_idx: marked_pts[m_idx] for m_idx, p_idx in pt_matches.items()}
+
+                    processed_items = []
+                    for p_idx, p_text in enumerate(parsed_texts):
+                        clean_text = str(p_text).strip()
+                        if not clean_text:
+                            continue
+                        if p_idx in parsed_to_marked:
+                            # Replace with complete original content of the marked point
+                            m_pt = parsed_to_marked[p_idx]
+                            orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                            processed_items.append((orig_content, m_pt, True))
+                        else:
+                            # Condensed point from non-marked source
+                            src = pts[min(p_idx, len(pts) - 1)]
+                            processed_items.append((clean_text, src, False))
+
+                    # For any marked point that was omitted by LLM (not matched to any parsed text),
+                    # insert it with its complete original content at its relative meeting position!
+                    for m_idx, m_pt in enumerate(marked_pts):
+                        if m_idx not in pt_matches:
+                            orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                            if not orig_content:
+                                continue
+                            orig_pos = pts.index(m_pt) if m_pt in pts else len(pts)
+                            insert_pos = int((orig_pos / max(1, len(pts))) * (len(processed_items) + 1))
+                            insert_pos = max(0, min(len(processed_items), insert_pos))
+                            processed_items.insert(insert_pos, (orig_content, m_pt, True))
+
+                    # Construct final new_pts list with full metadata preservation
+                    new_pts = []
+                    for j, (p_text, src, is_marked) in enumerate(processed_items):
+                        if is_marked:
+                            new_pt = {
+                                "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
+                                "text": p_text,
+                                "polished_text": p_text,
+                                "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
+                                "speakers": src.get("speakers") or ([src.get("speaker")] if src.get("speaker") else []),
+                                "action_owner": src.get("action_owner"),
+                                "action_items": copy.deepcopy(src.get("action_items") or []),
+                                "timeline_start": src.get("timeline_start", 0.0),
+                                "timeline_end": src.get("timeline_end", 0.0),
+                                "references": copy.deepcopy(src.get("references") or []),
+                                "technical_terms": copy.deepcopy(src.get("technical_terms") or []),
+                                "dates": copy.deepcopy(src.get("dates") or []),
+                                "numbers": copy.deepcopy(src.get("numbers") or []),
+                                "is_very_important": True,
+                                "original_point_id": src.get("id"),
+                            }
+                        else:
+                            new_pt = {
+                                "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
+                                "text": p_text,
+                                "polished_text": p_text,
+                                "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
+                                "speakers": src.get("speakers") or [],
+                                "action_owner": src.get("action_owner"),
+                                "action_items": src.get("action_items") or [],
+                                "timeline_start": src.get("timeline_start", 0.0),
+                                "timeline_end": src.get("timeline_end", 0.0),
+                                "references": src.get("references") or [],
+                                "technical_terms": [],
+                                "dates": [],
+                                "numbers": [],
+                                "is_very_important": False,
+                                "original_point_id": src.get("id"),
+                            }
                         new_pts.append(new_pt)
 
                     if new_pts:
                         agenda["discussion_points"] = new_pts
                         logger.info(
                             f"[RomService] generate_rom_version({version}): agenda='{agenda_title}' "
-                            f"{len(pts)} pts -> {len(new_pts)} pts successfully generated"
+                            f"{len(pts)} pts -> {len(new_pts)} pts successfully generated (marked intact: {len(marked_pts)})"
                         )
                     else:
                         logger.warning(

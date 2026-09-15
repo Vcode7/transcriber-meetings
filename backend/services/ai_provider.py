@@ -1860,11 +1860,14 @@ Each discussion point in the provided JSON array contains:
 - `speakers`: List of attendees who participated in that discussion point.
 
 WRITING QUALITY GUIDELINES:
-1. Self-Contained & Clear (1–2 Sentences):
-   - Write the task as 1–2 complete, professional sentences (never just a vague phrase like "Update docs" or "Review bug").
-   - Begin with a strong imperative action verb (e.g. "Deploy...", "Prepare...", "Coordinate...", "Refactor...", "Submit...").
-   - Include what needs to be done, the specific technical or business subject, and the operational reason/context.
-   - Anyone reading the action item months later must understand the work required without reading the source meeting notes.
+1. Complete, Self-Contained Task Sentence (Action + Owner + Deadline):
+   - The `task` field MUST be a complete, self-contained sentence that naturally integrates ALL relevant information from the source point directly into the sentence text:
+     * The responsible owner / assignee (WHO should complete it), whenever an owner is identified or assigned (e.g. "[Owner] to [action]...", "[Owner] will coordinate...", or "Assigned to [Owner] to...").
+     * The specific action / work item to be performed, technical subject, and operational reason/context.
+     * The target deadline or timeframe (WHEN it must be completed), whenever a date, time, or timeframe is mentioned (e.g. "...by Friday, October 24, 2026, at 5:00 PM UTC", "...by November 15, 2026", "...before the annual audit").
+   - CRITICAL REQUIREMENT: The `task` sentence itself MUST state WHO is responsible and by WHEN directly within the sentence whenever those details are available. Do NOT omit the owner or deadline from the `task` text. Anyone reading ONLY the `task` sentence must know the full context: who is doing what, by when, and why, without needing to cross-reference separate fields or meeting notes.
+   - If no specific owner is identified, formulate the task clearly indicating what must be done (and deadline if known), noting it is unassigned or team-wide.
+   - If no deadline was mentioned, omit the deadline clause naturally while keeping the owner and action fully intact.
 2. Granularity & Multi-Action Handling:
    - A discussion point may yield zero, one, or multiple action items.
    - If a single point contains multiple distinct responsibilities (e.g. Alice creates the schema, Bob writes the tests), create a separate action item for each distinct task, both referencing the same `source_point_id`.
@@ -1885,7 +1888,7 @@ WRITING QUALITY GUIDELINES:
 FIELD REQUIREMENTS (JSON Schema):
 For each action item object in `action_items`:
 - `source_point_id`: (string) ID of the source discussion point (e.g. "pt-1").
-- `task`: (string) 1–2 complete, self-contained sentences describing the exact action.
+- `task`: (string) A complete, self-contained sentence that explicitly incorporates the responsible owner (who), the specific action (what), and the deadline or timeframe (when) directly in the text whenever available.
 - `owner`: (string | null) Explicitly assigned person or team, or null if unassigned.
 - `deadline`: (string | null) Explicit date or timeframe, or null if unspecified.
 - `expected_outcome`: (string | null) Concrete deliverable or success criterion, or null if unavailable.
@@ -1899,7 +1902,7 @@ Result: No action item generated.
 [Example 2: Concrete Action with Owner & Deadline]
 Input: {"id": "pt-2", "enhanced_text": "Vikas agreed to deploy the automated PostgreSQL backup script with Slack alerting by 2026-10-15 so that nightly disaster-recovery snapshots are verified."}
 Result:
-Task: "Deploy the automated PostgreSQL database backup script configured with Slack failure alerting to ensure reliable disaster recovery."
+Task: "Vikas to deploy the automated PostgreSQL database backup script configured with Slack failure alerting by 2026-10-15 to ensure reliable disaster recovery."
 Owner: "Vikas"
 Deadline: "2026-10-15"
 Expected Outcome: "Automated nightly snapshots replicated to secondary S3 bucket with failure alerts."
@@ -1907,10 +1910,18 @@ Expected Outcome: "Automated nightly snapshots replicated to secondary S3 bucket
 [Example 3: Decision Requiring Implementation (Unassigned Owner)]
 Input: {"id": "pt-3", "enhanced_text": "The committee decided to enforce multi-factor authentication for all VPN endpoints before the annual compliance audit in November."}
 Result:
-Task: "Enforce multi-factor authentication across all internal VPN endpoints in preparation for the annual compliance audit."
+Task: "Enforce multi-factor authentication across all internal VPN endpoints before the annual compliance audit in November."
 Owner: null
 Deadline: "Before November"
 Expected Outcome: "MFA policy activated across all VPN gateways with compliance verification."
+
+[Example 4: Concrete Action with Owner (No Deadline)]
+Input: {"id": "pt-4", "enhanced_text": "Elena Rostova agreed to take full ownership to refactor the frontend authentication library to implement OAuth2 PKCE."}
+Result:
+Task: "Elena Rostova to refactor the frontend authentication library to implement the OAuth2 Authorization Code flow with Proof Key for Code Exchange (PKCE)."
+Owner: "Elena Rostova"
+Deadline: null
+Expected Outcome: "Frontend authentication upgraded to OAuth2 PKCE with secure token storage."
 
 DISCUSSION POINTS:
 {points_json}
@@ -1921,14 +1932,14 @@ Return ONLY valid JSON in exactly this format:
   "action_items": [
     {{
       "source_point_id": "pt-1",
-      "task": "Deploy the automated PostgreSQL database backup script with Slack failure alerting.",
+      "task": "Vikas to deploy the automated PostgreSQL database backup script configured with Slack failure alerting by 2026-10-15.",
       "owner": "Vikas",
       "deadline": "2026-10-15",
       "expected_outcome": "Automated nightly snapshots replicated to secondary S3 bucket with failure alerts."
     }},
     {{
       "source_point_id": "pt-2",
-      "task": "Update the API rate-limiting architecture specifications in the developer portal documentation.",
+      "task": "Alice to update the API rate-limiting architecture specifications in the developer portal documentation by the end of Q3.",
       "owner": "Alice",
       "deadline": "End of Q3",
       "expected_outcome": "Published throttling thresholds and 429 error schemas for partner integration."
@@ -2434,6 +2445,10 @@ DISCUSSION POINTS:
 {points_json}
 {rules_section}{mandatory_section}
 INSTRUCTIONS:
+- VERY IMPORTANT POINTS (CRITICAL):
+  * Every point marked as "Very Important" (labeled with [VERY IMPORTANT] or listed in MANDATORY POINTS) MUST be included in the output.
+  * You MUST preserve the COMPLETE ORIGINAL CONTENT of each marked point verbatim, WITHOUT ANY SUMMARIZATION or paraphrasing.
+  * The marked point must remain fully intact in both Short and Medium versions.
 - Process ALL points together for this agenda as a whole - do NOT process each point individually.
 - CAPTURE ALL of the following categories of important information (do NOT limit to just action points):
   * Key decisions made and their rationale
@@ -2445,11 +2460,11 @@ INSTRUCTIONS:
   * Deadlines, milestones, and follow-up requirements
   * Any agreements or approvals given
 - Omit only purely background/introductory context and casual side remarks that carry no substantive information.
-- Summarize and restructure the complete agenda discussion into a compact, meaningful collection of points.
+- Summarize and restructure the remaining agenda discussion into a compact, meaningful collection of points alongside the intact Very Important points.
 - Each output point must be a complete, standalone sentence that preserves the original fact, speaker attribution, action owner, and specific details.
 - Do NOT invent, add, or infer any information not present in the input.
 - Do NOT change speaker names, action owners, dates, numbers, or decisions.
-- Produce FEWER points than the input - typically 30-50% of the input count. Aim for 2-5 points per agenda.
+- Produce FEWER points than the input - typically 50% of the input count. Aim for 2-5 points per agenda.
 - Write in formal, professional language.
 
 Return ONLY a valid JSON array of rewritten point strings. No markdown, no code fences, no extra text:
@@ -2473,6 +2488,10 @@ DISCUSSION POINTS:
 {points_json}
 {rules_section}{mandatory_section}
 INSTRUCTIONS:
+- VERY IMPORTANT POINTS (CRITICAL):
+  * Every point marked as "Very Important" (labeled with [VERY IMPORTANT] or listed in MANDATORY POINTS) MUST be included in the output.
+  * You MUST preserve the COMPLETE ORIGINAL CONTENT of each marked point verbatim, WITHOUT ANY SUMMARIZATION or paraphrasing.
+  * The marked point must remain fully intact in both Short and Medium versions.
 - Process ALL points together for this agenda as a whole - do NOT process each point individually.
 - RETAIN ALL of the following categories of important information:
   * Key decisions made AND their reasoning/rationale
@@ -2485,12 +2504,12 @@ INSTRUCTIONS:
   * Deadlines, milestones, and follow-up requirements
   * Agreements, approvals, and disagreements noted
   * Key discussion context that explains WHY decisions were made
-- Merge related or redundant points into single comprehensive points.
-- Summarize and restructure the complete agenda discussion into an aggregated, meaningful collection of points.
+- Merge related or redundant points into single comprehensive points, but NEVER merge or shorten Very Important points.
+- Summarize and restructure the remaining agenda discussion into an aggregated, meaningful collection of points alongside the intact Very Important points.
 - Each output point must be a complete, standalone sentence that preserves the original fact, speaker attribution, action owner, and specific details.
 - Do NOT invent, add, or infer any information not present in the input.
 - Do NOT change speaker names, action owners, dates, numbers, or decisions.
-- Produce a moderate reduction - typically 50-70% of the input count. Aim for 4-8 points per agenda.
+- Produce a moderate reduction - typically >70% of the input count. Aim for 4-8 points per agenda.
 - Write in formal, professional language.
 
 Return ONLY a valid JSON array of rewritten point strings. No markdown, no code fences, no extra text:
@@ -4262,13 +4281,23 @@ class QwenProvider(AIProvider):
 
         raw_clean = str(raw).strip()
         raw_clean = re.sub(r'<think>.*?</think>', '', raw_clean, flags=re.DOTALL).strip()
-        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_clean, re.DOTALL)
-        if json_match:
-            raw_clean = json_match.group(1).strip()
+        fences = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', raw_clean, re.DOTALL)
+        if fences:
+            raw_clean = fences[0].strip()
         else:
-            brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
-            if brace_match:
-                raw_clean = brace_match.group().strip()
+            single_fences = re.findall(r'`(?:json)?\s*([\s\S]*?)\s*`', raw_clean, re.DOTALL)
+            if single_fences and ('{' in single_fences[0] or '[' in single_fences[0]):
+                raw_clean = single_fences[0].strip()
+            else:
+                unclosed = re.search(r'```(?:json)?\s*([\s\S]*)', raw_clean, re.DOTALL)
+                if unclosed and unclosed.group(1).strip():
+                    raw_clean = unclosed.group(1).strip()
+                else:
+                    raw_clean = re.sub(r'^`?json\s*', '', raw_clean, flags=re.IGNORECASE).strip()
+
+        brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
+        if brace_match:
+            raw_clean = brace_match.group().strip()
 
         if "{{" in raw_clean:
             raw_clean = raw_clean.replace("{{", "{").replace("}}", "}")
@@ -4632,71 +4661,11 @@ class QwenProvider(AIProvider):
             f"[QwenAI] regenerate_mom_action_points raw LLM response ({len(raw)} chars):\n{raw}"
         )
 
-        raw_clean = raw.strip()
-
-        # Stage 1: strip markdown code fence  ```json … ``` or ``` … ```
-        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', raw_clean, re.DOTALL)
-        if json_match:
-            raw_clean = json_match.group(1).strip()
-            logger.info(f"[QwenAI] regenerate_mom_action_points: stripped markdown fence, candidate ({len(raw_clean)} chars)")
-        else:
-            # Stage 2: extract the first {...} block from the full response
-            brace_match = re.search(r'\{.*\}', raw_clean, re.DOTALL)
-            if brace_match:
-                raw_clean = brace_match.group().strip()
-                logger.info(f"[QwenAI] regenerate_mom_action_points: extracted brace block ({len(raw_clean)} chars)")
-
-        # Stage 2b: Sanitize double-braces if LLM echoed {{ ... }}
-        if raw_clean.startswith("{{") or "{{" in raw_clean:
-            raw_clean = raw_clean.replace("{{", "{").replace("}}", "}")
-            logger.info(f"[QwenAI] regenerate_mom_action_points: normalized double braces {{ ... }} to {{ ... }}")
-
-        def _try_parse(text: str):
-            """Attempt JSON parse, then ast.literal_eval as fallback for single-quoted output."""
-            # Attempt 1: standard json.loads
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                pass
-            # Attempt 2: ast.literal_eval handles Python-style {'key': 'value'} dicts
-            try:
-                result = _ast.literal_eval(text)
-                if isinstance(result, dict):
-                    # Re-encode to proper JSON and back to normalise types
-                    return json.loads(json.dumps(result))
-            except Exception:
-                pass
-            # Attempt 3: brace-extract then standard parse (catches leading/trailing prose)
-            brace = re.search(r'\{.*\}', text, re.DOTALL)
-            if brace:
-                try:
-                    return json.loads(brace.group())
-                except Exception:
-                    pass
-                try:
-                    result = _ast.literal_eval(brace.group())
-                    if isinstance(result, dict):
-                        return json.loads(json.dumps(result))
-                except Exception:
-                    pass
-            return None
-
-        data = _try_parse(raw_clean)
-
-        if data is None:
-            logger.warning(
-                f"[QwenAI] regenerate_mom_action_points: all JSON parse attempts failed.\n"
-                f"Candidate text was:\n{raw_clean}"
-            )
+        items = self.parse_action_extraction_response(raw, chunk_info="regenerate_mom_action_points")
+        if not items and "action_items" not in raw and "task" not in raw:
             return {"action_items": [], "parse_error": True, "error_reason": "All JSON parse attempts failed"}
-
-        if isinstance(data, dict):
-            data.setdefault("action_items", [])
-            logger.info(f"[QwenAI] regenerate_mom_action_points: parsed OK, {len(data['action_items'])} action item(s)")
-            return data
-
-        logger.warning(f"[QwenAI] regenerate_mom_action_points output is not a JSON object. Got type: {type(data)}")
-        return {"action_items": [], "parse_error": True, "error_reason": "Output was not a JSON object"}
+        logger.info(f"[QwenAI] regenerate_mom_action_points: parsed OK, {len(items)} action item(s)")
+        return {"action_items": items}
 
     def deduplicate_action_points(self, action_items: List[Dict]) -> List[Dict]:
         """Perform a final global deduplication pass over all extracted action items.
@@ -4777,6 +4746,227 @@ class QwenProvider(AIProvider):
 
         logger.warning("[QwenAI] deduplicate_action_points output invalid or parse failed. Returning original items.")
         return action_items
+
+    def parse_action_extraction_response(self, raw_text: str, chunk_info: str = "") -> List[Dict]:
+        """Robustly parse and validate action items from LLM response.
+
+        Handles:
+        - Markdown code fences (```json ... ``` or ``` ... ```)
+        - Single backtick wrapping (`json ... `)
+        - Unclosed code fences (```json ... to EOF)
+        - Surrounding prose / extra text before and after JSON
+        - Optional fields being null/None (task, owner, deadline, expected_outcome)
+        - Empty action_items array without discarding
+        - Detailed logging on parse/validation failure including the actual error
+        """
+        import ast as _ast
+
+        if not raw_text or not str(raw_text).strip():
+            logger.warning(f"[QwenAI] Action extraction{(' ' + chunk_info) if chunk_info else ''} received empty response from LLM.")
+            return []
+
+        text = str(raw_text).strip()
+        # 1. Strip reasoning tags (<think>...</think>)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+        # 2. Extract potential candidates (fenced, stripped, brace-extracted)
+        candidates = []
+
+        # Check for markdown code fences (```json ... ``` or ``` ... ```)
+        fences = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', text, re.DOTALL)
+        for f in fences:
+            if f.strip():
+                candidates.append(f.strip())
+
+        # Check for single backtick fence (`json ... ` or ` ... `)
+        single_fences = re.findall(r'`(?:json)?\s*([\s\S]*?)\s*`', text, re.DOTALL)
+        for f in single_fences:
+            if f.strip() and ('{' in f or '[' in f):
+                candidates.append(f.strip())
+
+        # Check for unclosed fence: ```json ...
+        unclosed = re.search(r'```(?:json)?\s*([\s\S]*)', text, re.DOTALL)
+        if unclosed and unclosed.group(1).strip():
+            candidates.append(unclosed.group(1).strip())
+
+        # Direct cleaned text (also strip leading `?json)
+        cleaned_direct = re.sub(r'^`?json\s*', '', text, flags=re.IGNORECASE).strip()
+        candidates.append(cleaned_direct)
+        candidates.append(text)
+
+        def _extract_balanced_json(s: str) -> str:
+            first_obj = s.find('{')
+            first_arr = s.find('[')
+            if first_obj != -1 and (first_arr == -1 or first_obj < first_arr):
+                start_ch, end_ch, start_idx = '{', '}', first_obj
+            elif first_arr != -1:
+                start_ch, end_ch, start_idx = '[', ']', first_arr
+            else:
+                return s
+
+            depth = 0
+            in_str = False
+            esc = False
+            end_idx = -1
+            for i in range(start_idx, len(s)):
+                ch = s[i]
+                if esc:
+                    esc = False
+                    continue
+                if ch == '\\' and in_str:
+                    esc = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if not in_str:
+                    if ch == start_ch:
+                        depth += 1
+                    elif ch == end_ch:
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i
+                            break
+            if start_idx != -1 and end_idx != -1:
+                return s[start_idx : end_idx + 1].strip()
+            # Fallback greedy
+            if start_ch == '{':
+                last_idx = s.rfind('}')
+                if start_idx != -1 and last_idx > start_idx:
+                    return s[start_idx : last_idx + 1].strip()
+            elif start_ch == '[':
+                last_idx = s.rfind(']')
+                if start_idx != -1 and last_idx > start_idx:
+                    return s[start_idx : last_idx + 1].strip()
+            return s
+
+        # Also add balanced brace extraction for each candidate
+        all_candidates = []
+        seen = set()
+        for c in candidates:
+            for version in [c, _extract_balanced_json(c)]:
+                version = version.strip()
+                if version and version not in seen:
+                    seen.add(version)
+                    all_candidates.append(version)
+
+        def _clean_field(val: Any) -> Optional[str]:
+            if val is None:
+                return None
+            s = str(val).strip()
+            if s.lower() in ("null", "none", "n/a", "undefined", "unknown", ""):
+                return None
+            return s
+
+        def _normalize_elem(elem: Dict, default_src_id: Optional[str] = None) -> Dict:
+            raw_task = (
+                elem.get("task")
+                or elem.get("item")
+                or elem.get("action")
+                or elem.get("description")
+                or elem.get("action_point")
+                or elem.get("summary")
+                or elem.get("title")
+            )
+            return {
+                "task": str(raw_task).strip() if raw_task is not None else None,
+                "owner": _clean_field(elem.get("owner") or elem.get("assignee") or elem.get("person") or elem.get("action_owner")),
+                "deadline": _clean_field(elem.get("deadline") or elem.get("due_date") or elem.get("date") or elem.get("due")),
+                "expected_outcome": _clean_field(elem.get("expected_outcome") or elem.get("goal") or elem.get("outcome")),
+                "source_point_id": elem.get("source_point_id") or elem.get("id") or default_src_id,
+            }
+
+        def _extract_items(data: Any) -> Optional[List[Dict]]:
+            if data is None:
+                return None
+
+            # Case 1: direct list
+            if isinstance(data, list):
+                items = []
+                for elem in data:
+                    if isinstance(elem, dict):
+                        items.append(_normalize_elem(elem))
+                    elif isinstance(elem, str) and elem.strip():
+                        items.append({"task": elem.strip(), "owner": None, "deadline": None, "expected_outcome": None, "source_point_id": None})
+                return items
+
+            # Case 2: dictionary
+            if isinstance(data, dict):
+                for k in ("action_items", "actions", "action_points", "items", "tasks", "points"):
+                    if k in data and isinstance(data[k], list):
+                        items = []
+                        for elem in data[k]:
+                            if isinstance(elem, dict):
+                                items.append(_normalize_elem(elem))
+                            elif isinstance(elem, str) and elem.strip():
+                                items.append({"task": elem.strip(), "owner": None, "deadline": None, "expected_outcome": None, "source_point_id": None})
+                        return items
+
+                # Single item dictionary
+                if any(k in data for k in ("task", "item", "action", "description", "action_point", "owner", "deadline")):
+                    return [_normalize_elem(data)]
+
+                # Point-keyed dict: {"pt-1": [...], "pt-2": [...]}
+                nested = []
+                for k, v in data.items():
+                    if isinstance(v, list):
+                        for elem in v:
+                            if isinstance(elem, dict):
+                                nested.append(_normalize_elem(elem, default_src_id=k))
+                if nested:
+                    return nested
+
+            return None
+
+        last_error = None
+        for cand in all_candidates:
+            sanitized_variants = [
+                cand,
+                cand.replace("{{", "{").replace("}}", "}"),
+                re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', cand),
+                re.sub(r',\s*([\]}])', r'\1', cand),
+            ]
+            for s in sanitized_variants:
+                # Attempt A: json.loads
+                try:
+                    parsed = json.loads(s, strict=False)
+                    res = _extract_items(parsed)
+                    if res is not None:
+                        return res
+                except Exception as e:
+                    last_error = e
+
+                # Attempt B: ast.literal_eval for Python-style dicts
+                try:
+                    py_s = re.sub(r'\btrue\b', 'True', s, flags=re.IGNORECASE)
+                    py_s = re.sub(r'\bfalse\b', 'False', py_s, flags=re.IGNORECASE)
+                    py_s = re.sub(r'\bnull\b', 'None', py_s, flags=re.IGNORECASE)
+                    parsed = _ast.literal_eval(py_s)
+                    res = _extract_items(parsed)
+                    if res is not None:
+                        return res
+                except Exception as e:
+                    last_error = e
+
+        # Fallback: regex search for all individual action item objects
+        individual = []
+        for m in re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text):
+            try:
+                obj = json.loads(m.group(), strict=False)
+                if isinstance(obj, dict) and any(k in obj for k in ("task", "action", "description", "item", "owner")):
+                    individual.append(_normalize_elem(obj))
+            except Exception as e:
+                last_error = e
+
+        if individual:
+            return individual
+
+        prefix = f"Action extraction{(' ' + chunk_info) if chunk_info else ''}"
+        logger.warning(
+            f"[QwenAI] {prefix} JSON parsing/validation failed. "
+            f"Parsing error: {last_error}. Raw LLM output ({len(raw_text)} chars):\n{raw_text[:500]!r}"
+        )
+        return []
 
     def extract_actions_from_enhanced_points(
         self,
@@ -4860,7 +5050,8 @@ class QwenProvider(AIProvider):
         )
 
         for chunk_idx, chunk in enumerate(chunks, 1):
-            logger.info(f"[QwenAI] Processing action extraction chunk {chunk_idx}/{len(chunks)} ({len(chunk)} point(s))...")
+            chunk_info = f"chunk {chunk_idx}/{len(chunks)}"
+            logger.info(f"[QwenAI] Processing action extraction {chunk_info} ({len(chunk)} point(s))...")
             points_json = json.dumps(chunk, ensure_ascii=False, indent=2)
             if "{points_json}" in active_prompt:
                 prompt = active_prompt.replace("{points_json}", points_json)
@@ -4869,109 +5060,19 @@ class QwenProvider(AIProvider):
             raw = self._infer(prompt, max_new_tokens=max_tokens, task_key="mom_extract_actions")
 
             if not raw or not raw.strip():
-                logger.warning(f"[QwenAI] Action extraction chunk {chunk_idx}/{len(chunks)} received empty response from LLM.")
+                logger.warning(f"[QwenAI] Action extraction {chunk_info} received empty response from LLM.")
                 continue
 
-            logger.info(f"[QwenAI] Action extraction chunk {chunk_idx}/{len(chunks)} raw response ({len(raw)} chars): {raw[:200]!r}")
+            logger.info(f"[QwenAI] Action extraction {chunk_info} raw response ({len(raw)} chars): {raw[:200]!r}")
 
-            def _extract_items_from_data(data) -> List[Dict]:
-                if isinstance(data, list):
-                    res = []
-                    for elem in data:
-                        if isinstance(elem, dict) and (elem.get("task") or elem.get("item") or elem.get("action")):
-                            res.append(elem)
-                    return res
-                if isinstance(data, dict):
-                    for k in ("action_items", "actions", "action_points", "items", "tasks", "points"):
-                        val = data.get(k)
-                        if isinstance(val, list):
-                            res = []
-                            for elem in val:
-                                if isinstance(elem, dict) and (elem.get("task") or elem.get("item") or elem.get("action")):
-                                    res.append(elem)
-                                elif isinstance(elem, str) and elem.strip():
-                                    res.append({"task": elem.strip(), "owner": None, "deadline": None})
-                            if res:
-                                return res
-                    if data.get("task") or data.get("item") or data.get("action"):
-                        return [data]
-                    nested = []
-                    for k, v in data.items():
-                        if isinstance(v, list):
-                            for elem in v:
-                                if isinstance(elem, dict) and (elem.get("task") or elem.get("item") or elem.get("action")):
-                                    if not elem.get("source_point_id"):
-                                        elem["source_point_id"] = k
-                                    nested.append(elem)
-                    if nested:
-                        return nested
-                return []
-
-            def _parse_chunk_actions(raw_text: str) -> List[Dict]:
-                if not raw_text or not raw_text.strip():
-                    return []
-                text = raw_text.strip()
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-
-                code_blocks = re.findall(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
-                candidates = [cb.strip() for cb in code_blocks if cb.strip()]
-                candidates.append(text)
-
-                for cand in candidates:
-                    for sanitized in [cand, cand.replace("{{", "{").replace("}}", "}")]:
-                        try:
-                            p = json.loads(sanitized)
-                            items = _extract_items_from_data(p)
-                            if items:
-                                return items
-                        except Exception:
-                            pass
-                        try:
-                            p = _ast.literal_eval(sanitized)
-                            items = _extract_items_from_data(p)
-                            if items:
-                                return items
-                        except Exception:
-                            pass
-                        arr_match = re.search(r'\[\s*\{.*\}\s*\]', sanitized, re.DOTALL)
-                        if arr_match:
-                            try:
-                                p = json.loads(arr_match.group())
-                                items = _extract_items_from_data(p)
-                                if items:
-                                    return items
-                            except Exception:
-                                pass
-                        obj_match = re.search(r'\{.*\}', sanitized, re.DOTALL)
-                        if obj_match:
-                            try:
-                                p = json.loads(obj_match.group())
-                                items = _extract_items_from_data(p)
-                                if items:
-                                    return items
-                            except Exception:
-                                pass
-
-                # Fallback: regex search for all individual action item objects
-                individual = []
-                for m in re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text):
-                    try:
-                        obj = json.loads(m.group())
-                        if isinstance(obj, dict) and (obj.get("task") or obj.get("action")):
-                            individual.append(obj)
-                    except Exception:
-                        pass
-                if individual:
-                    return _extract_items_from_data(individual)
-
-                return []
-
-            chunk_items = _parse_chunk_actions(raw)
+            # Backward compatibility closure
+            _parse_chunk_actions = lambda s: self.parse_action_extraction_response(s, chunk_info=chunk_info)
+            chunk_items = self.parse_action_extraction_response(raw, chunk_info=chunk_info)
             if chunk_items:
-                logger.info(f"[QwenAI] Action extraction chunk {chunk_idx}/{len(chunks)} parsed OK, found {len(chunk_items)} action item(s)")
+                logger.info(f"[QwenAI] Action extraction {chunk_info} parsed OK, found {len(chunk_items)} action item(s)")
                 all_action_items.extend(chunk_items)
             else:
-                logger.warning(f"[QwenAI] Action extraction chunk {chunk_idx}/{len(chunks)} parse yielded 0 items. Raw: {raw[:200]!r}")
+                logger.info(f"[QwenAI] Action extraction {chunk_info} parse completed with 0 action items.")
 
         # Build lookup for quick fallback inside extract_actions_from_enhanced_points
         point_by_id = {p.get("id"): p for p in polished_points if p.get("id")}

@@ -178,3 +178,72 @@ async def test_download_final_docx_3column_single_default_agenda():
         # Action point next
         assert "Follow up on topic" in dp_col_values[2]
         assert dp_col_values[2].startswith("•")
+
+
+@pytest.mark.asyncio
+async def test_download_final_docx_action_owner_fallback_to_speaker():
+    """Verify that Action / Speaker column uses action owner, falling back to speaker if null."""
+    from docx import Document
+    mock_rom_data = {
+        "final_rom": {
+            "include_action_points": False,
+            "agendas": [
+                {
+                    "agenda_id": "A1",
+                    "title": "Project Updates",
+                    "discussion_points": [
+                        {
+                            "id": "pt-1",
+                            "text": "Task assigned to Alice for implementation.",
+                            "action_owner": "Alice",
+                            "speaker": "Bob",
+                        },
+                        {
+                            "id": "pt-2",
+                            "text": "General status update shared.",
+                            "action_owner": None,
+                            "speaker": "Charlie",
+                        },
+                        {
+                            "id": "pt-3",
+                            "text": "Open discussion notes.",
+                            "action_owner": None,
+                            "speaker": None,
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+
+    with patch("routers.rom_router._get_rom_data", AsyncMock(return_value=mock_rom_data)), \
+         patch("routers.rom_router._validate_user_id", return_value="test-user"):
+
+        response = await download_final_docx(
+            recording_id="rec-456",
+            version=None,
+            include_action_points=False,
+            current_user={"sub": "test-user"},
+            db=MagicMock()
+        )
+
+        body_bytes = b""
+        async for chunk in response.body_iterator:
+            body_bytes += chunk
+
+        doc = Document(io.BytesIO(body_bytes))
+        table = doc.tables[0]
+        rows_text = [[c.text.strip() for c in r.cells] for r in table.rows]
+
+        # Headers: ['ID', 'Agenda', 'Discussion Points', 'Action / Speaker']
+        assert rows_text[0] == ['ID', 'Agenda', 'Discussion Points', 'Action / Speaker']
+
+        # Row 1 (pt-1): has action_owner "Alice" -> uses "Alice" (not speaker "Bob")
+        assert rows_text[1][3] == "Alice"
+
+        # Row 2 (pt-2): action_owner is None, speaker is "Charlie" -> falls back to "Charlie"
+        assert rows_text[2][3] == "Charlie"
+
+        # Row 3 (pt-3): action_owner and speaker are None -> falls back to "-"
+        assert rows_text[3][3] == "-"
+

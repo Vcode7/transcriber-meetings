@@ -178,11 +178,12 @@ async def _run_reidentify_impl(
     original_speakers: Optional[str] = None
     original_status: str = "done"
     raw_text: str = ""
+    participant_voice_ids: List[str] = []
     try:
         async with get_db_context() as db:
             r = await db.execute(
                 text(
-                    "SELECT transcript, speakers_detected, status, raw_text "
+                    "SELECT transcript, speakers_detected, status, raw_text, participant_voice_ids "
                     "FROM recordings WHERE id = :rid"
                 ),
                 {"rid": recording_id},
@@ -193,6 +194,8 @@ async def _run_reidentify_impl(
             original_speakers = row["speakers_detected"]
             original_status = row.get("status") or "done"
             raw_text = row.get("raw_text") or ""
+            if row.get("participant_voice_ids"):
+                participant_voice_ids = from_json(row["participant_voice_ids"], [])
     except Exception as e:
         logger.error(f"[ReID] {recording_id} — Could not snapshot existing data: {e}")
 
@@ -242,13 +245,13 @@ async def _run_reidentify_impl(
         logger.error(f"[ReID] {recording_id} — Voice profile load FAILED: {e}", exc_info=True)
         voice_profiles = []
 
-    # Load user similarity threshold & embedding model
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
     active_embedding_model = "ecapa"
+    restrict_to_meeting = False
     try:
         async with get_db_context() as db:
             r = await db.execute(
-                text("SELECT speaker_similarity_threshold, speaker_embedding_model FROM user_settings WHERE user_id = :uid"),
+                text("SELECT speaker_similarity_threshold, speaker_embedding_model, restrict_reassignment_to_meeting_speakers FROM user_settings WHERE user_id = :uid"),
                 {"uid": user_id},
             )
             row = r.mappings().fetchone()
@@ -257,9 +260,27 @@ async def _run_reidentify_impl(
                 threshold = float(row["speaker_similarity_threshold"])
             if row.get("speaker_embedding_model"):
                 active_embedding_model = str(row["speaker_embedding_model"]).strip().lower()
+            if row.get("restrict_reassignment_to_meeting_speakers") is not None:
+                restrict_to_meeting = bool(row["restrict_reassignment_to_meeting_speakers"])
     except Exception:
         pass
-    logger.info(f"[ReID] {recording_id} — Similarity threshold: {threshold}, Embedding model: {active_embedding_model}")
+    logger.info(f"[ReID] {recording_id} — Similarity threshold: {threshold}, Embedding model: {active_embedding_model}, Restrict to meeting: {restrict_to_meeting}")
+
+    # If restrict_to_meeting is enabled, filter voice profiles to only meeting speakers
+    if restrict_to_meeting:
+        meeting_pids = {str(s.get("speaker_profile_id")) for s in transcript_list if s.get("speaker_profile_id")}
+        meeting_plabels = {s.get("speaker_label") for s in transcript_list if s.get("speaker_profile_id") and s.get("speaker_label")}
+        for pvid in participant_voice_ids:
+            meeting_pids.add(str(pvid))
+        filtered_vps = [
+            vp for vp in voice_profiles
+            if str(vp.get("id")) in meeting_pids or vp.get("label") in meeting_plabels
+        ]
+        logger.info(
+            f"[ReID] {recording_id} — Restricted reassignment to meeting speakers: "
+            f"{len(filtered_vps)}/{len(voice_profiles)} profiles retained ({list(meeting_plabels or meeting_pids)})"
+        )
+        voice_profiles = filtered_vps
 
     # Ensure profiles have embeddings for the active model (lazy generation from saved audio)
     from services.embedding_router import ensure_profile_embeddings
@@ -343,6 +364,7 @@ async def _run_reidentify_impl(
         similarity_threshold=threshold,
         use_model_default_threshold=True,
         embedding_model=active_embedding_model,
+        restrict_to_meeting_speakers=restrict_to_meeting,
     )
 
     # Unload speaker embedding encoder to free VRAM

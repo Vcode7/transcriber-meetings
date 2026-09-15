@@ -190,6 +190,7 @@ async def connect_db():
                 whisper_parallel_chunk_minutes INTEGER NOT NULL DEFAULT 10,
                 rom_action_generation_chunk_size INTEGER NOT NULL DEFAULT 10,
                 rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
+                restrict_reassignment_to_meeting_speakers INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             )
 
@@ -320,6 +321,23 @@ async def connect_db():
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_arena_drafts_user ON arena_drafts(user_id)"))
 
+        # ── arena_history — Model Arena generation history storage ──────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS arena_history (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                prompt_key TEXT NOT NULL,
+                meeting_id TEXT NOT NULL,
+                recording_name TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL,
+                window_index INTEGER,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_arena_history_user_pm ON arena_history(user_id, prompt_key, meeting_id)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_arena_history_created ON arena_history(created_at DESC)"))
+
         # ── recording_chunks — per-chunk transcription results ──────────────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS recording_chunks (
@@ -417,6 +435,7 @@ async def connect_db():
             ("max_tokens_collection_topic_growth", "INTEGER NOT NULL DEFAULT 1500"),
             ("max_tokens_vocab_extractor", "INTEGER NOT NULL DEFAULT 512"),
             ("embedding_model", "TEXT NOT NULL DEFAULT 'Qwen3-Embedding-0.6B'"),
+            ("restrict_reassignment_to_meeting_speakers", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))

@@ -980,6 +980,10 @@ async def _run_pipeline_impl(
 
         # ── Speaker refinement pass on final segments ──
         logger.info(f"[Pipeline] {recording_id} — Running speaker refinement pass ({active_embedding_model}) on re-segmented transcript")
+        restrict_reassignment = (
+            bool(user_settings_row.get("restrict_reassignment_to_meeting_speakers", 0))
+            if user_settings_row else False
+        )
         speaker_segments = refine_transcript_speakers_with_ecapa(
             file_path=file_path,
             speaker_segments=speaker_segments,
@@ -987,6 +991,7 @@ async def _run_pipeline_impl(
             similarity_threshold=threshold,
             use_model_default_threshold=True,
             embedding_model=active_embedding_model,
+            restrict_to_meeting_speakers=restrict_reassignment,
         )
 
         # Unload speaker embedding encoder immediately to free VRAM
@@ -2356,6 +2361,10 @@ async def _run_finalize_pipeline_impl(
     # ── Speaker refinement pass on final segments ──
     logger.info(f"[FinalPipeline] {recording_id} — Running speaker refinement pass ({active_embedding_model}) on re-segmented transcript")
     log_gpu_memory("Pre-ECAPA Refinement")
+    restrict_reassignment = (
+        bool(user_settings_row.get("restrict_reassignment_to_meeting_speakers", 0))
+        if user_settings_row else False
+    )
     speaker_segments = refine_transcript_speakers_with_ecapa(
         file_path=full_wav_path,
         speaker_segments=speaker_segments,
@@ -2363,6 +2372,7 @@ async def _run_finalize_pipeline_impl(
         similarity_threshold=threshold,
         use_model_default_threshold=True,
         embedding_model=active_embedding_model,
+        restrict_to_meeting_speakers=restrict_reassignment,
     )
 
     # Unload speaker embedding encoder immediately to free VRAM

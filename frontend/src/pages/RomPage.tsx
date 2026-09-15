@@ -57,10 +57,14 @@ const getActionOwnerText = (pt: any): string | null => {
   if (!pt) return null
   let owner = pt.action_owner || pt.action_owners || pt.owner || pt.assignee || pt.action_assignee || pt.assignees
 
-  // If not found at top-level, extract assignees/owners from action_items array (e.g. separate action extraction)
-  if (!owner && Array.isArray(pt.action_items) && pt.action_items.length > 0) {
+  // If not found at top-level, extract assignees/owners from action_points or action_items array
+  const actionList = (Array.isArray(pt.action_points) && pt.action_points.length > 0)
+    ? pt.action_points
+    : (Array.isArray(pt.action_items) && pt.action_items.length > 0 ? pt.action_items : [])
+
+  if (!owner && actionList.length > 0) {
     const itemAssignees: string[] = []
-    for (const item of pt.action_items) {
+    for (const item of actionList) {
       if (typeof item === 'object' && item !== null) {
         const a = item.assignee || item.owner || item.action_owner || item.action_owners || item.assignees
         if (a) {
@@ -68,7 +72,8 @@ const getActionOwnerText = (pt: any): string | null => {
           else itemAssignees.push(String(a))
         }
       } else if (typeof item === 'string') {
-        const m = item.match(/\((?:Owner|Assignee):\s*([^)]+)\)/i)
+        const m = item.match(/\((?:Owner|Assignee|Action Owner):\s*([^)]+)\)/i) ||
+                  item.match(/\[(?:Owner|Assignee|Action Owner):\s*([^\]]+)\]/i)
         if (m && m[1]) itemAssignees.push(m[1].trim())
       }
     }
@@ -82,12 +87,18 @@ const getActionOwnerText = (pt: any): string | null => {
     owner = pt.assignee || pt.owner
   }
 
-  // Also check if discussion_point has embedded (Owner: ...) pattern
-  if (!owner && pt.discussion_point && typeof pt.discussion_point === 'string') {
-    const m = pt.discussion_point.match(/\((?:Owner|Assignee|Action Owner):\s*([^)]+)\)/i) ||
-              pt.discussion_point.match(/\[(?:Owner|Assignee|Action Owner):\s*([^\]]+)\]/i)
-    if (m && m[1]) {
-      owner = m[1].trim()
+  // Also check if text / polished_text / discussion_point / point has embedded (Owner: ...) pattern
+  if (!owner) {
+    const textCandidates = [pt.discussion_point, pt.text, pt.polished_text, pt.point]
+    for (const tc of textCandidates) {
+      if (tc && typeof tc === 'string') {
+        const m = tc.match(/\((?:Owner|Assignee|Action Owner):\s*([^)]+)\)/i) ||
+                  tc.match(/\[(?:Owner|Assignee|Action Owner):\s*([^\]]+)\]/i)
+        if (m && m[1]) {
+          owner = m[1].trim()
+          break
+        }
+      }
     }
   }
 
@@ -2677,9 +2688,9 @@ export default function RomPage() {
   }
 
   // Handle right-click context menu in Final ROM (Long view)
-  const handleFinalRomContextMenu = (e: React.MouseEvent, pointId: string, agendaId: string) => {
+  const handleFinalRomContextMenu = (e: React.MouseEvent, pointId: string, agendaId: string, fullPointText?: string) => {
     const selection = window.getSelection()
-    const selectedText = selection?.toString()?.trim() || ''
+    const selectedText = selection?.toString()?.trim() || fullPointText?.trim() || ''
     if (!selectedText) return
     e.preventDefault()
     setFinalRomContextMenu({
@@ -5443,17 +5454,25 @@ export default function RomPage() {
                                   pts.map((pt: any, pIdx: number) => {
                                     const isEditing = editingPointId === pt.id
                                     const ptText = pt.text || pt.polished_text || ''
-                                    const spk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '—')
+                                    const actionOwner = getActionOwnerText(pt)
+                                    const rawSpk = pt.speaker ? formatItemText(pt.speaker) : (pt.speakers?.length ? (Array.isArray(pt.speakers) ? pt.speakers.map((s: any) => formatItemText(s)).join(', ') : formatItemText(pt.speakers)) : '')
+                                    const displayPerson = actionOwner || (rawSpk && rawSpk !== '—' ? rawSpk : '—')
+                                    const isActionOwner = Boolean(actionOwner)
                                     const isDocPoint = pt.is_doc_point
                                     const isSelectedForAi = aiEditSelectedIds.has(pt.id)
-                                    const ptImportantMarks = importantPoints.filter(ip => ip.point_id === pt.id)
+                                    const ptImportantMarks = importantPoints.filter(ip =>
+                                      ip.point_id === pt.id ||
+                                      (pt.original_point_id && ip.point_id === pt.original_point_id) ||
+                                      (ip.text && (ptText.toLowerCase().includes(ip.text.toLowerCase()) || ip.text.toLowerCase().includes(ptText.toLowerCase())))
+                                    )
+                                    const isVeryImportantPoint = Boolean(pt.is_very_important || ptImportantMarks.length > 0)
 
                                     return (
                                       <div key={pt.id || `${agenda.agenda_id || aIdx}-pt-${pIdx}`}>
                                         <div style={{
                                           borderRadius: 8,
-                                          border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : isDocPoint ? 'hsl(280,75%,60%/.3)' : ptImportantMarks.length > 0 ? 'hsl(45,100%,50%/.55)' : 'hsl(var(--border)/.3)'}`,
-                                          background: isSelectedForAi ? 'hsl(280,75%,60%/.07)' : isDocPoint ? 'hsl(280,75%,60%/.05)' : ptImportantMarks.length > 0 ? 'hsl(45,100%,50%/.04)' : 'hsl(var(--paper)/.4)',
+                                          border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : isDocPoint ? 'hsl(280,75%,60%/.3)' : isVeryImportantPoint ? 'hsl(45,100%,50%/.55)' : 'hsl(var(--border)/.3)'}`,
+                                          background: isSelectedForAi ? 'hsl(280,75%,60%/.07)' : isDocPoint ? 'hsl(280,75%,60%/.05)' : isVeryImportantPoint ? 'hsl(45,100%,50%/.04)' : 'hsl(var(--paper)/.4)',
                                           padding: '.6rem .8rem',
                                           transition: 'all .15s ease'
                                         }}>
@@ -5525,7 +5544,7 @@ export default function RomPage() {
                                                 <div
                                                   onContextMenu={(e) => {
                                                     if (romVersion === 'long') {
-                                                      handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`)
+                                                      handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`, ptText)
                                                     }
                                                   }}
                                                   title={romVersion === 'long' ? 'Tip: Select text and right-click to Mark as Very Important' : undefined}
@@ -5541,13 +5560,24 @@ export default function RomPage() {
                                                 </div>
                                               )}
 
-                                              {/* Speaker & Badges */}
+                                              {/* Speaker / Action Owner & Badges */}
                                               <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><User size={10} />{spk}</span>
+                                                <span
+                                                  title={isActionOwner ? `Action Owner: ${displayPerson}` : `Speaker: ${displayPerson}`}
+                                                  style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: 4,
+                                                    ...(isActionOwner ? { color: 'hsl(35,95%,40%)', fontWeight: 600 } : {})
+                                                  }}
+                                                >
+                                                  {isActionOwner ? <UserCheck size={10} /> : <User size={10} />}
+                                                  {displayPerson}
+                                                </span>
                                                 {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
-                                                {ptImportantMarks.length > 0 && (
+                                                {isVeryImportantPoint && (
                                                   <span
-                                                    title={`Marked as Very Important: ${ptImportantMarks.map(m => `"${m.text}"`).join(', ')}`}
+                                                    title={ptImportantMarks.length > 0 ? `Marked as Very Important: ${ptImportantMarks.map(m => `"${m.text}"`).join(', ')}` : 'Marked as Very Important'}
                                                     style={{
                                                       display: 'inline-flex',
                                                       alignItems: 'center',

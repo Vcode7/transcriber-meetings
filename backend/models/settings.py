@@ -23,6 +23,7 @@ class UserSettings(BaseModel):
     generate_mom_auto: bool = True
     embedding_model: str = "Qwen3-Embedding-0.6B"
     speaker_embedding_model: str = "ecapa"  # "ecapa" | "eres2net_large"
+    restrict_reassignment_to_meeting_speakers: bool = Field(default=False)
     
     # New Ollama specific settings
     ollama_num_ctx: int = Field(default=32768, ge=512, le=131072)
@@ -149,6 +150,7 @@ class UserSettingsUpdate(BaseModel):
     generate_mom_auto: bool | None = None
     embedding_model: str | None = None
     speaker_embedding_model: str | None = None  # "ecapa" | "eres2net_large"
+    restrict_reassignment_to_meeting_speakers: bool | None = None
     
     # New Ollama settings
     ollama_num_ctx: int | None = Field(default=None, ge=512, le=131072)

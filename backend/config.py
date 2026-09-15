@@ -138,6 +138,11 @@ class Settings(BaseSettings):
     MIN_SEGMENT_DURATION: float = 1.5  # seconds
 
     speaker_refinement_margin: float = 0.30  # margins/similarity difference for refinement
+    speaker_refinement_high_threshold: float = 0.82  # absolute confidence threshold for ECAPA refinement override
+    speaker_refinement_min_threshold: float = 0.20   # minimum similarity floor for ECAPA margin-based override
+    speaker_refinement_high_threshold_eres2net: float = 0.70  # absolute confidence threshold for ERes2Net refinement override
+    speaker_refinement_min_threshold_eres2net: float = 0.15   # minimum similarity floor for ERes2Net margin-based override
+    RESTRICT_REASSIGNMENT_TO_MEETING_SPEAKERS: bool = False   # Restrict reassignment to meeting speakers only
 
     # --- Audio preprocessing before alignment ---
     # When True, a lightweight cleanup pass (silence trim, clipping repair,

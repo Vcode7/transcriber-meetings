@@ -49,6 +49,7 @@ interface UserSettings {
   generate_mom_auto?: boolean
   embedding_model?: string
   speaker_embedding_model?: string
+  restrict_reassignment_to_meeting_speakers?: boolean
 
   // Ollama settings
   ollama_num_ctx?: number
@@ -1421,6 +1422,71 @@ export default function SettingsPage() {
                         min={0.1} max={1.0} step={0.05}
                         onChange={v => setSettings({ ...settings, word_conf_mid: v })}
                       />
+                    </div>
+
+                    {/* Restrict Reassignment to Meeting Speakers */}
+                    <div style={{
+                      padding: '1rem 1.25rem',
+                      borderRadius: 10,
+                      background: 'hsl(var(--paper)/.5)',
+                      border: '1px solid hsl(var(--border)/.6)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 16,
+                      flexWrap: 'wrap'
+                    }}>
+                      <div style={{ flex: 1, minWidth: 260 }}>
+                        <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Shield size={15} style={{ color: settings.restrict_reassignment_to_meeting_speakers ? 'hsl(142,70%,45%)' : 'hsl(var(--pencil))' }} />
+                          Restrict reassignment to meeting speakers
+                          <span style={{
+                            fontSize: '.68rem',
+                            fontWeight: 700,
+                            padding: '2px 8px',
+                            borderRadius: 12,
+                            background: settings.restrict_reassignment_to_meeting_speakers ? 'hsl(142,70%,45%/.15)' : 'hsl(var(--muted)/.6)',
+                            color: settings.restrict_reassignment_to_meeting_speakers ? 'hsl(142,70%,45%)' : 'hsl(var(--pencil))',
+                          }}>
+                            {settings.restrict_reassignment_to_meeting_speakers ? 'Enabled' : 'OFF (Default)'}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 4, lineHeight: 1.4 }}>
+                          When enabled, speaker reassignment only uses speaker profiles and speaker IDs assigned to that meeting. External/global voice profiles are ignored, and meeting speaker ID ↔ profile mapping is preserved.
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        role="switch"
+                        id="toggle-restrict-reassignment"
+                        aria-checked={Boolean(settings.restrict_reassignment_to_meeting_speakers)}
+                        onClick={() => setSettings({ ...settings, restrict_reassignment_to_meeting_speakers: !settings.restrict_reassignment_to_meeting_speakers })}
+                        style={{
+                          position: 'relative',
+                          width: 44,
+                          height: 24,
+                          borderRadius: 12,
+                          background: settings.restrict_reassignment_to_meeting_speakers ? 'hsl(142,70%,45%)' : 'hsl(var(--muted)/.8)',
+                          border: '1.5px solid hsl(var(--border))',
+                          cursor: 'pointer',
+                          transition: 'background-color .2s',
+                          padding: 0,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <span style={{
+                          position: 'absolute',
+                          top: 2,
+                          left: settings.restrict_reassignment_to_meeting_speakers ? 22 : 2,
+                          width: 16,
+                          height: 16,
+                          borderRadius: '50%',
+                          background: '#fff',
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+                          transition: 'left .2s',
+                        }} />
+                      </button>
                     </div>
                   </div>
                 )}

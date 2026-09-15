@@ -60,6 +60,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "generate_mom_auto": True,
         "embedding_model": "Qwen3-Embedding-0.6B",
         "speaker_embedding_model": "ecapa",
+        "restrict_reassignment_to_meeting_speakers": False,
         "ollama_num_ctx": 32768,
         "ollama_dynamic_ctx": True,
         "ollama_think": False,
@@ -165,6 +166,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
     res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
     res["missing_segment_min_duration_sec"] = float(res.get("missing_segment_min_duration_sec") or 2.0)
+    res["restrict_reassignment_to_meeting_speakers"] = bool(res.get("restrict_reassignment_to_meeting_speakers", 0))
 
     if res.get("embedding_model"):
         from config import settings
@@ -238,6 +240,8 @@ async def update_settings(
         patch["rom_stage2_process_all_together"] = 1 if patch["rom_stage2_process_all_together"] else 0
     if "missing_transcript_recovery_enabled" in patch:
         patch["missing_transcript_recovery_enabled"] = 1 if patch["missing_transcript_recovery_enabled"] else 0
+    if "restrict_reassignment_to_meeting_speakers" in patch:
+        patch["restrict_reassignment_to_meeting_speakers"] = 1 if patch["restrict_reassignment_to_meeting_speakers"] else 0
     if "missing_segment_min_duration_sec" in patch:
         try:
             val = float(patch["missing_segment_min_duration_sec"])
@@ -302,6 +306,7 @@ async def update_settings(
                         max_tokens_key_points, max_tokens_action_items, max_tokens_key_decisions,
                         max_tokens_speaker_summary, max_tokens_speaker_key_points, max_tokens_speaker_action_items,
                         max_tokens_collection_chat, max_tokens_collection_compare, max_tokens_collection_topic_growth, max_tokens_vocab_extractor,
+                        restrict_reassignment_to_meeting_speakers,
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
@@ -314,6 +319,7 @@ async def update_settings(
                         :max_tokens_key_points, :max_tokens_action_items, :max_tokens_key_decisions,
                         :max_tokens_speaker_summary, :max_tokens_speaker_key_points, :max_tokens_speaker_action_items,
                         :max_tokens_collection_chat, :max_tokens_collection_compare, :max_tokens_collection_topic_growth, :max_tokens_vocab_extractor,
+                        :restrict_reassignment_to_meeting_speakers,
                         :updated_at)
                 """),
                 {
@@ -366,6 +372,7 @@ async def update_settings(
                     "max_tokens_collection_compare": patch.get("max_tokens_collection_compare", 1500),
                     "max_tokens_collection_topic_growth": patch.get("max_tokens_collection_topic_growth", 1500),
                     "max_tokens_vocab_extractor": patch.get("max_tokens_vocab_extractor", 512),
+                    "restrict_reassignment_to_meeting_speakers": patch.get("restrict_reassignment_to_meeting_speakers", 0),
                     "updated_at": dt_to_str(now),
                 },
             )
@@ -376,6 +383,8 @@ async def update_settings(
         patch["use_ollama"] = bool(patch["use_ollama"])
     if "generate_mom_auto" in patch:
         patch["generate_mom_auto"] = bool(patch["generate_mom_auto"])
+    if "restrict_reassignment_to_meeting_speakers" in patch:
+        patch["restrict_reassignment_to_meeting_speakers"] = bool(patch["restrict_reassignment_to_meeting_speakers"])
 
     return {"message": "Settings updated.", **patch}
 

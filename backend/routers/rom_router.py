@@ -2299,7 +2299,7 @@ async def download_final_docx(
 ):
     user_id = _validate_user_id(current_user)
     data = await _get_rom_data(recording_id, user_id, db)
-    from services.rom_service import apply_speaker_mappings_to_final_rom, normalize_action_item, format_action_point_display_text
+    from services.rom_service import apply_speaker_mappings_to_final_rom, normalize_action_item, format_action_point_display_text, normalize_action_owner
 
     target_rom = None
     if version and data.get("final_rom_versions", {}).get(version.strip().lower()):
@@ -2385,10 +2385,18 @@ async def download_final_docx(
                 # First: List all agenda discussion points
                 for p_idx, pt in enumerate(pts):
                     pt_text = (pt.get("text") or pt.get("polished_text") or pt.get("discussion_point") or "").strip()
-                    spk = pt.get("speaker")
-                    if not spk and pt.get("speakers"):
-                        spk = ", ".join(pt["speakers"]) if isinstance(pt["speakers"], list) else str(pt["speakers"])
-                    spk_str = str(spk).strip() if spk else "-"
+                    owner = normalize_action_owner(
+                        raw_owner=pt.get("action_owner") or pt.get("action_owners") or pt.get("owner") or pt.get("assignee"),
+                        point_text=pt_text,
+                        action_items=pt.get("action_points") or pt.get("action_items")
+                    )
+                    if owner:
+                        spk_str = owner
+                    else:
+                        spk = pt.get("speaker")
+                        if not spk and pt.get("speakers"):
+                            spk = ", ".join(pt["speakers"]) if isinstance(pt["speakers"], list) else str(pt["speakers"])
+                        spk_str = str(spk).strip() if spk else "-"
 
                     row_cells = table.add_row().cells
                     row_cells[0].text = str(p_idx + 1)
@@ -2504,12 +2512,19 @@ async def download_final_docx(
                 if pts:
                     for p_idx, pt in enumerate(pts):
                         pt_text = (pt.get("text") or pt.get("polished_text") or pt.get("discussion_point") or "").strip()
-
-                        spk = pt.get("speaker")
-                        if not spk and pt.get("speakers"):
-                            speakers_list = pt.get("speakers")
-                            spk = ", ".join(speakers_list) if isinstance(speakers_list, list) else str(speakers_list)
-                        spk_str = str(spk).strip() if spk else "-"
+                        owner = normalize_action_owner(
+                            raw_owner=pt.get("action_owner") or pt.get("action_owners") or pt.get("owner") or pt.get("assignee"),
+                            point_text=pt_text,
+                            action_items=pt.get("action_points") or pt.get("action_items")
+                        )
+                        if owner:
+                            spk_str = owner
+                        else:
+                            spk = pt.get("speaker")
+                            if not spk and pt.get("speakers"):
+                                speakers_list = pt.get("speakers")
+                                spk = ", ".join(speakers_list) if isinstance(speakers_list, list) else str(speakers_list)
+                            spk_str = str(spk).strip() if spk else "-"
 
                         row_cells = table.add_row().cells
                         row_cells[0].text = str(a_idx) if p_idx == 0 else ""
