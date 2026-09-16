@@ -2,7 +2,7 @@
  * AI Chat API — SSE streaming + REST endpoints for the standalone AI Chat tab.
  */
 import { useAuthStore } from '../store/auth'
-import type { AIChatMeeting, AIChatMessage } from '../types/recording'
+import type { AIChatMeeting, AIChatMessage, SyncableMeeting, ResyncResult } from '../types/recording'
 
 const BASE_URL = 'http://127.0.0.1:8000'
 
@@ -76,6 +76,35 @@ export async function clearAIChatHistory(): Promise<void> {
     headers: getAuthHeaders(),
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
+}
+
+/**
+ * Get meetings that have Stage 2 discussion points and their ChromaDB sync status.
+ */
+export async function getSyncableMeetings(): Promise<SyncableMeeting[]> {
+  const response = await fetch(`${BASE_URL}/ai-chat/syncable-meetings`, {
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
+}
+
+/**
+ * Resync Stage 2 points for a meeting into ChromaDB.
+ */
+export async function resyncMeeting(recordingId: string, force = false): Promise<ResyncResult> {
+  const response = await fetch(`${BASE_URL}/ai-chat/resync-meeting/${recordingId}?force=${force}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+  })
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}))
+    throw new Error(errData.detail || `HTTP ${response.status}`)
+  }
+  return response.json()
 }
 
 

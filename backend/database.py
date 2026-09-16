@@ -856,6 +856,54 @@ async def connect_db():
             "CREATE INDEX IF NOT EXISTS idx_training_datasets_user ON training_datasets(user_id)"
         ))
 
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS rom_training_data (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                recording_id TEXT NOT NULL,
+                recording_title TEXT,
+                agenda_id TEXT NOT NULL,
+                agenda_title TEXT NOT NULL,
+                long_rom_points TEXT NOT NULL DEFAULT '[]',
+                manual_mom_points TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            )
+        """))
+        
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS rom_training_variants (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                base_model TEXT NOT NULL,
+                training_type TEXT NOT NULL DEFAULT 'new',
+                parent_variant_id TEXT,
+                adapter_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                config TEXT NOT NULL DEFAULT '{}',
+                dataset_size INTEGER NOT NULL DEFAULT 0,
+                test_size INTEGER NOT NULL DEFAULT 0,
+                test_results TEXT NOT NULL DEFAULT '[]',
+                accuracy TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+        """))
+
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_rom_training_data_user ON rom_training_data(user_id)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_rom_training_data_recording ON rom_training_data(recording_id)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_rom_training_variants_user ON rom_training_variants(user_id)"))
+
+        for col_name, col_type in [
+            ("rom_short_model_mode", "TEXT NOT NULL DEFAULT 'base'"),
+            ("rom_short_model_variant_id", "TEXT"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
+            except Exception:
+                pass
 
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.
@@ -867,6 +915,84 @@ async def connect_db():
             logger.info("[DB] Extended all active sessions to year 2125.")
         except Exception as ext_err:
             logger.warning(f"[DB] Could not extend sessions (non-fatal): {ext_err}")
+
+        # ── Correction & Acronym Validation Tables ────────────────────────
+        # transcript_corrections — LLM-proposed ASR corrections + user decisions per recording
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS transcript_corrections (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL UNIQUE,
+                user_id TEXT NOT NULL,
+                proposed_corrections TEXT NOT NULL DEFAULT '[]',
+                user_decisions TEXT NOT NULL DEFAULT '[]',
+                applied INTEGER NOT NULL DEFAULT 0,
+                original_transcript TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_transcript_corrections_recording ON transcript_corrections(recording_id)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_transcript_corrections_user ON transcript_corrections(user_id)"
+        ))
+
+        # transcript_acronyms — detected acronyms + user decisions per recording
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS transcript_acronyms (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL UNIQUE,
+                user_id TEXT NOT NULL,
+                detected_acronyms TEXT NOT NULL DEFAULT '[]',
+                user_decisions TEXT NOT NULL DEFAULT '[]',
+                applied INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_transcript_acronyms_recording ON transcript_acronyms(recording_id)"
+        ))
+
+        # acronym_dictionary — persistent per-user acronym → full-form dictionary
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS acronym_dictionary (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                acronym TEXT NOT NULL,
+                full_form TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, acronym)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_acronym_dict_user ON acronym_dictionary(user_id)"
+        ))
+
+        # ── Embedding Model Variants ─────────────────────────────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS embedding_variants (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                name            TEXT NOT NULL UNIQUE,
+                base_model      TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                document_count  INTEGER NOT NULL DEFAULT 0,
+                document_names  TEXT NOT NULL DEFAULT '[]',
+                chunk_count     INTEGER NOT NULL DEFAULT 0,
+                status          TEXT NOT NULL DEFAULT 'completed',
+                model_path      TEXT NOT NULL,
+                size_bytes      INTEGER NOT NULL DEFAULT 0,
+                metrics         TEXT NOT NULL DEFAULT '{}',
+                is_active       INTEGER NOT NULL DEFAULT 0
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_embedding_variants_user ON embedding_variants(user_id)"
+        ))
+
 
         # ── Verification: ensure core and newly added tables exist ─────────
         verification = await conn.execute(text(

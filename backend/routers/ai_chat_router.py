@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -336,3 +336,218 @@ async def clear_chat_history_endpoint(
         )
         await session.commit()
     return {"message": f"Cleared {result.rowcount} messages"}
+
+
+# ── Meeting Resync Helpers & Endpoints ───────────────────────────────────────
+
+def _safe_parse_rom_data(raw: Any) -> dict:
+    """Safely parse rom_data, handling JSON strings, double-JSON, None, etc."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except Exception:
+                return {}
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_stage2_points(rom_data: dict) -> List[dict]:
+    """Extract valid Stage 2 discussion points from parsed rom_data."""
+    if not isinstance(rom_data, dict):
+        return []
+    stage2 = rom_data.get("stage2")
+    raw_points = []
+    if isinstance(stage2, dict):
+        raw_points = (
+            stage2.get("polished_points")
+            or stage2.get("discussion_points")
+            or stage2.get("points")
+            or []
+        )
+    elif isinstance(stage2, list):
+        raw_points = stage2
+
+    valid_points = []
+    if isinstance(raw_points, list):
+        for p in raw_points:
+            if isinstance(p, dict):
+                text = (p.get("polished_text") or p.get("discussion_point") or "").strip()
+                if text:
+                    valid_points.append(p)
+            elif isinstance(p, str) and p.strip():
+                valid_points.append({"polished_text": p.strip()})
+    return valid_points
+
+
+@router.get("/syncable-meetings")
+async def get_syncable_meetings(
+    user=Depends(get_current_user),
+):
+    """
+    List all meetings for the user that have valid Stage 2 discussion points in ROM data,
+    annotated with their ChromaDB index status (how many points are currently indexed).
+    """
+    import asyncio
+    from services.vector_store import get_stage2_points_store
+
+    user_id = user["id"]
+
+    # 1. Fetch all recordings with their ROM data from database
+    async with get_db_context() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT r.id, r.filename, r.title, r.created_at, "
+                    "       COALESCE(rm.rom_data, r.rom_data) as rom_data "
+                    "FROM recordings r "
+                    "LEFT JOIN rom_metadata rm ON rm.recording_id = r.id "
+                    "WHERE r.user_id = :uid "
+                    "ORDER BY r.created_at DESC"
+                ),
+                {"uid": user_id},
+            )
+        ).mappings().fetchall()
+
+    # 2. Extract valid Stage 2 points for each meeting
+    candidates = []
+    for r in rows:
+        mid = r["id"]
+        rom_dict = _safe_parse_rom_data(r.get("rom_data"))
+        pts = _extract_stage2_points(rom_dict)
+        if pts:
+            candidates.append({
+                "id": mid,
+                "name": r.get("title") or r.get("filename") or "Meeting",
+                "date": r.get("created_at") or "",
+                "stage2_points_count": len(pts),
+            })
+
+    if not candidates:
+        return []
+
+    # 3. Query ChromaDB to check indexed counts
+    def _check_chroma_counts():
+        counts = {}
+        try:
+            store = get_stage2_points_store(user_id)
+            store.load_or_create()
+            if store._collection is not None:
+                res = store._collection.get(include=["metadatas"])
+                metadatas = res.get("metadatas", [])
+                for meta in metadatas:
+                    if meta:
+                        mid = meta.get("meeting_id") or meta.get("recording_id")
+                        if mid:
+                            counts[mid] = counts.get(mid, 0) + 1
+        except Exception as e:
+            logger.warning(f"[AIChat] Failed to check ChromaDB counts: {e}")
+        return counts
+
+    loop = asyncio.get_running_loop()
+    chroma_counts = await loop.run_in_executor(None, _check_chroma_counts)
+
+    results = []
+    for c in candidates:
+        mid = c["id"]
+        total = c["stage2_points_count"]
+        indexed = chroma_counts.get(mid, 0)
+        needs_sync = indexed < total
+        if indexed == 0:
+            status = "not_indexed"
+        elif indexed < total:
+            status = "partial"
+        else:
+            status = "synced"
+
+        results.append({
+            "id": mid,
+            "name": c["name"],
+            "date": c["date"],
+            "stage2_points_count": total,
+            "indexed_points_count": indexed,
+            "needs_sync": needs_sync,
+            "sync_status": status,
+        })
+
+    # Sort: meetings needing sync first, then date descending
+    results.sort(key=lambda m: (1 if m["needs_sync"] else 0, m["date"] or ""), reverse=True)
+    return results
+
+
+@router.post("/resync-meeting/{recording_id}")
+async def resync_meeting(
+    recording_id: str,
+    force: bool = False,
+    user=Depends(get_current_user),
+):
+    """
+    Resync Stage 2 points for a meeting into ChromaDB.
+    By default (force=False), only missing points are added and existing ones are preserved.
+    If force=True, previous ChromaDB vectors for this meeting are purged and freshly re-indexed.
+    """
+    import asyncio
+    from services.rom_service import rom_service
+
+    user_id = user["id"]
+
+    # 1. Fetch meeting and ROM data
+    async with get_db_context() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT r.id, r.filename, r.title, r.created_at, "
+                    "       COALESCE(rm.rom_data, r.rom_data) as rom_data "
+                    "FROM recordings r "
+                    "LEFT JOIN rom_metadata rm ON rm.recording_id = r.id "
+                    "WHERE r.id = :rid AND r.user_id = :uid"
+                ),
+                {"rid": recording_id, "uid": user_id},
+            )
+        ).mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    rom_dict = _safe_parse_rom_data(row.get("rom_data"))
+    points = _extract_stage2_points(rom_dict)
+    if not points:
+        raise HTTPException(status_code=400, detail="No Stage 2 discussion points found for this meeting")
+
+    meeting_name = row.get("title") or row.get("filename") or "Meeting"
+    meeting_date = row.get("created_at") or ""
+
+    # 2. Re-index in ChromaDB in background executor
+    loop = asyncio.get_running_loop()
+    sync_result = await loop.run_in_executor(
+        None,
+        lambda: rom_service.index_stage2_points_in_chromadb(
+            recording_id=recording_id,
+            user_id=user_id,
+            points=points,
+            meeting_name=meeting_name,
+            meeting_date=meeting_date,
+            only_missing=not force,
+            return_details=True,
+        ),
+    )
+
+    return {
+        "status": "success",
+        "recording_id": recording_id,
+        "meeting_name": meeting_name,
+        "total_found": sync_result.get("total_found", len(points)),
+        "already_indexed": sync_result.get("already_indexed", 0),
+        "newly_indexed": sync_result.get("newly_indexed", 0),
+        "skipped_failed": sync_result.get("skipped_failed", 0),
+        "message": (
+            f"Successfully synced: {sync_result.get('newly_indexed', 0)} newly indexed, "
+            f"{sync_result.get('already_indexed', 0)} already indexed."
+        ),
+    }

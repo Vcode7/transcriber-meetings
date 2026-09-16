@@ -123,6 +123,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rom_action_generation_chunk_size": 10,
         "rom_stage2_process_all_together": False,
         "rom_pipeline_mode": "base",
+        "rom_short_model_mode": "base",
+        "rom_short_model_variant_id": None,
         "missing_transcript_recovery_enabled": False,
         "missing_segment_min_duration_sec": 2.0,
         "max_tokens_rom_discussion": 4096,
@@ -306,7 +308,7 @@ async def update_settings(
                         max_tokens_key_points, max_tokens_action_items, max_tokens_key_decisions,
                         max_tokens_speaker_summary, max_tokens_speaker_key_points, max_tokens_speaker_action_items,
                         max_tokens_collection_chat, max_tokens_collection_compare, max_tokens_collection_topic_growth, max_tokens_vocab_extractor,
-                        restrict_reassignment_to_meeting_speakers,
+                        restrict_reassignment_to_meeting_speakers, rom_short_model_mode, rom_short_model_variant_id,
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
@@ -319,7 +321,7 @@ async def update_settings(
                         :max_tokens_key_points, :max_tokens_action_items, :max_tokens_key_decisions,
                         :max_tokens_speaker_summary, :max_tokens_speaker_key_points, :max_tokens_speaker_action_items,
                         :max_tokens_collection_chat, :max_tokens_collection_compare, :max_tokens_collection_topic_growth, :max_tokens_vocab_extractor,
-                        :restrict_reassignment_to_meeting_speakers,
+                        :restrict_reassignment_to_meeting_speakers, :rom_short_model_mode, :rom_short_model_variant_id,
                         :updated_at)
                 """),
                 {
@@ -373,6 +375,8 @@ async def update_settings(
                     "max_tokens_collection_topic_growth": patch.get("max_tokens_collection_topic_growth", 1500),
                     "max_tokens_vocab_extractor": patch.get("max_tokens_vocab_extractor", 512),
                     "restrict_reassignment_to_meeting_speakers": patch.get("restrict_reassignment_to_meeting_speakers", 0),
+                    "rom_short_model_mode": patch.get("rom_short_model_mode", "base"),
+                    "rom_short_model_variant_id": patch.get("rom_short_model_variant_id", None),
                     "updated_at": dt_to_str(now),
                 },
             )

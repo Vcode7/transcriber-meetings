@@ -9,6 +9,8 @@ import api from '../api/client'
 import { toast } from 'sonner'
 import { useJobsStore } from '../store/jobs'
 import { useProcessingStore } from '../store/processing'
+import { listVariants } from '../features/rom-training/api/romTrainingApi'
+import type { RomVariant } from '../features/rom-training/types/romTrainingTypes'
 
 interface ProfileRecording {
   id: string
@@ -75,6 +77,8 @@ interface UserSettings {
   rom_separate_action_extraction?: boolean
   rom_action_generation_chunk_size?: number
   rom_pipeline_mode?: string
+  rom_short_model_mode?: 'base' | 'trained'
+  rom_short_model_variant_id?: string | null
 
   // Whisper Settings
   whisper_batch_size?: number
@@ -296,15 +300,17 @@ export default function SettingsPage() {
   const [editingTemplates, setEditingTemplates] = useState<Record<string, string>>({})
   const [expandedPromptKey, setExpandedPromptKey] = useState<string | null>(null)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [romVariants, setRomVariants] = useState<RomVariant[]>([])
 
   const loadData = async () => {
     try {
-      const [pRes, sRes, prRes, ptRes, emRes] = await Promise.all([
+      const [pRes, sRes, prRes, ptRes, emRes, variantsRes] = await Promise.all([
         api.get('/voice/profiles'),
         api.get('/settings'),
         api.get('/prompt/global'),
         api.get('/prompt-templates'),
         api.get('/settings/embedding-models').catch(() => ({ data: { models: [] } })),
+        listVariants().catch(() => ({ variants: [] })),
       ])
       setProfiles(pRes.data)
       setSettings(sRes.data)
@@ -312,6 +318,9 @@ export default function SettingsPage() {
       setPrompts(ptRes.data)
       if (emRes.data?.models) {
         setEmbeddingModels(emRes.data.models)
+      }
+      if (variantsRes?.variants) {
+        setRomVariants(variantsRes.variants)
       }
     } catch (err) {
       toast.error('Failed to load settings data')
@@ -1116,6 +1125,69 @@ export default function SettingsPage() {
                         )
                       })}
                     </div>
+                  </div>
+                )}
+
+                {/* Short ROM Generation */}
+                {settings && (
+                  <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(280,75%,60%/.25)', background: 'hsl(280,75%,60%/.04)' }}>
+                    <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Zap size={14} style={{ color: 'hsl(280,75%,60%)' }} /> Short ROM Generation
+                    </div>
+                    <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5, marginBottom: '.75rem' }}>
+                      <strong>Base</strong> uses the general model configured under Ollama settings (the default model used across all other stages).<br />
+                      <strong>Trained</strong> uses a customized LoRA variant tuned on your historical MoM data.
+                    </div>
+                    <div style={{ display: 'flex', gap: '.6rem' }}>
+                      {(['base', 'trained'] as const).map(mode => {
+                        const isActive = (settings.rom_short_model_mode || 'base') === mode
+                        const label = mode === 'base' ? '⚡ Base' : '🧠 Trained'
+                        return (
+                          <button
+                            key={mode}
+                            onClick={() => setSettings({ ...settings, rom_short_model_mode: mode })}
+                            style={{
+                              flex: 1, padding: '.55rem .75rem', borderRadius: 8,
+                              border: isActive ? '2px solid hsl(280,75%,60%)' : '1.5px solid hsl(var(--border)/.5)',
+                              background: isActive ? 'hsl(280,75%,60%/.12)' : 'hsl(var(--muted)/.2)',
+                              color: isActive ? 'hsl(280,75%,50%)' : 'hsl(var(--ink))',
+                              cursor: 'pointer', textAlign: 'center', transition: 'all .15s',
+                              fontFamily: 'Inter', fontSize: '.8rem', fontWeight: 700
+                            }}
+                          >
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {settings.rom_short_model_mode !== 'trained' && (
+                      <div style={{ marginTop: '.65rem', fontSize: '.72rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: settings.use_ollama ? 'hsl(140,70%,45%)' : 'hsl(35,90%,50%)', flexShrink: 0 }} />
+                        {settings.use_ollama
+                          ? `Using general Ollama model (${settings.ollama_model_priority?.split(',')[0]?.trim() || 'configured in Ollama settings'}).`
+                          : 'Ollama is disabled; using default local pipeline model.'}
+                      </div>
+                    )}
+                    {settings.rom_short_model_mode === 'trained' && (
+                      <div style={{ marginTop: '.85rem' }}>
+                        <div style={{ fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--ink))', marginBottom: 4 }}>Select Trained Variant</div>
+                        <select
+                          value={settings.rom_short_model_variant_id || ''}
+                          onChange={e => setSettings({ ...settings, rom_short_model_variant_id: e.target.value || null })}
+                          style={{
+                            width: '100%', padding: '.55rem .8rem', borderRadius: 8,
+                            border: '1px solid hsl(var(--border))',
+                            background: 'hsl(var(--background))', color: 'hsl(var(--foreground))',
+                            fontSize: '.82rem', fontFamily: 'Inter, sans-serif'
+                          }}
+                        >
+                          <option value="">— Select variant —</option>
+                          {romVariants.filter(v => v.status === 'done').map(v => (
+                            <option key={v.id} value={v.id}>{v.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

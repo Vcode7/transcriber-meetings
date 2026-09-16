@@ -3,12 +3,13 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bot, Send, Loader, Trash2, Copy, Check, Download,
   MessageSquare, FileText, ChevronRight, ExternalLink, Sparkles, X,
-  Search, ChevronDown, Filter, Zap,
+  Search, ChevronDown, Filter, Zap, RotateCcw,
 } from 'lucide-react'
 import type { AIChatMeeting, AIChatMessage } from '../types/recording'
 import {
   streamAIChat, getAIChatMeetings, getAIChatHistory, clearAIChatHistory,
 } from '../api/aiChat'
+import MeetingResyncModal from '../components/MeetingResyncModal'
 
 export default function AIChat() {
   const navigate = useNavigate()
@@ -24,6 +25,7 @@ export default function AIChat() {
   const [meetingDropdownOpen, setMeetingDropdownOpen] = useState(false)
   const [meetingSearchQuery, setMeetingSearchQuery] = useState('')
   const [onlyStage2, setOnlyStage2] = useState(false)
+  const [resyncModalOpen, setResyncModalOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // Sources sidebar
@@ -81,6 +83,15 @@ export default function AIChat() {
     }
     load()
     return () => { cancelled = true }
+  }, [])
+
+  const refreshMeetings = useCallback(async () => {
+    try {
+      const updated = await getAIChatMeetings()
+      setAvailableMeetings(updated)
+    } catch (err) {
+      console.error('Failed to refresh AI Chat meetings:', err)
+    }
   }, [])
 
   // Auto-scroll
@@ -621,9 +632,12 @@ export default function AIChat() {
                   <span>
                     Showing {filteredMeetings.length} of {availableMeetings.length} meetings
                   </span>
-                  {onlyStage2 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem' }}>
                     <button
-                      onClick={() => setOnlyStage2(false)}
+                      onClick={() => {
+                        setMeetingDropdownOpen(false)
+                        setResyncModalOpen(true)
+                      }}
                       style={{
                         background: 'none',
                         border: 'none',
@@ -632,15 +646,61 @@ export default function AIChat() {
                         padding: 0,
                         fontSize: '.7rem',
                         fontWeight: 600,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '.25rem',
                       }}
                     >
-                      Show all
+                      <RotateCcw size={10} />
+                      Resync Stage 2
                     </button>
-                  )}
+                    {onlyStage2 && (
+                      <button
+                        onClick={() => setOnlyStage2(false)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'hsl(var(--accent))',
+                          cursor: 'pointer',
+                          padding: 0,
+                          fontSize: '.7rem',
+                          fontWeight: 600,
+                        }}
+                      >
+                        Show all
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
           </div>
+
+          {/* Resync Meeting Button */}
+          <button
+            onClick={() => setResyncModalOpen(true)}
+            title="Resync meetings with Stage 2 points into ChromaDB"
+            style={{
+              height: '38px',
+              fontSize: '.82rem',
+              fontWeight: 600,
+              padding: '0 .85rem',
+              borderRadius: '10px',
+              border: '1.5px solid hsl(var(--border) / .3)',
+              background: 'hsl(var(--card))',
+              color: 'hsl(var(--ink))',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '.45rem',
+              cursor: 'pointer',
+              transition: 'all .15s ease',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'hsl(var(--paper-deep))')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'hsl(var(--card))')}
+          >
+            <RotateCcw size={14} style={{ color: 'hsl(var(--accent))' }} />
+            <span>Resync Meeting</span>
+          </button>
 
           {/* Clear History */}
           {messages.length > 0 && (
@@ -1016,6 +1076,12 @@ export default function AIChat() {
           </div>
         </div>
       </div>
+
+      <MeetingResyncModal
+        isOpen={resyncModalOpen}
+        onClose={() => setResyncModalOpen(false)}
+        onSyncCompleted={refreshMeetings}
+      />
     </div>
   )
 }

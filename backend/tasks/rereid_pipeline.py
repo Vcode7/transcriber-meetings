@@ -117,13 +117,14 @@ async def run_reidentify_pipeline(
     recording_id: str,
     file_path: str,
     user_id: str,
+    regenerate_mom: bool = False,
 ) -> None:
     """
     Top-level entry point — wraps _run_reidentify_impl with error handling,
     task cleanup, and model unloading.
     """
     try:
-        await _run_reidentify_impl(recording_id, file_path, user_id)
+        await _run_reidentify_impl(recording_id, file_path, user_id, regenerate_mom=regenerate_mom)
     except asyncio.CancelledError:
         logger.info(f"[ReID] {recording_id} — Task CANCELLED.")
         try:
@@ -167,6 +168,7 @@ async def _run_reidentify_impl(
     recording_id: str,
     file_path: str,
     user_id: str,
+    regenerate_mom: bool = False,
 ) -> None:
     """Core re-identification logic."""
     logger.info(f"[ReID] ===== START recording_id={recording_id} =====")
@@ -248,10 +250,15 @@ async def _run_reidentify_impl(
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
     active_embedding_model = "ecapa"
     restrict_to_meeting = False
+    generate_mom_auto = True
     try:
         async with get_db_context() as db:
             r = await db.execute(
-                text("SELECT speaker_similarity_threshold, speaker_embedding_model, restrict_reassignment_to_meeting_speakers FROM user_settings WHERE user_id = :uid"),
+                text(
+                    "SELECT speaker_similarity_threshold, speaker_embedding_model, "
+                    "restrict_reassignment_to_meeting_speakers, generate_mom_auto "
+                    "FROM user_settings WHERE user_id = :uid"
+                ),
                 {"uid": user_id},
             )
             row = r.mappings().fetchone()
@@ -262,9 +269,14 @@ async def _run_reidentify_impl(
                 active_embedding_model = str(row["speaker_embedding_model"]).strip().lower()
             if row.get("restrict_reassignment_to_meeting_speakers") is not None:
                 restrict_to_meeting = bool(row["restrict_reassignment_to_meeting_speakers"])
-    except Exception:
-        pass
-    logger.info(f"[ReID] {recording_id} — Similarity threshold: {threshold}, Embedding model: {active_embedding_model}, Restrict to meeting: {restrict_to_meeting}")
+            if row.get("generate_mom_auto") is not None:
+                generate_mom_auto = bool(row["generate_mom_auto"])
+    except Exception as e:
+        logger.warning(f"[ReID] Failed to load user settings: {e}")
+    logger.info(
+        f"[ReID] {recording_id} — Similarity threshold: {threshold}, Embedding model: {active_embedding_model}, "
+        f"Restrict to meeting: {restrict_to_meeting}, generate_mom_auto: {generate_mom_auto}, regenerate_mom: {regenerate_mom}"
+    )
 
     # If restrict_to_meeting is enabled, filter voice profiles to only meeting speakers
     if restrict_to_meeting:
@@ -431,21 +443,20 @@ async def _run_reidentify_impl(
         await _restore_status(recording_id, original_status, f"Transcript update failed: {e}")
         return
 
-    # ── Stage 7: Conditionally regenerate MoM (non-blocking) ─────────────────
-    old_speakers = set(json.loads(original_speakers or "[]"))
-    new_speakers = set(speakers_detected)
-    speakers_changed = old_speakers != new_speakers
-
-    if speakers_changed:
+    # ── Stage 7: MoM generation ──────────────────────────────────────────────
+    # Speaker re-identification never auto-regenerates MoM, even if detected speakers change.
+    # It only regenerates MoM if explicitly requested via regenerate_mom=True.
+    if regenerate_mom is True:
         logger.info(
-            f"[ReID] {recording_id} — Speaker names changed "
-            f"({old_speakers} → {new_speakers}). Regenerating MoM."
+            f"[ReID] {recording_id} — Explicit regenerate_mom=True requested. Regenerating MoM."
         )
         asyncio.create_task(
             _regenerate_mom(recording_id, user_id, final_segments, raw_text, speakers_detected, loop)
         )
     else:
-        logger.info(f"[ReID] {recording_id} — Speakers unchanged — skipping MoM regeneration.")
+        logger.info(
+            f"[ReID] {recording_id} — Never regenerate MoM automatically on speaker re-run. MoM generation skipped."
+        )
 
     elapsed = round(time.monotonic() - _t_start, 2)
     logger.info(f"[ReID] ===== COMPLETE recording_id={recording_id} in {elapsed}s =====")

@@ -222,7 +222,18 @@ def make_pattern(shortcut: str) -> re.Pattern:
     Build a case-insensitive regex pattern matching the shortcut as a word.
     Uses positive/negative lookarounds to correctly enforce boundaries for both
     alphanumeric and special character shortcuts (e.g. '.NET', 'C++').
+    For alphabetic acronyms (e.g. 'LLM', 'IB'), allows optional spaces, dots,
+    and hyphens between letters so spaced transcript variants match.
     """
+    clean = shortcut.strip()
+    if clean.isalpha() and len(clean) >= 2:
+        letters = list(clean)
+        SEP = r"[\s.\-,]*"
+        letter_pats = [re.escape(c) + r"\.?" for c in letters]
+        inner = SEP.join(letter_pats)
+        pattern = r"(?<![A-Za-z0-9])" + inner + r"(?![A-Za-z0-9])"
+        return re.compile(pattern, re.IGNORECASE)
+
     escaped = re.escape(shortcut)
     start_boundary = r'(?<!\w)' if shortcut[0].isalnum() or shortcut[0] == '_' else ''
     end_boundary = r'(?!\w)' if shortcut[-1].isalnum() or shortcut[-1] == '_' else ''

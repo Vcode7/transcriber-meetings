@@ -1,6 +1,9 @@
 """
 License Manager — Phase 6
-30-day demo license with machine binding and clock-rollback detection.
+Fixed-date demo license with machine binding and clock-rollback detection.
+
+The application is licensed until September 30, 2026 (hard expiry).
+This date must match backend/license.py and frontend/src/App.tsx.
 
 License file (license.dat) is created on first run and verified on every launch.
 It is stored adjacent to the launcher executable.
@@ -10,7 +13,7 @@ License format (JSON, HMAC-signed):
     "install_date": "2026-06-25",
     "machine_id": "<sha256 of machine identifiers>",
     "last_run_date": "2026-06-25",
-    "expires_date": "2026-07-25",
+    "expires_date": "2026-09-30",
     "signature": "<hmac-sha256>"
 }
 """
@@ -24,14 +27,15 @@ import os
 import platform
 import sys
 import subprocess
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────
-DEMO_DURATION_DAYS = 30
+# Fixed expiry date — must match backend/license.py and frontend/src/App.tsx
+LICENSE_EXPIRY_DATE = date(2026, 9, 30)
 LICENSE_FILENAME = "license.dat"
 
 # App secret — combined with machine ID for signing
@@ -122,7 +126,8 @@ def create_license() -> dict:
     """Create a new license file on first run."""
     machine_id = _get_machine_id()
     today = date.today()
-    expires = today + timedelta(days=DEMO_DURATION_DAYS)
+    # Fixed expiry — not rolling; always capped at LICENSE_EXPIRY_DATE
+    expires = LICENSE_EXPIRY_DATE
 
     data = {
         "install_date": today.isoformat(),
@@ -212,24 +217,28 @@ def verify_license() -> Tuple[bool, str]:
         )
 
     # ── Expiry check ──────────────────────────────────────────
-    if today > expires_date:
-        days_expired = (today - expires_date).days
+    # Use the stricter of: the date stored in license.dat OR the hard-coded
+    # global ceiling. This prevents old license files with a far-future
+    # expires_date from bypassing the fixed license end date.
+    effective_expiry = min(expires_date, LICENSE_EXPIRY_DATE)
+    if today > effective_expiry:
+        days_expired = (today - effective_expiry).days
         return False, (
             f"This demo version has expired.\n\n"
-            f"Expiry date: {expires_date.isoformat()}\n"
+            f"Expiry date: {effective_expiry.isoformat()}\n"
             f"Expired {days_expired} day(s) ago.\n\n"
             "Please contact the developer to obtain a new license."
         )
 
     # ── Days remaining ────────────────────────────────────────
-    days_remaining = (expires_date - today).days
+    days_remaining = (effective_expiry - today).days
     if days_remaining <= 5:
         logger.warning(f"[License] Demo expires in {days_remaining} day(s).")
 
     # ── Update last run ───────────────────────────────────────
     _update_last_run(data, machine_id)
 
-    logger.info(f"[License] Valid ✓  Expires: {expires_date.isoformat()} ({days_remaining} days remaining)")
+    logger.info(f"[License] Valid ✓  Expires: {effective_expiry.isoformat()} ({days_remaining} days remaining)")
     return True, ""
 
 

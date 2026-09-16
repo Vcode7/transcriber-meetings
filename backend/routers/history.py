@@ -3,7 +3,9 @@ import hashlib
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Body
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from database import get_db, get_db_context, to_json, from_json
@@ -547,9 +549,18 @@ async def update_transcript(
     return {"status": "success", "segment_index": segment_index, "segment": seg}
 
 
+class ReidentifySpeakersRequest(BaseModel):
+    regenerate_mom: bool = False
+
+
 @router.post("/{recording_id}/reidentify-speakers")
 async def reidentify_speakers(
     recording_id: str,
+    payload: Optional[ReidentifySpeakersRequest] = None,
+    regenerate_mom: bool = Query(
+        False,
+        description="Whether to regenerate MoM after speaker re-identification. Defaults to False (never auto-regenerates).",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -557,7 +568,7 @@ async def reidentify_speakers(
 
     * Does NOT re-transcribe or re-align the audio.
     * Replaces speaker labels in the stored transcript using current voice profiles.
-    * Conditionally regenerates the MoM if speaker names change.
+    * Does NOT automatically regenerate MoM (speaker re-run only).
     * The frontend can poll GET /audio/jobs/{recording_id} for progress.
 
     Returns immediately with status="processing"; caller must poll for completion.
@@ -568,6 +579,13 @@ async def reidentify_speakers(
     from tasks.rereid_pipeline import run_reidentify_pipeline, register_reid_task, is_reid_running
 
     user_id = current_user["id"]
+
+    # Never regenerate MoM automatically on speaker re-run unless explicitly requested as True
+    eff_regenerate_mom: bool = False
+    if regenerate_mom:
+        eff_regenerate_mom = True
+    elif payload and payload.regenerate_mom:
+        eff_regenerate_mom = True
 
     # ── Fetch recording ───────────────────────────────────────────────────────
     async with get_db_context() as db:
@@ -627,7 +645,9 @@ async def reidentify_speakers(
 
     # ── Schedule the background task ─────────────────────────────────────────
     task = _asyncio.create_task(
-        run_reidentify_pipeline(recording_id, file_path, user_id)
+        run_reidentify_pipeline(
+            recording_id, file_path, user_id, regenerate_mom=eff_regenerate_mom
+        )
     )
     register_reid_task(recording_id, task)
     logger.info(

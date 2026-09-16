@@ -6,7 +6,7 @@ import re
 import gc
 import time
 import threading
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 import numpy as np
 
 import math
@@ -874,15 +874,36 @@ class RomService:
         points: List[Dict],
         meeting_name: str = "",
         meeting_date: str = "",
-    ) -> int:
+        only_missing: bool = False,
+        return_details: bool = False,
+    ) -> Union[int, Dict[str, int]]:
         """
         Store generated Stage 2 points in ChromaDB collection `stage2_points_<user_id>`
         with relevant metadata (meeting_id, meeting_name, date, stage2_identifier, etc.).
+
+        Parameters
+        ----------
+        recording_id   : Unique meeting/recording identifier.
+        user_id        : Owner user ID.
+        points         : List of Stage 2 point dicts.
+        meeting_name   : Human-readable title of the meeting.
+        meeting_date   : Creation date/time of the meeting.
+        only_missing   : If True, do not overwrite existing points; only index new ones.
+        return_details : If True, return a dict with detailed counts (total_found,
+                         already_indexed, newly_indexed, skipped_failed).
+                         If False, return newly_indexed count as int.
         """
         from services.vector_store import get_stage2_points_store
         from services.text_embedding_service import get_text_embedder
 
         if not points or not user_id or not recording_id:
+            if return_details:
+                return {
+                    "total_found": len(points) if points else 0,
+                    "already_indexed": 0,
+                    "newly_indexed": 0,
+                    "skipped_failed": len(points) if points else 0,
+                }
             return 0
 
         user_id = _validate_user_id(user_id)
@@ -890,28 +911,93 @@ class RomService:
         embedder.load()
         dim = getattr(embedder, "_dim", 1024)
         store = get_stage2_points_store(user_id, dim)
+        store.load_or_create()
 
-        # 1. Remove any previous entries for this meeting to prevent duplicates
-        try:
-            store.delete_by_filter("meeting_id", recording_id)
-        except Exception as e:
-            logger.warning(f"[ROM Service] Failed to delete previous Stage 2 vectors for {recording_id}: {e}")
+        already_indexed = 0
+        skipped_failed = 0
+
+        existing_point_ids = set()
+        existing_stage2_ids = set()
+        existing_chunk_ids = set()
+        existing_texts = set()
+
+        if only_missing:
+            # Check what Stage 2 points already exist in ChromaDB for this meeting
+            try:
+                if store._collection is not None:
+                    existing = store._collection.get(
+                        where={"meeting_id": recording_id},
+                        include=["metadatas", "documents"],
+                    )
+                    if existing:
+                        for ex_id in (existing.get("ids") or []):
+                            if ex_id:
+                                existing_chunk_ids.add(ex_id)
+                        for meta in (existing.get("metadatas") or []):
+                            if meta:
+                                pid = meta.get("point_id")
+                                if pid:
+                                    existing_point_ids.add(str(pid))
+                                s2_id = meta.get("stage2_identifier")
+                                if s2_id:
+                                    existing_stage2_ids.add(str(s2_id))
+                        for doc in (existing.get("documents") or []):
+                            if doc:
+                                existing_texts.add(doc.strip())
+            except Exception as e:
+                logger.warning(f"[ROM Service] Failed to check existing Stage 2 vectors for {recording_id}: {e}")
+        else:
+            # 1. Remove any previous entries for this meeting to prevent duplicates
+            try:
+                store.delete_by_filter("meeting_id", recording_id)
+            except Exception as e:
+                logger.warning(f"[ROM Service] Failed to delete previous Stage 2 vectors for {recording_id}: {e}")
 
         # 2. Extract texts and build rich metadata for each Stage 2 point
         texts: List[str] = []
         metadatas: List[Dict[str, Any]] = []
 
         for idx, p in enumerate(points):
-            pt_text = (p.get("polished_text") or p.get("discussion_point") or "").strip()
+            if isinstance(p, dict):
+                pt_text = (p.get("polished_text") or p.get("discussion_point") or "").strip()
+                point_id = str(p.get("id") or "")
+                spk_val = p.get("speakers")
+                if isinstance(spk_val, list):
+                    spk_str = ", ".join(str(s) for s in spk_val if s)
+                else:
+                    spk_str = str(spk_val or "")
+                action_owner = p.get("action_owner") or ""
+            elif isinstance(p, str):
+                pt_text = p.strip()
+                point_id = ""
+                spk_str = ""
+                action_owner = ""
+            else:
+                pt_text = ""
+                point_id = ""
+                spk_str = ""
+                action_owner = ""
+
             if not pt_text:
+                skipped_failed += 1
                 continue
 
-            point_id = str(p.get("id") or uuid.uuid4())
-            spk_val = p.get("speakers")
-            if isinstance(spk_val, list):
-                spk_str = ", ".join(str(s) for s in spk_val if s)
-            else:
-                spk_str = str(spk_val or "")
+            if not point_id:
+                point_id = str(uuid.uuid4())
+
+            stage2_id = f"stage2_{recording_id}_{point_id}"
+            chunk_id = f"stage2_point_{recording_id}_chunk_{idx}"
+
+            if only_missing:
+                is_already = (
+                    (point_id and point_id in existing_point_ids)
+                    or (stage2_id in existing_stage2_ids)
+                    or (chunk_id in existing_chunk_ids)
+                    or (pt_text in existing_texts)
+                )
+                if is_already:
+                    already_indexed += 1
+                    continue
 
             meta = {
                 "user_id": user_id,
@@ -923,28 +1009,36 @@ class RomService:
                 "date": meeting_date or "",
                 "point_id": point_id,
                 "stage": "stage2",
-                "stage2_identifier": f"stage2_{recording_id}_{point_id}",
+                "stage2_identifier": stage2_id,
                 "speakers": spk_str,
-                "action_owner": p.get("action_owner") or "",
+                "action_owner": action_owner,
                 "source": "stage2_point",
             }
             texts.append(pt_text)
             metadatas.append(meta)
 
-        if not texts:
-            return 0
+        newly_indexed = 0
+        if texts:
+            try:
+                vecs = embedder.encode_batch(texts)
+                added_count = store.add(texts=texts, metadatas=metadatas, embeddings=vecs)
+                newly_indexed = added_count
+                logger.info(
+                    f"[ROM Service] Indexed {added_count} Stage 2 points for meeting '{meeting_name}' "
+                    f"({recording_id}) in ChromaDB collection '{store._collection_name}'"
+                )
+            except Exception as e:
+                logger.error(f"[ROM Service] Failed to index Stage 2 points in ChromaDB: {e}", exc_info=True)
+                skipped_failed += len(texts)
 
-        try:
-            vecs = embedder.encode_batch(texts)
-            added_count = store.add(texts=texts, metadatas=metadatas, embeddings=vecs)
-            logger.info(
-                f"[ROM Service] Indexed {added_count} Stage 2 points for meeting '{meeting_name}' "
-                f"({recording_id}) in ChromaDB collection '{store._collection_name}'"
-            )
-            return added_count
-        except Exception as e:
-            logger.error(f"[ROM Service] Failed to index Stage 2 points in ChromaDB: {e}", exc_info=True)
-            return 0
+        if return_details:
+            return {
+                "total_found": len(points),
+                "already_indexed": already_indexed,
+                "newly_indexed": newly_indexed,
+                "skipped_failed": skipped_failed,
+            }
+        return newly_indexed
 
     def retrieve_previous_stage2_context(
         self,

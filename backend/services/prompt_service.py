@@ -324,6 +324,13 @@ PROMPT_META: list[dict] = [
         "description": "Follow-up chat about ROM content. Answers user questions about the meeting record.",
         "variables": ["{rom_context}", "{chat_history}", "{user_message}"],
     },
+    {
+        "key": "rom_enhance_action_points",
+        "name": "Stage 2: Enhance Action Points",
+        "category": "ROM",
+        "description": "Extracts and enhances action points from Stage 2 discussion points, producing self-contained tasks with owner and deadline context.",
+        "variables": ["{points_json}"],
+    },
 ]
 
 VALID_KEYS: frozenset[str] = frozenset(m["key"] for m in PROMPT_META)
@@ -376,6 +383,7 @@ def _defaults() -> dict[str, str]:
         ROM_VERSION_MEDIUM_PROMPT,
         ROM_AI_EDIT_POINTS_PROMPT,
         ROM_AI_CHAT_PROMPT,
+        ROM_ENHANCE_ACTION_POINTS_PROMPT,
     )
     return {
         "mom":                            MOM_PROMPT,
@@ -418,6 +426,7 @@ def _defaults() -> dict[str, str]:
         "rom_version_medium":             ROM_VERSION_MEDIUM_PROMPT,
         "rom_ai_edit_points":             ROM_AI_EDIT_POINTS_PROMPT,
         "rom_ai_chat":                    ROM_AI_CHAT_PROMPT,
+        "rom_enhance_action_points":       ROM_ENHANCE_ACTION_POINTS_PROMPT,
     }
 
 

@@ -4,7 +4,7 @@ import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
   Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video, BrainCircuit,
-  MessageSquare, FlaskConical,
+  MessageSquare, FlaskConical, BookMarked, Brain,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
@@ -12,22 +12,29 @@ import { useJobsStore } from '../store/jobs'
 import { useRecordingStore } from '../store/recording'
 import api from '../api/client'
 
-const NAV = [
+const WORKSPACE_NAV = [
   { to: '/dashboard', icon: Mic, label: 'Record', end: true },
   { to: '/dashboard/tab-audio', icon: MonitorSpeaker, label: 'Tab Audio' },
   { to: '/dashboard/upload', icon: Upload, label: 'Upload' },
-  { to: '/dashboard/video-upload', icon: Video, label: 'Video' },
+  { to: '/dashboard/video-upload', icon: Video, label: 'Video Upload' },
   { to: '/dashboard/history', icon: History, label: 'History' },
-  { to: '/dashboard/dictionary', icon: BookOpen, label: 'Dictionary' },
-  { to: '/dashboard/global-context', icon: Database, label: 'Global Context' },
-  { to: '/dashboard/training', icon: BrainCircuit, label: 'Training' },
   { to: '/dashboard/ai-chat', icon: MessageSquare, label: 'AI Chat' },
-  { to: '/dashboard/model-arena', icon: FlaskConical, label: 'Model Arena' },
 ]
-const VOICE_NAV = [
+
+const SETTINGS_NAV = [
   { to: '/dashboard/add-voice', icon: UserPlus, label: 'Add Voice' },
   { to: '/dashboard/settings', icon: Settings, label: 'Settings' },
 ]
+
+const DEVELOPER_NAV = [
+  { to: '/dashboard/dictionary', icon: BookOpen, label: 'Dictionary' },
+  { to: '/dashboard/global-context', icon: Database, label: 'Global Context' },
+  { to: '/dashboard/training', icon: BrainCircuit, label: 'Training' },
+  { to: '/dashboard/rom-training', icon: BookMarked, label: 'ROM Training' },
+  { to: '/dashboard/embedding-training', icon: Brain, label: 'Embedding Training' },
+  { to: '/dashboard/model-arena', icon: FlaskConical, label: 'Model Arena' },
+]
+
 
 export default function Sidebar() {
   const logout = useAuthStore((s) => s.logout)
@@ -103,134 +110,152 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="sidebar" style={{ position: 'relative' }}>
+    <aside className={`sidebar ${collapsed ? 'is-collapsed' : ''}`}>
 
-      {/* Logo */}
-      <div className="sidebar-logo">
-        <div style={{ position: 'relative', flexShrink: 0 }}>
-          <Zap
-            size={22}
-            fill="currentColor"
-            style={{ color: 'hsl(var(--accent))' }}
-            className="animate-float"
-          />
-          {/* Glow dot */}
-          <span style={{
-            position: 'absolute',
-            top: -2, right: -2,
-            width: 7, height: 7,
-            borderRadius: '50%',
-            background: hasActiveJob ? 'hsl(var(--accent))' : 'hsl(var(--accent))',
-            boxShadow: '0 0 6px hsl(var(--accent))',
-            border: '1.5px solid hsl(var(--card))',
-          }} className="animate-pulse-rec" />
+      {/* ── Top Header Section (pinned) ── */}
+      <div className="sidebar-header">
+        {/* Logo */}
+        <div className="sidebar-logo">
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <Zap
+              size={22}
+              fill="currentColor"
+              style={{ color: 'hsl(var(--accent))' }}
+              className="animate-float"
+            />
+            {/* Glow dot */}
+            <span style={{
+              position: 'absolute',
+              top: -2, right: -2,
+              width: 7, height: 7,
+              borderRadius: '50%',
+              background: hasActiveJob ? 'hsl(var(--accent))' : 'hsl(var(--accent))',
+              boxShadow: '0 0 6px hsl(var(--accent))',
+              border: '1.5px solid hsl(var(--card))',
+            }} className="animate-pulse-rec" />
+          </div>
+          {!collapsed && (
+            <span style={{ overflow: 'hidden', whiteSpace: 'nowrap', fontSize: '1.7rem', letterSpacing: '-0.02em' }}>
+              Voice<span style={{ color: 'hsl(var(--accent))' }}>Sum</span>
+            </span>
+          )}
         </div>
-        {!collapsed && (
-          <span style={{ overflow: 'hidden', whiteSpace: 'nowrap', fontSize: '1.7rem', letterSpacing: '-0.02em' }}>
-            Voice<span style={{ color: 'hsl(var(--accent))' }}>Sum</span>
-          </span>
+
+        {/* ── Active background recording banner ── */}
+        {isRecordingActive && (
+          <div
+            className="processing-sidebar-banner"
+            onClick={handleRecordingBannerClick}
+            style={{
+              cursor: 'pointer',
+              background: recordingState === 'paused' ? 'hsl(45 90% 50% / .15)' : 'hsl(var(--destructive) / .15)',
+              border: `1.5px solid ${recordingState === 'paused' ? 'hsl(45 90% 50% / .4)' : 'hsl(var(--destructive) / .35)'}`,
+              color: recordingState === 'paused' ? 'hsl(45 90% 45%)' : 'hsl(var(--destructive))',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '.45rem .75rem',
+              borderRadius: '8px',
+              margin: '0 8px 8px 8px',
+            }}
+            title="Click to return to active recording"
+          >
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: recordingState === 'paused' ? 'hsl(45 90% 50%)' : 'hsl(var(--destructive))',
+                flexShrink: 0,
+                boxShadow: '0 0 6px currentColor',
+              }}
+              className={recordingState === 'paused' ? '' : 'animate-pulse-rec'}
+            />
+            {!collapsed && (
+              <span style={{ fontSize: '.76rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {recordingState === 'paused' ? 'PAUSED' : 'RECORDING'} ({formatRecDuration(recordingDuration)})
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* ── Active jobs banner (shown when any job is running) ── */}
+        {hasActiveJob && (
+          <div
+            className="processing-sidebar-banner"
+            onClick={handleBannerClick}
+            style={{ cursor: 'pointer' }}
+            title="Click to view job progress"
+          >
+            <Loader size={11} className="spin" style={{ flexShrink: 0 }} />
+            {!collapsed && (
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {STAGE_LABELS[primaryJob?.stage ?? ''] || 'Processing…'}
+              </span>
+            )}
+            {!collapsed && activeJobs.length > 1 && (
+              <span style={{
+                marginLeft: 'auto', flexShrink: 0,
+                fontSize: '.68rem', fontWeight: 700,
+                background: 'hsl(var(--accent) / .2)',
+                color: 'hsl(var(--accent))',
+                padding: '1px 5px', borderRadius: '999px',
+              }}>
+                {activeJobs.length}
+              </span>
+            )}
+          </div>
         )}
       </div>
 
-      {/* ── Active background recording banner ── */}
-      {isRecordingActive && (
-        <div
-          className="processing-sidebar-banner"
-          onClick={handleRecordingBannerClick}
-          style={{
-            cursor: 'pointer',
-            background: recordingState === 'paused' ? 'hsl(45 90% 50% / .15)' : 'hsl(var(--destructive) / .15)',
-            border: `1.5px solid ${recordingState === 'paused' ? 'hsl(45 90% 50% / .4)' : 'hsl(var(--destructive) / .35)'}`,
-            color: recordingState === 'paused' ? 'hsl(45 90% 45%)' : 'hsl(var(--destructive))',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '.45rem .75rem',
-            borderRadius: '8px',
-            margin: '0 8px 8px 8px',
-          }}
-          title="Click to return to active recording"
-        >
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: recordingState === 'paused' ? 'hsl(45 90% 50%)' : 'hsl(var(--destructive))',
-              flexShrink: 0,
-              boxShadow: '0 0 6px currentColor',
-            }}
-            className={recordingState === 'paused' ? '' : 'animate-pulse-rec'}
-          />
-          {!collapsed && (
-            <span style={{ fontSize: '.76rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {recordingState === 'paused' ? 'PAUSED' : 'RECORDING'} ({formatRecDuration(recordingDuration)})
-            </span>
-          )}
-        </div>
-      )}
+      {/* ── Middle Scrollable Navigation List ── */}
+      <nav className="sidebar-nav-scroll" aria-label="Main Navigation">
+        {/* Workspace */}
+        {!collapsed && (
+          <div className="nav-section">Workspace</div>
+        )}
+        {WORKSPACE_NAV.map(({ to, icon: Icon, label, end }) => (
+          <NavLink
+            key={to} to={to} end={end}
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            title={tip(label)}
+          >
+            <Icon size={16} className="nav-icon" />
+            {!collapsed && <span className="nav-label">{label}</span>}
+          </NavLink>
+        ))}
 
-      {/* ── Active jobs banner (shown when any job is running) ── */}
-      {hasActiveJob && (
-        <div
-          className="processing-sidebar-banner"
-          onClick={handleBannerClick}
-          style={{ cursor: 'pointer' }}
-          title="Click to view job progress"
-        >
-          <Loader size={11} className="spin" style={{ flexShrink: 0 }} />
-          {!collapsed && (
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {STAGE_LABELS[primaryJob?.stage ?? ''] || 'Processing…'}
-            </span>
-          )}
-          {!collapsed && activeJobs.length > 1 && (
-            <span style={{
-              marginLeft: 'auto', flexShrink: 0,
-              fontSize: '.68rem', fontWeight: 700,
-              background: 'hsl(var(--accent) / .2)',
-              color: 'hsl(var(--accent))',
-              padding: '1px 5px', borderRadius: '999px',
-            }}>
-              {activeJobs.length}
-            </span>
-          )}
-        </div>
-      )}
+        {/* Settings */}
+        {!collapsed && <div className="nav-section" style={{ marginTop: '0.65rem' }}>Settings</div>}
+        {collapsed && <div className="nav-divider" />}
+        {SETTINGS_NAV.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to} to={to}
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            title={tip(label)}
+          >
+            <Icon size={16} className="nav-icon" />
+            {!collapsed && <span className="nav-label">{label}</span>}
+          </NavLink>
+        ))}
 
-      {/* Main nav */}
-      {!collapsed && (
-        <div className="nav-section">Workspace</div>
-      )}
-      {NAV.map(({ to, icon: Icon, label, end }) => (
-        <NavLink
-          key={to} to={to} end={end}
-          className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          title={tip(label)}
-        >
-          <Icon size={16} className="nav-icon" />
-          {!collapsed && <span className="nav-label">{label}</span>}
-        </NavLink>
-      ))}
+        {/* Developer */}
+        {!collapsed && <div className="nav-section" style={{ marginTop: '0.65rem' }}>Developer</div>}
+        {collapsed && <div className="nav-divider" />}
+        {DEVELOPER_NAV.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to} to={to}
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            title={tip(label)}
+          >
+            <Icon size={16} className="nav-icon" />
+            {!collapsed && <span className="nav-label">{label}</span>}
+          </NavLink>
+        ))}
+      </nav>
 
-      {/* Voice nav */}
-      {!collapsed && <div className="nav-section" style={{ marginTop: '1rem' }}>Voice &amp; Config</div>}
-      {collapsed && <div className="nav-divider" />}
-      {VOICE_NAV.map(({ to, icon: Icon, label }) => (
-        <NavLink
-          key={to} to={to}
-          className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          title={tip(label)}
-        >
-          <Icon size={16} className="nav-icon" />
-          {!collapsed && <span className="nav-label">{label}</span>}
-        </NavLink>
-      ))}
-
-      <div className="sidebar-spacer" style={{ flex: 1 }} />
-
-      {/* Bottom section */}
-      <div className="sidebar-bottom" style={{ padding: '0 .5rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+      {/* ── Pinned Bottom Section ── */}
+      <div className="sidebar-bottom">
 
         {/* Theme toggle */}
         <button
@@ -254,19 +279,18 @@ export default function Sidebar() {
           className="sidebar-collapse-btn"
           onClick={toggleSidebar}
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          style={{ width: '100%', margin: '2px 0' }}
         >
           {collapsed
             ? <PanelLeftOpen size={16} />
             : <PanelLeftClose size={16} />}
         </button>
 
-        <div className="nav-divider" />
+        <div className="nav-divider" style={{ margin: '3px 0' }} />
 
         {/* User */}
         {!collapsed ? (
           <div style={{
-            padding: '.6rem .75rem',
+            padding: '.55rem .75rem',
             display: 'flex', alignItems: 'center', gap: '10px',
             borderRadius: '12px',
             background: 'hsl(var(--sidebar-accent))',
@@ -331,12 +355,12 @@ export default function Sidebar() {
               fontFamily: 'Inter, sans-serif',
               boxShadow: `0 0 8px ${avatarColor}30`,
             }}>
-            {avatarLetter}
+              {avatarLetter}
           </div>
         )}
 
         <button
-          className={`nav-item `}
+          className="nav-item"
           style={{ color: 'hsl(var(--destructive))', margin: '2px 0' }}
           onClick={handleLogout}
           title={tip('Logout')}
@@ -351,3 +375,4 @@ export default function Sidebar() {
     </aside>
   )
 }
+

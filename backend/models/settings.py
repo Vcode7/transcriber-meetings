@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Optional
 
 
 class UserSettings(BaseModel):
@@ -78,6 +79,8 @@ class UserSettings(BaseModel):
     rom_min_similarity_threshold: float | None = Field(default=0.80, ge=0.0, le=1.0)
     # "base" = always use default prompts; "dspy" = use trained DSPy variants when available
     rom_pipeline_mode: str = "base"
+    rom_short_model_mode: str = "base"
+    rom_short_model_variant_id: Optional[str] = None
 
     max_tokens_rom_discussion: int = Field(default=4096, ge=1)
     max_tokens_rom_discussion_no_actions: int = Field(default=4096, ge=1)
@@ -205,6 +208,8 @@ class UserSettingsUpdate(BaseModel):
     rom_stage2_process_all_together: bool | None = None
     rom_min_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     rom_pipeline_mode: str | None = None
+    rom_short_model_mode: Optional[str] = None
+    rom_short_model_variant_id: Optional[str] = None
 
     max_tokens_rom_discussion: int | None = Field(default=None, ge=1)
     max_tokens_rom_discussion_no_actions: int | None = Field(default=None, ge=1)

@@ -2034,19 +2034,69 @@ async def generate_rom_version(
     if version not in ("short", "medium", "long"):
         raise HTTPException(status_code=400, detail="version must be 'short', 'medium', or 'long'.")
 
+    # ── ROM Training: check if trained variant is selected for Short ROM ──────
+    _use_variant = False
+    _variant_id = None
+    _adapter_path = None
+    _base_model_variant = None
+    if version == "short":
+        try:
+            from database import get_db_context, from_json
+            async with get_db_context() as _settings_db:
+                _sr = await _settings_db.execute(
+                    text("SELECT rom_short_model_mode, rom_short_model_variant_id FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                _settings_row = _sr.fetchone()
+            if _settings_row:
+                _mode = (_settings_row[0] or "base")
+                _vid = _settings_row[1]
+                if _mode == "trained" and _vid:
+                    from database import from_json
+                    async with get_db_context() as _vdb:
+                        _vr = await _vdb.execute(
+                            text("SELECT adapter_path, base_model, status FROM rom_training_variants WHERE id = :id AND user_id = :uid"),
+                            {"id": _vid, "uid": user_id},
+                        )
+                        _vrow = _vr.fetchone()
+                    if _vrow and _vrow[2] == "done":
+                        _use_variant = True
+                        _variant_id = _vid
+                        _adapter_path = _vrow[0]
+                        _base_model_variant = _vrow[1]
+        except Exception as _ve:
+            logger.warning(f"[ROM] Could not check ROM training variant setting: {_ve}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Get important points for mandatory section
     important_points = req.important_points if req.important_points is not None else data.get("important_points", [])
 
     loop = asyncio.get_event_loop()
-    rewritten_final_rom = await loop.run_in_executor(
-        None,
-        lambda: rom_service.generate_rom_version(
-            final_rom=base_rom,
-            version=version,
-            writing_rules=req.writing_rules or "",
-            important_points=important_points,
+    if _use_variant:
+        logger.info(f"[ROM] Generating {version} ROM using Trained LoRA variant: {_variant_id}")
+        rewritten_final_rom = await loop.run_in_executor(
+            None,
+            lambda: rom_service.generate_rom_version_with_variant(
+                final_rom=base_rom,
+                version=version,
+                writing_rules=req.writing_rules or "",
+                important_points=important_points,
+                variant_id=_variant_id,
+                adapter_path=_adapter_path,
+                base_model=_base_model_variant,
+            )
         )
-    )
+    else:
+        logger.info(f"[ROM] Generating {version} ROM using Base model (general Ollama model from Settings across all stages)")
+        rewritten_final_rom = await loop.run_in_executor(
+            None,
+            lambda: rom_service.generate_rom_version(
+                final_rom=base_rom,
+                version=version,
+                writing_rules=req.writing_rules or "",
+                important_points=important_points,
+            )
+        )
 
     # Save to data and persist to database
     data["final_rom_versions"][version] = rewritten_final_rom

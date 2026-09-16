@@ -62,7 +62,10 @@ from routers.ai_chat_router import router as ai_chat_router
 from routers.video_router import router as video_router
 from routers.speaker_management_router import router as speaker_management_router
 from routers.training_routes import router as training_router
+from routers.rom_training_router import router as rom_training_router
 from routers.arena_router import router as arena_router
+from routers.correction_router import router as correction_router
+from routers.embedding_training_router import router as embedding_training_router
 
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
@@ -327,7 +330,10 @@ app.include_router(ai_chat_router)
 app.include_router(video_router)
 app.include_router(speaker_management_router)
 app.include_router(training_router)
+app.include_router(rom_training_router)
 app.include_router(arena_router)
+app.include_router(correction_router)
+app.include_router(embedding_training_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):

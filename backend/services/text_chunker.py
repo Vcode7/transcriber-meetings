@@ -788,7 +788,7 @@ class _TechnicalTerminologyExtractor:
     })
 
     _RE_ACRONYM_PAIR = re.compile(
-        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z]{2,8})\)"
+        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z](?:[\s.]?[A-Z0-9]){1,7}\.?)\)"
     )
 
     _RE_IDENTIFIER = re.compile(
@@ -825,7 +825,8 @@ class _TechnicalTerminologyExtractor:
         # ── 1. Acronym ↔ Full Term Pairs ──────────────────────────────────────
         for m in self._RE_ACRONYM_PAIR.finditer(text_clean):
             full_form = m.group(1).strip()
-            acronym = m.group(2).strip()
+            raw_acronym = m.group(2).strip()
+            acronym = re.sub(r'[\s.]', '', raw_acronym).upper()
             if len(acronym) >= 2 and acronym.lower() not in _STOPWORDS:
                 acronym_mappings[acronym] = full_form
                 acronym_mappings[full_form] = acronym
@@ -986,8 +987,10 @@ class _MetadataEnricher:
 
     # ── Extra regex patterns for enhanced metadata ────────────────────────────
     _RE_ACRONYM_MAPPING = re.compile(
-        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z]{2,8})\)"
+        r"\b([A-Z][a-zA-Z0-9_\-]+(?:\s+[A-Z][a-zA-Z0-9_\-]+){1,4})\s*\(([A-Z](?:[\s.]?[A-Z0-9]){1,7}\.?)\)"
     )
+    _RE_SPACED_ACRONYM = re.compile(r"\b[A-Z](?:\s+[A-Z]){1,7}\b")
+    _RE_DOTTED_ACRONYM = re.compile(r"\b[A-Z](?:\.[A-Z]){1,7}\.?")
 
     _RE_GENERIC_IDENTIFIERS = re.compile(
         r"\b(?:"
@@ -1078,10 +1081,20 @@ class _MetadataEnricher:
         d["identifiers"] = tech_extracted["identifiers"]
 
         # ── 2. Acronyms & Expanded Terms (Uncapped) ───────────────────────────
-        acronyms_raw = sorted(set(_RE_ACRONYM.findall(text)))
-        acronyms = [a for a in acronyms_raw if len(a) >= 2 and a not in _STOPWORDS]
-        expanded_acronyms = list(acronyms)
-        for a in acronyms:
+        raw_candidates = list(_RE_ACRONYM.findall(text))
+        for m in self._RE_SPACED_ACRONYM.finditer(text):
+            raw_candidates.append(m.group(0))
+        for m in self._RE_DOTTED_ACRONYM.finditer(text):
+            raw_candidates.append(m.group(0))
+
+        canonical_acronyms: set[str] = set()
+        for raw in raw_candidates:
+            canon = re.sub(r'[\s.]', '', raw).upper()
+            if len(canon) >= 2 and canon.lower() not in _STOPWORDS:
+                canonical_acronyms.add(canon)
+
+        expanded_acronyms = list(canonical_acronyms)
+        for a in canonical_acronyms:
             if a in d["acronym_mappings"]:
                 expanded_acronyms.append(d["acronym_mappings"][a])
 

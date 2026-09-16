@@ -1,10 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle, Replace } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle, Replace, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import TranscriptViewer from '../components/TranscriptViewer'
 import VideoTranscriptViewer from '../components/VideoTranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
+import CorrectionPanel from '../components/CorrectionPanel'
 import PDFButton from '../components/PDFButton'
 import InlineEdit from '../components/InlineEdit'
 import api from '../api/client'
@@ -56,6 +57,8 @@ export default function HistoryDetail() {
   const [videoBlocks, setVideoBlocks] = useState<VideoTranscriptBlock[]>([])
   const [loading, setLoading] = useState(true)
   const [chatOpen, setChatOpen] = useState(true)
+  // Right-panel mode: 'chat' | 'corrections'
+  const [rightPanelMode, setRightPanelMode] = useState<'chat' | 'corrections'>('chat')
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
   const [regenDone, setRegenDone] = useState(false)
@@ -155,7 +158,7 @@ export default function HistoryDetail() {
     reidentifyPollRef.current = null
 
     try {
-      await api.post(`/history/${id}/reidentify-speakers`)
+      await api.post(`/history/${id}/reidentify-speakers`, { regenerate_mom: false })
     } catch (err: unknown) {
       console.error('[ReidentifySpeakers] Failed to start:', err)
       setReidentifying(false)
@@ -421,6 +424,39 @@ export default function HistoryDetail() {
 
           {/* Header Action Buttons */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                // Toggle correction panel; switch mode and open if needed
+                if (rightPanelMode === 'corrections' && chatOpen) {
+                  setChatOpen(false)
+                } else if (rightPanelMode === 'corrections' && !chatOpen) {
+                  setChatOpen(true)
+                } else {
+                  setRightPanelMode('corrections')
+                  setChatOpen(true)
+                }
+              }}
+              title="View Corrections & Acronym Validation"
+              id="btn-corrections-panel"
+              style={{
+                fontSize: '.82rem', padding: '.4rem .85rem',
+                display: 'flex', alignItems: 'center', gap: '6px',
+                color: rightPanelMode === 'corrections' && chatOpen
+                  ? 'hsl(220,80%,60%)'
+                  : 'hsl(var(--pencil))',
+                background: rightPanelMode === 'corrections' && chatOpen
+                  ? 'hsl(220,80%,60%/.1)'
+                  : 'transparent',
+                border: rightPanelMode === 'corrections' && chatOpen
+                  ? '1px solid hsl(220,80%,60%/.3)'
+                  : '1px solid transparent',
+                borderRadius: '8px',
+              }}
+            >
+              <Zap size={14} />
+              <span>Corrections</span>
+            </button>
             <button
               className="btn btn-ghost"
               onClick={() => setConfirmRerunOpen(true)}
@@ -742,9 +778,9 @@ export default function HistoryDetail() {
         </div>
       </div>
 
-      {/* Drag handle + AI Chat Panel */}
-      <div className={`insights-pane ${chatOpen ? 'is-open' : ''}`} style={{ position: 'relative', display: 'flex' }}>
-        {/* Drag handle â€” only visible when panel is open */}
+      {/* Drag handle + Right Panel (AI Chat or Corrections) */}
+      <div className={`insights-pane ${chatOpen ? 'is-open' : ''}`} style={{ position: 'relative', display: 'flex', flexDirection: 'column' }}>
+        {/* Drag handle — only visible when panel is open */}
         {chatOpen && (
           <div
             onMouseDown={handleDragStart}
@@ -761,22 +797,95 @@ export default function HistoryDetail() {
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           />
         )}
-        <AIChatPanel
-          recordingId={id!}
-          summary={rec.summary}
-          shortSummary={rec.short_summary as string | undefined}
-          detailedSummary={rec.detailed_summary as string | undefined}
-          keyPoints={rec.key_points}
-          actionItems={rec.action_items}
-          speakerSummary={rec.speaker_summary}
-          momData={momData}
-          isOpen={chatOpen}
-          onToggle={() => setChatOpen((o) => !o)}
-          onGenerateInsights={handleGenerateInsights}
-          isGeneratingInsights={isGeneratingInsights}
-          onScrollToSegment={handleScrollToSegment}
-          onTranscriptChanged={() => reloadDetail()}
-        />
+
+        {/* Mode selector tabs — only when panel is open */}
+        {chatOpen && (
+          <div style={{
+            display: 'flex', borderBottom: '1px solid hsl(var(--border)/.5)',
+            background: 'hsl(var(--card))', flexShrink: 0,
+          }}>
+            <button
+              onClick={() => setRightPanelMode('chat')}
+              style={{
+                flex: 1, padding: '.4rem .5rem', border: 'none', cursor: 'pointer',
+                background: rightPanelMode === 'chat' ? 'hsl(var(--accent)/.1)' : 'transparent',
+                color: rightPanelMode === 'chat' ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                fontWeight: rightPanelMode === 'chat' ? 700 : 500,
+                fontSize: '.75rem', borderBottom: rightPanelMode === 'chat' ? '2px solid hsl(var(--accent))' : '2px solid transparent',
+                fontFamily: 'Inter, sans-serif', transition: 'all .15s',
+              }}
+            >AI Chat</button>
+            <button
+              onClick={() => setRightPanelMode('corrections')}
+              style={{
+                flex: 1, padding: '.4rem .5rem', border: 'none', cursor: 'pointer',
+                background: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%/.1)' : 'transparent',
+                color: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%)' : 'hsl(var(--pencil))',
+                fontWeight: rightPanelMode === 'corrections' ? 700 : 500,
+                fontSize: '.75rem', borderBottom: rightPanelMode === 'corrections' ? '2px solid hsl(220,80%,60%)' : '2px solid transparent',
+                fontFamily: 'Inter, sans-serif', transition: 'all .15s',
+              }}
+            >
+              <Zap size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }} />
+              Corrections
+            </button>
+          </div>
+        )}
+
+        {/* Panel content */}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
+          {/* AI Chat — hidden (not unmounted) when corrections active to preserve chat state */}
+          <div style={{ display: rightPanelMode === 'chat' ? 'flex' : 'none', flex: 1, flexDirection: 'column' }}>
+            <AIChatPanel
+              recordingId={id!}
+              summary={rec.summary}
+              shortSummary={rec.short_summary as string | undefined}
+              detailedSummary={rec.detailed_summary as string | undefined}
+              keyPoints={rec.key_points}
+              actionItems={rec.action_items}
+              speakerSummary={rec.speaker_summary}
+              momData={momData}
+              isOpen={chatOpen}
+              onToggle={() => setChatOpen((o) => !o)}
+              onGenerateInsights={handleGenerateInsights}
+              isGeneratingInsights={isGeneratingInsights}
+              onScrollToSegment={handleScrollToSegment}
+              onTranscriptChanged={() => reloadDetail()}
+            />
+          </div>
+
+          {/* Corrections panel */}
+          {rightPanelMode === 'corrections' && chatOpen && id && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <CorrectionPanel
+                recordingId={id}
+                onTranscriptChanged={() => reloadDetail()}
+              />
+            </div>
+          )}
+
+          {/* Collapsed toggle button (only shown when panel is closed) */}
+          {!chatOpen && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0', gap: '4px' }}>
+              <button
+                className="icon-btn"
+                onClick={() => { setRightPanelMode('chat'); setChatOpen(true) }}
+                title="Open AI Chat"
+                style={{ opacity: 0.6 }}
+              >
+                <Sparkles size={16} />
+              </button>
+              <button
+                className="icon-btn"
+                onClick={() => { setRightPanelMode('corrections'); setChatOpen(true) }}
+                title="Open Corrections"
+                style={{ opacity: 0.6 }}
+              >
+                <Zap size={16} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ── Correct Mistake Modal ── */}

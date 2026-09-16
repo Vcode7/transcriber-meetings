@@ -1358,6 +1358,27 @@ async def _run_pipeline_impl(
         except Exception as e2:
             logger.error(f"[Pipeline] {recording_id} — Even fallback done-update FAILED: {e2}")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # STAGE 9: Post-Transcription Correction & Acronym Detection (non-fatal)
+    # Runs once after the transcript is finalised and status='done'.
+    # Results saved to transcript_corrections + transcript_acronyms tables.
+    # Never modifies recordings.transcript directly.
+    # ─────────────────────────────────────────────────────────────────────
+    logger.info(f"[Pipeline] {recording_id} — STAGE 9: Correction & acronym detection")
+    try:
+        from services.correction_service import run_correction_pipeline
+        await run_correction_pipeline(
+            recording_id=recording_id,
+            user_id=user_id,
+            raw_text=raw_text,
+            final_segments=final_segments,
+            loop=loop,
+        )
+    except Exception as _corr_err:
+        logger.warning(
+            f"[Pipeline] {recording_id} — Stage 9 correction detection failed (non-fatal): {_corr_err}"
+        )
+
     # ── Analytics: emit record (always runs, never raises) ─────────────
     _analytics["final_status"] = "done"
     _analytics["total_pipeline_sec"] = round(time.monotonic() - _pipeline_start, 3)

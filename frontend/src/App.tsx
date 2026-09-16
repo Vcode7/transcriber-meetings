@@ -21,8 +21,10 @@ import LicenseExpired from "./pages/LicenseExpired";
 import GlobalContext from "./pages/GlobalContext";
 import RomPage from "./pages/RomPage";
 import Training from "./pages/Training";
+import RomTraining from "./pages/RomTraining";
 import AIChat from "./pages/AIChat";
 import ModelArena from "./pages/ModelArena";
+import EmbeddingTrainingPage from "./pages/EmbeddingTrainingPage";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -266,6 +268,8 @@ export default function App() {
                 <Route path="global-context" element={<GlobalContext />} />
                 <Route path="history/:id/rom" element={<RomPage />} />
                 <Route path="training" element={<Training />} />
+                <Route path="rom-training" element={<RomTraining />} />
+                <Route path="embedding-training" element={<EmbeddingTrainingPage />} />
                 <Route path="ai-chat" element={<AIChat />} />
                 <Route path="model-arena" element={<ModelArena />} />
               </Route>

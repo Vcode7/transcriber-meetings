@@ -1863,6 +1863,7 @@ WRITING QUALITY GUIDELINES:
 1. Complete, Self-Contained Task Sentence (Action + Owner + Deadline):
    - The `task` field MUST be a complete, self-contained sentence that naturally integrates ALL relevant information from the source point directly into the sentence text:
      * The responsible owner / assignee (WHO should complete it), whenever an owner is identified or assigned (e.g. "[Owner] to [action]...", "[Owner] will coordinate...", or "Assigned to [Owner] to...").
+       STRICT RULE FOR TASK OWNERSHIP: In the `task` sentence, add ONLY the specific action owner who is explicitly assigned or committed to doing the work. NEVER add or list all the speakers who merely participated in the discussion. If no specific action owner was assigned, do NOT include speaker names in the task sentence—simply formulate the task as unassigned or team-wide.
      * The specific action / work item to be performed, technical subject, and operational reason/context.
      * The target deadline or timeframe (WHEN it must be completed), whenever a date, time, or timeframe is mentioned (e.g. "...by Friday, October 24, 2026, at 5:00 PM UTC", "...by November 15, 2026", "...before the annual audit").
    - CRITICAL REQUIREMENT: The `task` sentence itself MUST state WHO is responsible and by WHEN directly within the sentence whenever those details are available. Do NOT omit the owner or deadline from the `task` text. Anyone reading ONLY the `task` sentence must know the full context: who is doing what, by when, and why, without needing to cross-reference separate fields or meeting notes.
@@ -1874,10 +1875,10 @@ WRITING QUALITY GUIDELINES:
    - If a point has no genuine actionable requirements, emit NO action item for it.
 3. Ownership Attribution:
    - `owner`: The responsible person, team, or role (e.g. "Vikas", "DevOps Team", "Frontend Lead").
-   - Assign ownership ONLY when someone was explicitly assigned, volunteered, or agreed to handle it in `enhanced_text` (you may reference `action_owner` or `speakers` to confirm names).
-   - If multiple individuals are explicitly co-assigned, list them separated by commas (e.g. "Alice, Bob").
-   - NEVER assign ownership merely because someone was speaking, presenting, or sharing an update.
-   - If no specific owner or team was assigned, set `owner: null`.
+   - Assign ownership ONLY when someone was explicitly assigned, volunteered, or agreed to handle the work in `enhanced_text` (you may reference `action_owner` if provided).
+   - STRICT RULE: Do NOT assign or list all speakers involved in the discussion. If people were merely speaking, presenting, participating, or sharing updates, they are NOT action owners.
+   - If multiple individuals are explicitly co-assigned to complete the work, list only those specific co-assignees separated by commas (e.g. "Alice, Bob").
+   - If no specific action owner was explicitly assigned or volunteered to do the work, set `owner: null`.
 4. Deadlines & Milestones:
    - `deadline`: Specific date, sprint, milestone, or relative timeframe mentioned (e.g. "2026-10-15", "End of Q3", "Next Tuesday", "Sprint 42").
    - If no deadline or timeframe was discussed, set `deadline: null` (never invent dates).
@@ -1896,35 +1897,29 @@ For each action item object in `action_items`:
 EXAMPLES:
 
 [Example 1: Informational Point — No Action]
-Input: {"id": "pt-1", "enhanced_text": "Alice reviewed Q2 server uptime which reached 99.98% across all clusters."}
-Result: No action item generated.
+Input:
+{"id": "pt-1", "enhanced_text": "The team reviewed the preliminary flight-test results and confirmed that the telemetry data remained within the expected operating range."}
+Result:
+No action item generated.
 
 [Example 2: Concrete Action with Owner & Deadline]
-Input: {"id": "pt-2", "enhanced_text": "Vikas agreed to deploy the automated PostgreSQL backup script with Slack alerting by 2026-10-15 so that nightly disaster-recovery snapshots are verified."}
+Input:
+{"id": "pt-2", "enhanced_text": "Dr. Rao agreed to update the flight-control simulation model with the latest aerodynamic coefficients and complete the validation by 2026-10-15."}
 Result:
-Task: "Vikas to deploy the automated PostgreSQL database backup script configured with Slack failure alerting by 2026-10-15 to ensure reliable disaster recovery."
-Owner: "Vikas"
+Task: "Dr. Rao will update the flight-control simulation model with the latest aerodynamic coefficients and complete the required validation by 2026-10-15."
+Owner: "Dr. Rao"
 Deadline: "2026-10-15"
-Expected Outcome: "Automated nightly snapshots replicated to secondary S3 bucket with failure alerts."
+Expected Outcome: "The updated simulation model is validated against the latest aerodynamic data and ready for subsequent flight-control analysis."
 
-[Example 3: Decision Requiring Implementation (Unassigned Owner)]
-Input: {"id": "pt-3", "enhanced_text": "The committee decided to enforce multi-factor authentication for all VPN endpoints before the annual compliance audit in November."}
+[Example 3: Decision Requiring Implementation — Unassigned Owner]
+Input:
+{"id": "pt-3", "enhanced_text": "The review committee decided that all avionics software builds must undergo an additional verification review before being released for the next integration test."}
 Result:
-Task: "Enforce multi-factor authentication across all internal VPN endpoints before the annual compliance audit in November."
+Task: "The responsible team must implement an additional verification review for all avionics software builds before release to the next integration test."
 Owner: null
-Deadline: "Before November"
-Expected Outcome: "MFA policy activated across all VPN gateways with compliance verification."
+Deadline: "Before the next integration test"
+Expected Outcome: "All avionics software builds undergo the required verification review and receive clearance before integration testing."
 
-[Example 4: Concrete Action with Owner (No Deadline)]
-Input: {"id": "pt-4", "enhanced_text": "Elena Rostova agreed to take full ownership to refactor the frontend authentication library to implement OAuth2 PKCE."}
-Result:
-Task: "Elena Rostova to refactor the frontend authentication library to implement the OAuth2 Authorization Code flow with Proof Key for Code Exchange (PKCE)."
-Owner: "Elena Rostova"
-Deadline: null
-Expected Outcome: "Frontend authentication upgraded to OAuth2 PKCE with secure token storage."
-
-DISCUSSION POINTS:
-{points_json}
 
 Return ONLY valid JSON in exactly this format:
 ```json
@@ -1932,17 +1927,17 @@ Return ONLY valid JSON in exactly this format:
   "action_items": [
     {{
       "source_point_id": "pt-1",
-      "task": "Vikas to deploy the automated PostgreSQL database backup script configured with Slack failure alerting by 2026-10-15.",
-      "owner": "Vikas",
+      "task": "Dr. Rao will update the flight-control simulation model with the latest aerodynamic coefficients and complete the validation by 2026-10-15.",
+      "owner": "Dr. Rao",
       "deadline": "2026-10-15",
-      "expected_outcome": "Automated nightly snapshots replicated to secondary S3 bucket with failure alerts."
+      "expected_outcome": "The updated flight-control simulation model is validated against the latest aerodynamic data and approved for subsequent flight-control analysis."
     }},
     {{
       "source_point_id": "pt-2",
-      "task": "Alice to update the API rate-limiting architecture specifications in the developer portal documentation by the end of Q3.",
-      "owner": "Alice",
-      "deadline": "End of Q3",
-      "expected_outcome": "Published throttling thresholds and 429 error schemas for partner integration."
+      "task": "Ms. Sharma will coordinate with the propulsion team to consolidate and validate the latest engine-performance data required for the ongoing aircraft system analysis.",
+      "owner": "Ms. Sharma",
+      "deadline": null,
+      "expected_outcome": "A consolidated and validated set of current engine-performance data is made available for the aircraft system analysis."
     }}
   ]
 }}
@@ -2437,39 +2432,129 @@ Return ONLY a JSON object:
 # PURPOSE: Generates the condensed 'Short' version of Final ROM, capturing all critical meeting content concisely.
 # ===========================================================================
 #region ROM_VERSION_SHORT_PROMPT
-ROM_VERSION_SHORT_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a SHORT version of this agenda's discussion — a concise summary that captures ALL critical information, not just action points.
 
-AGENDA: {agenda_title}
+ROM_VERSION_SHORT_PROMPT = """You are an expert meeting-record editor.
+
+Create a SHORT, INFORMATION-RICH version of the complete discussion for ONE agenda item.
+
+AGENDA:
+{agenda_title}
 
 DISCUSSION POINTS:
 {points_json}
+
 {rules_section}{mandatory_section}
-INSTRUCTIONS:
-- VERY IMPORTANT POINTS (CRITICAL):
-  * Every point marked as "Very Important" (labeled with [VERY IMPORTANT] or listed in MANDATORY POINTS) MUST be included in the output.
-  * You MUST preserve the COMPLETE ORIGINAL CONTENT of each marked point verbatim, WITHOUT ANY SUMMARIZATION or paraphrasing.
-  * The marked point must remain fully intact in both Short and Medium versions.
-- Process ALL points together for this agenda as a whole - do NOT process each point individually.
-- CAPTURE ALL of the following categories of important information (do NOT limit to just action points):
-  * Key decisions made and their rationale
-  * Action points, assignments, and commitments (with owners and deadlines)
-  * Important conclusions reached
-  * Critical issues, blockers, or risks raised
-  * Status updates on ongoing items or projects
-  * Escalations and dependencies noted
-  * Deadlines, milestones, and follow-up requirements
-  * Any agreements or approvals given
-- Omit only purely background/introductory context and casual side remarks that carry no substantive information.
-- Summarize and restructure the remaining agenda discussion into a compact, meaningful collection of points alongside the intact Very Important points.
-- Each output point must be a complete, standalone sentence that preserves the original fact, speaker attribution, action owner, and specific details.
-- Do NOT invent, add, or infer any information not present in the input.
-- Do NOT change speaker names, action owners, dates, numbers, or decisions.
-- Produce FEWER points than the input - typically 50% of the input count. Aim for 2-5 points per agenda.
-- Write in formal, professional language.
+
+IMPORTANT:
+Think about the ENTIRE agenda discussion as one conversation. Do NOT rewrite each input point separately.
+
+Your job is to identify the most IMPORTANT MEETING INSIGHTS, combine related information, and remove repetition and low-value detail.
+Identify the most important insights and rewrite them into a small set of concise discussion points.
+The output should be substantially shorter than the input while still preserving the important meaning of the discussion.
+WHAT TO CAPTURE:
+
+Preserve important information such as:
+
+* Important debates or disagreements
+* Key arguments, concerns and viewpoints
+* Decisions and conclusions
+* Actions and commitments
+* Updates and progress
+* Delays, problems and blockers
+* Risks and dependencies
+* Changes in plans or direction
+* Approvals and agreements
+* Important questions or unresolved issues
+* Important technical, operational or project details
+* Deadlines, milestones, owners and other critical facts
+* Any other insight that materially helps understand the agenda discussion
+
+Remove:
+* Repeated information
+* Background stories and unnecessary context
+* Examples that do not add essential meaning
+* Detailed explanations
+* Casual conversation and filler
+* Repeated speaker references
+* Supporting details that do not change the core meaning
+
+NATURAL CATEGORIZATION:
+
+Output points should naturally represent different types of discussion.
+
+For example, one point may capture a debate or disagreement, another may capture a progress update, another may capture a delay or blocker, another may capture a decision, and another may capture the final conclusion.
+
+Do NOT force every point to contain a decision, owner, deadline or action.
+
+The content and structure of each point must depend on what was actually discussed.
+
+WHOLE-DISCUSSION REASONING:
+
+Understand how the discussion developed.
+
+If several points describe the same topic, debate, issue or decision, combine them into one meaningful point containing the important information from that discussion.
+
+If different parts of the agenda contain genuinely different insights, keep them as separate points.
+
+Do not simply shorten every source point independently.
+
+Do not lose important context, reasoning or conclusions when combining points.
+
+INSIGHT OVER WORD COUNT:
+
+This is a SHORT version.
+
+Aim for roughly 40–50% reduction in overall content by removing repetition and unnecessary wording.
+
+40–50% is only a target, NOT a hard limit.
+
+If multiple speakers discuss the same issue, combine their important viewpoints into one point.
+Remove only repetition, filler, casual conversation and information that has no meaningful value to the agenda.
+
+Do not create points for minor details.
+
+Do NOT force a fixed number of output points.
+
+Do NOT force every point to be one or two sentences.
+
+VERY IMPORTANT POINTS:
+
+Every point marked [VERY IMPORTANT] or included in MANDATORY POINTS MUST be included.
+
+FACTUAL ACCURACY:
+
+Do not invent, assume or infer information.
+
+Do not change names, speakers, dates, numbers, owners, deadlines, decisions, technical terms or outcomes.
+
+Combine related or overlapping input points into ONE concise point.
+
+Do not preserve separate points merely because they came from different speakers.
+
+
+QUALITY:
+
+Each output point should communicate a meaningful insight from the agenda discussion.
+
+Avoid vague points such as:
+"An issue was discussed."
+"Progress was reviewed."
+"The team had a debate."
+
+Instead, preserve the actual substance of the issue, progress or debate.
+
+Think about the agenda as a whole and produce the most important insights a person would need to understand what happened in that discussion.
+
+Before returning, check that important debates, updates, problems, decisions, conclusions, actions, risks and other meaningful insights have not been lost.
 
 Return ONLY a valid JSON array of rewritten point strings. No markdown, no code fences, no extra text:
-["point 1", "point 2", ...]"""
+["point 1", "point 2", ...]
+No markdown.
+No code fences.
+No explanation."""
+
 #endregion
+
 
 
 # ===========================================================================
@@ -2820,6 +2905,10 @@ def _get_prompt(key: str) -> str:
         "collection_chat": COLLECTION_CHAT_PROMPT,
         "collection_compare": COLLECTION_COMPARE_PROMPT,
         "collection_topic_growth": COLLECTION_TOPIC_GROWTH_PROMPT,
+        "rom_version_short":       ROM_VERSION_SHORT_PROMPT,
+        "rom_version_medium":      ROM_VERSION_MEDIUM_PROMPT,
+        "rom_ai_edit_points":      ROM_AI_EDIT_POINTS_PROMPT,
+        "rom_ai_chat":             ROM_AI_CHAT_PROMPT,
     }
     return _CONSTANT_MAP.get(key, "")
 
@@ -5010,19 +5099,12 @@ class QwenProvider(AIProvider):
             if not pt_text:
                 continue
 
-            # Resolve best initial action_owner candidate
+            # Pass candidate action_owner ONLY if explicitly present (no speaker fallback)
             raw_ao = p.get("action_owner")
-            if not raw_ao or str(raw_ao).strip().lower() in ("none", "n/a", "null", "unassigned", "unknown", ""):
-                spks = p.get("speakers") or []
-                if isinstance(spks, str):
-                    spks = [s.strip() for s in spks.split(",") if s.strip()]
-                valid_spks = [s for s in spks if str(s).strip().lower() not in ("for information", "unknown", "none", "n/a", "unassigned", "")]
-                if valid_spks:
-                    raw_ao = ", ".join(valid_spks)
-                elif p.get("speaker") and str(p.get("speaker")).strip().lower() not in ("for information", "unknown", "none", "n/a", "unassigned", ""):
-                    raw_ao = str(p.get("speaker")).strip()
-                else:
-                    raw_ao = None
+            if raw_ao and str(raw_ao).strip().lower() in ("none", "n/a", "null", "unassigned", "unknown", ""):
+                raw_ao = None
+            elif raw_ao:
+                raw_ao = str(raw_ao).strip()
 
             raw_speakers = p.get("speakers") or ([p.get("speaker")] if p.get("speaker") else [])
             if isinstance(raw_speakers, str):
@@ -5074,25 +5156,19 @@ class QwenProvider(AIProvider):
             else:
                 logger.info(f"[QwenAI] Action extraction {chunk_info} parse completed with 0 action items.")
 
-        # Build lookup for quick fallback inside extract_actions_from_enhanced_points
+        # Build lookup: only keep LLM returned owner, or fallback to src_point["action_owner"]. All other fallbacks removed.
         point_by_id = {p.get("id"): p for p in polished_points if p.get("id")}
         for act in all_action_items:
             src_id = act.get("source_point_id") or act.get("id")
             src_point = point_by_id.get(src_id) if src_id else None
             curr_owner = act.get("owner") or act.get("assignee") or act.get("action_owner")
             if not curr_owner or str(curr_owner).strip().lower() in ("none", "n/a", "null", "unassigned", "unknown", ""):
-                if src_point:
-                    if src_point.get("action_owner") and str(src_point.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned", "unknown", ""):
-                        act["owner"] = str(src_point["action_owner"]).strip()
-                    elif src_point.get("speakers"):
-                        spks = src_point["speakers"]
-                        if isinstance(spks, str):
-                            spks = [s.strip() for s in spks.split(",") if s.strip()]
-                        valid_spks = [s for s in spks if str(s).strip().lower() not in ("for information", "unknown", "none", "n/a", "unassigned", "")]
-                        if valid_spks:
-                            act["owner"] = ", ".join(valid_spks)
-                    elif src_point.get("speaker") and str(src_point.get("speaker")).strip().lower() not in ("for information", "unknown", "none", "n/a", "unassigned", ""):
-                        act["owner"] = str(src_point["speaker"]).strip()
+                if src_point and src_point.get("action_owner") and str(src_point.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned", "unknown", ""):
+                    act["owner"] = str(src_point["action_owner"]).strip()
+                else:
+                    act["owner"] = None
+            else:
+                act["owner"] = str(curr_owner).strip()
 
             outcome = act.get("expected_outcome") or act.get("goal") or act.get("outcome")
             if outcome and str(outcome).strip().lower() not in ("none", "n/a", "null", ""):

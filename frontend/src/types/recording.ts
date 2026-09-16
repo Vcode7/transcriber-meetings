@@ -114,3 +114,25 @@ export interface AIChatMessage {
   created_at: string
 }
 
+export interface SyncableMeeting {
+  id: string
+  name: string
+  date: string
+  stage2_points_count: number
+  indexed_points_count: number
+  needs_sync: boolean
+  sync_status: 'synced' | 'partial' | 'not_indexed'
+}
+
+export interface ResyncResult {
+  status: 'success' | 'error'
+  recording_id: string
+  meeting_name: string
+  total_found: number
+  already_indexed: number
+  newly_indexed: number
+  skipped_failed: number
+  message?: string
+}
+
+
