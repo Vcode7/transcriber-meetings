@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Upload, FileText, Check, AlertCircle, ChevronDown,
-  Loader, ExternalLink, Database, RefreshCw, X,
+  Upload, FileText, Check, AlertCircle, Loader,
+  ExternalLink, Database, RefreshCw, X,
+  ChevronDown, ChevronRight, Info, BookOpen, Layers,
+  ArrowRight, Plus, Sparkles, Tag,
 } from 'lucide-react';
 import {
   listMeetings, getLongRomPoints, extractMom,
@@ -10,87 +12,102 @@ import {
 import type { Meeting, LongRomAgenda, MomAgenda, AgendaMatch } from '../types/romTrainingTypes';
 import { useNavigate } from 'react-router-dom';
 
-const S = {
-  card: {
-    background: 'hsl(var(--card))',
-    borderRadius: '12px',
-    border: '1px solid hsl(var(--border))',
-    padding: '1.25rem',
-  } as React.CSSProperties,
-  label: {
-    display: 'block',
-    fontSize: '0.78rem',
-    fontWeight: 700,
-    color: 'hsl(var(--foreground))',
-    marginBottom: '0.35rem',
-  } as React.CSSProperties,
-  btn: (primary = true) => ({
-    display: 'inline-flex', alignItems: 'center', gap: 6,
-    padding: '0.5rem 1rem',
-    borderRadius: '8px',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '0.82rem',
-    fontWeight: 600,
-    fontFamily: 'Inter, sans-serif',
-    background: primary ? 'hsl(var(--accent))' : 'hsl(var(--muted))',
-    color: primary ? 'white' : 'hsl(var(--foreground))',
-    transition: 'opacity 0.15s',
-  } as React.CSSProperties),
+// ── Color / Design Tokens ─────────────────────────────────────────────────────
+const C = {
+  accent: 'hsl(var(--accent))',
+  accentSoft: 'hsl(var(--accent) / .1)',
+  accentBorder: 'hsl(var(--accent) / .35)',
+  border: 'hsl(var(--border))',
+  muted: 'hsl(var(--muted))',
+  mutedFg: 'hsl(var(--muted-foreground))',
+  card: 'hsl(var(--card))',
+  bg: 'hsl(var(--background))',
+  fg: 'hsl(var(--foreground))',
+  green: 'hsl(142 70% 40%)',
+  greenSoft: 'hsl(142 70% 45% / .12)',
+  greenBorder: 'hsl(142 70% 45% / .3)',
+  amber: 'hsl(38 90% 48%)',
+  amberSoft: 'hsl(38 90% 50% / .1)',
+  amberBorder: 'hsl(38 90% 50% / .3)',
+  purple: 'hsl(280 75% 60%)',
+  purpleSoft: 'hsl(280 75% 60% / .1)',
+  purpleBorder: 'hsl(280 75% 60% / .3)',
+  red: 'hsl(var(--destructive))',
+  redSoft: 'hsl(var(--destructive) / .08)',
 };
-
-type Step = 'select-meeting' | 'upload-mom' | 'match-agendas' | 'preview';
 
 export default function DataCreationTab() {
   const navigate = useNavigate();
-  const [step, setStep] = useState<Step>('select-meeting');
 
-  // Meeting selection
+  // ── Meeting state ──────────────────────────────────────────────────────────
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loadingMeetings, setLoadingMeetings] = useState(false);
   const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
+  const [showMeetingPicker, setShowMeetingPicker] = useState(false);
+  const [meetingFilter, setMeetingFilter] = useState('');
+  const meetingPickerRef = useRef<HTMLDivElement>(null);
+
+  // ── Long ROM state ─────────────────────────────────────────────────────────
   const [longRomData, setLongRomData] = useState<{ available: boolean; agendas: LongRomAgenda[] } | null>(null);
   const [loadingRom, setLoadingRom] = useState(false);
   const [existingData, setExistingData] = useState<any[]>([]);
 
-  // MoM upload
+  // ── Upload & Extraction state ──────────────────────────────────────────────
   const [uploading, setUploading] = useState(false);
-  const [momAgendas, setMomAgendas] = useState<MomAgenda[]>([]);
+  const [uploadedFileName, setUploadedFileName] = useState('');
   const [uploadError, setUploadError] = useState('');
+  const [momAgendas, setMomAgendas] = useState<MomAgenda[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Agenda matching
-  const [matches, setMatches] = useState<AgendaMatch[]>([]);
-  const [matchingLoading, setMatchingLoading] = useState(false);
-  // manual override: mom_agenda_idx -> meeting_agenda_id
-  const [manualOverrides, setManualOverrides] = useState<Record<number, { id: string; title: string }>>({});
+  // ── Agenda Mapping state: meeting_agenda_id -> array of momAgenda indices ───
+  const [agendaMapping, setAgendaMapping] = useState<Record<string, number[]>>({});
+  const [matching, setMatching] = useState(false);
+  const [autoMatches, setAutoMatches] = useState<AgendaMatch[]>([]);
 
-  // Save
+  // ── Accordion / Collapsed state ────────────────────────────────────────────
+  const [collapsedAgendas, setCollapsedAgendas] = useState<Set<string>>(new Set());
+  const [showUnmappedDrawer, setShowUnmappedDrawer] = useState(true);
+
+  // ── Save state ─────────────────────────────────────────────────────────────
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState('');
 
+  // ── Lifecycle: Load meetings ───────────────────────────────────────────────
   useEffect(() => {
     setLoadingMeetings(true);
     listMeetings()
       .then(d => setMeetings(d.meetings || []))
-      .catch((err) => {
-        console.error('Failed to load meetings for ROM Training:', err);
-      })
+      .catch(err => console.error('Failed to load meetings:', err))
       .finally(() => setLoadingMeetings(false));
   }, []);
 
+  // Close meeting picker on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (meetingPickerRef.current && !meetingPickerRef.current.contains(e.target as Node)) {
+        setShowMeetingPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // ── Meeting selection handler ──────────────────────────────────────────────
   const handleSelectMeeting = async (meeting: Meeting) => {
     setSelectedMeeting(meeting);
+    setShowMeetingPicker(false);
+    setMeetingFilter('');
     setLongRomData(null);
-    setExistingData([]);
     setMomAgendas([]);
-    setMatches([]);
-    setManualOverrides({});
-    setSaved(false);
-    setStep('select-meeting');
-
+    setAgendaMapping({});
+    setAutoMatches([]);
+    setUploadedFileName('');
+    setUploadError('');
+    setSaveSuccess(false);
+    setSaveError('');
     setLoadingRom(true);
+
     try {
       const [romRes, dataRes] = await Promise.all([
         getLongRomPoints(meeting.id),
@@ -99,421 +116,888 @@ export default function DataCreationTab() {
       setLongRomData(romRes);
       setExistingData(dataRes.data || []);
     } catch (err) {
-      console.error('Failed to load ROM data for meeting:', err);
+      console.error('Failed to load ROM data:', err);
     } finally {
       setLoadingRom(false);
     }
   };
 
+  // ── File upload & extraction handler ───────────────────────────────────────
   const handleFileUpload = async (file: File) => {
     setUploading(true);
     setUploadError('');
     setMomAgendas([]);
-    setMatches([]);
-    setManualOverrides({});
+    setAgendaMapping({});
+    setAutoMatches([]);
+    setUploadedFileName(file.name);
+    setSaveSuccess(false);
+    setSaveError('');
+
     try {
       const res = await extractMom(file);
-      setMomAgendas(res.agendas || []);
-      setStep('match-agendas');
-      // Auto-match
-      if (longRomData?.agendas) {
-        await handleAutoMatch(res.agendas || []);
+      const extracted: MomAgenda[] = res.agendas || [];
+      setMomAgendas(extracted);
+
+      // Auto-match agendas immediately after extraction
+      if (longRomData?.agendas?.length && extracted.length) {
+        setMatching(true);
+        try {
+          const matchRes = await matchAgendas(
+            extracted,
+            longRomData.agendas.map(a => ({ agenda_id: a.agenda_id, agenda_title: a.agenda_title })),
+          );
+          const matches: AgendaMatch[] = matchRes.matches || [];
+          setAutoMatches(matches);
+
+          // Build initial mapping: meeting_agenda_id -> [momAgendaIdx]
+          const initialMap: Record<string, number[]> = {};
+          for (const ag of longRomData.agendas) {
+            initialMap[ag.agenda_id] = [];
+          }
+
+          for (const m of matches) {
+            if (m.meeting_agenda_id && m.confidence >= 0.2) {
+              if (!initialMap[m.meeting_agenda_id]) {
+                initialMap[m.meeting_agenda_id] = [];
+              }
+              if (!initialMap[m.meeting_agenda_id].includes(m.mom_agenda_idx)) {
+                initialMap[m.meeting_agenda_id].push(m.mom_agenda_idx);
+              }
+            }
+          }
+          setAgendaMapping(initialMap);
+        } catch (e) {
+          console.error('Agenda auto-matching failed:', e);
+        } finally {
+          setMatching(false);
+        }
       }
     } catch (e: any) {
-      setUploadError(e?.response?.data?.detail || 'Failed to extract MoM');
+      setUploadError(e?.response?.data?.detail || 'Failed to extract text from uploaded file');
     } finally {
       setUploading(false);
     }
   };
 
-  const handleAutoMatch = async (mom: MomAgenda[]) => {
-    if (!longRomData?.agendas || !mom.length) return;
-    setMatchingLoading(true);
-    try {
-      const res = await matchAgendas(
-        mom,
-        longRomData.agendas.map(a => ({ agenda_id: a.agenda_id, agenda_title: a.agenda_title })),
-      );
-      setMatches(res.matches || []);
-    } catch {
-    } finally {
-      setMatchingLoading(false);
-    }
+  // ── Agenda mapping helpers ─────────────────────────────────────────────────
+  const assignManualSection = (meetingAgendaId: string, momIdx: number) => {
+    setAgendaMapping(prev => {
+      const current = prev[meetingAgendaId] || [];
+      if (current.includes(momIdx)) return prev;
+      return { ...prev, [meetingAgendaId]: [...current, momIdx] };
+    });
   };
 
-  const allMatched = matches.length > 0 && matches.every(m => {
-    const override = manualOverrides[m.mom_agenda_idx];
-    return (override?.id) || m.meeting_agenda_id;
-  });
+  const removeManualSection = (meetingAgendaId: string, momIdx: number) => {
+    setAgendaMapping(prev => {
+      const current = prev[meetingAgendaId] || [];
+      return { ...prev, [meetingAgendaId]: current.filter(i => i !== momIdx) };
+    });
+  };
 
+  const setSingleManualSection = (meetingAgendaId: string, momIdxStr: string) => {
+    setAgendaMapping(prev => {
+      if (momIdxStr === '' || momIdxStr === '__unmapped__') {
+        return { ...prev, [meetingAgendaId]: [] };
+      }
+      const momIdx = parseInt(momIdxStr, 10);
+      return { ...prev, [meetingAgendaId]: [momIdx] };
+    });
+  };
+
+  // ── Derived statistics & helpers ───────────────────────────────────────────
+  const totalLongPoints = useMemo(
+    () => longRomData?.agendas.reduce((s, ag) => s + ag.discussion_points.length, 0) ?? 0,
+    [longRomData]
+  );
+
+  const totalManualPoints = useMemo(
+    () => momAgendas.reduce((s, ag) => s + ag.points.length, 0),
+    [momAgendas]
+  );
+
+  // Set of momAgenda indices that are mapped to at least one meeting agenda
+  const mappedMomIndices = useMemo(() => {
+    const s = new Set<number>();
+    for (const indices of Object.values(agendaMapping)) {
+      for (const idx of indices) s.add(idx);
+    }
+    return s;
+  }, [agendaMapping]);
+
+  // Unmapped manual sections
+  const unmappedMomSections = useMemo(
+    () => momAgendas.map((ag, i) => ({ ...ag, idx: i })).filter(ag => !mappedMomIndices.has(ag.idx)),
+    [momAgendas, mappedMomIndices]
+  );
+
+  // Number of meeting agendas with at least 1 manual section mapped
+  const mappedAgendasCount = useMemo(() => {
+    if (!longRomData?.agendas) return 0;
+    return longRomData.agendas.filter(ag => (agendaMapping[ag.agenda_id] || []).length > 0).length;
+  }, [longRomData, agendaMapping]);
+
+  const filteredMeetings = useMemo(() => {
+    if (!meetingFilter.trim()) return meetings;
+    const q = meetingFilter.toLowerCase();
+    return meetings.filter(m => m.title.toLowerCase().includes(q));
+  }, [meetings, meetingFilter]);
+
+  // ── Save mapped agendas to database ────────────────────────────────────────
   const handleSave = async () => {
-    if (!selectedMeeting || !allMatched) return;
+    if (!selectedMeeting || !longRomData || mappedAgendasCount === 0) return;
     setSaving(true);
     setSaveError('');
+    setSaveSuccess(false);
+
     try {
-      const pairs = matches.map(m => {
-        const override = manualOverrides[m.mom_agenda_idx];
-        const meetingAgendaId = override?.id || m.meeting_agenda_id;
-        const meetingAgendaTitle = override?.title || m.meeting_agenda_title || '';
-        const longRomAgenda = longRomData?.agendas.find(a => a.agenda_id === meetingAgendaId);
-        const momAgenda = momAgendas[m.mom_agenda_idx];
-        return {
-          agenda_id: meetingAgendaId,
-          agenda_title: meetingAgendaTitle,
-          long_rom_points: longRomAgenda?.discussion_points || [],
-          manual_mom_points: momAgenda?.points || [],
-        };
-      });
+      const pairs: any[] = [];
+      for (const ag of longRomData.agendas) {
+        const momIndices = agendaMapping[ag.agenda_id] || [];
+        if (momIndices.length === 0) continue;
+
+        // Gather all manual points under mapped sections
+        const manualPoints: string[] = [];
+        for (const idx of momIndices) {
+          const mAg = momAgendas[idx];
+          if (mAg && Array.isArray(mAg.points)) {
+            for (const pt of mAg.points) {
+              if (pt && pt.trim()) manualPoints.push(pt.trim());
+            }
+          }
+        }
+
+        if (manualPoints.length > 0) {
+          pairs.push({
+            agenda_id: ag.agenda_id,
+            agenda_title: ag.agenda_title,
+            long_rom_points: ag.discussion_points,
+            manual_mom_points: manualPoints,
+          });
+        }
+      }
+
+      if (pairs.length === 0) {
+        setSaveError('No valid agenda mappings found. Assign at least one Manual ROM section to an agenda.');
+        return;
+      }
 
       await saveTrainingData({
         recording_id: selectedMeeting.id,
         recording_title: selectedMeeting.title,
         pairs,
       });
-      setSaved(true);
-      setStep('select-meeting');
-      // Refresh existing data
+
+      setSaveSuccess(true);
       const dataRes = await getDataForMeeting(selectedMeeting.id);
       setExistingData(dataRes.data || []);
     } catch (e: any) {
-      setSaveError(e?.response?.data?.detail || 'Failed to save');
+      setSaveError(e?.response?.data?.detail || 'Failed to save training data to database');
     } finally {
       setSaving(false);
     }
   };
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-      {/* Main two-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', minHeight: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
 
-        {/* LEFT PANEL */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      {/* ════ TOP CONTROL BAR: Step 1 (Meeting) + Step 2 (Upload) ════════════ */}
+      <div style={{ display: 'flex', gap: '0.85rem', alignItems: 'stretch', flexWrap: 'wrap' }}>
 
-          {/* Meeting Selector */}
-          <div style={S.card}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
-              <FileText size={16} style={{ color: 'hsl(var(--accent))' }} />
-              <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Select Meeting</span>
-            </div>
-            {loadingMeetings ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'hsl(var(--muted-foreground))' }}>
-                <Loader size={14} className="spin" /> Loading meetings…
+        {/* Meeting picker */}
+        <div style={{ flex: '1 1 320px', position: 'relative' }} ref={meetingPickerRef}>
+          <div style={{ fontSize: '0.68rem', fontWeight: 700, color: C.mutedFg, marginBottom: 5, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            Step 1 — Select Meeting
+          </div>
+          <button
+            onClick={() => setShowMeetingPicker(v => !v)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+              padding: '0.6rem 0.9rem', borderRadius: 10,
+              border: `1.5px solid ${selectedMeeting ? C.accentBorder : C.border}`,
+              background: selectedMeeting ? C.accentSoft : C.bg,
+              cursor: 'pointer', fontFamily: 'Inter, sans-serif', color: C.fg,
+            }}
+          >
+            {loadingRom
+              ? <Loader size={14} className="spin" color={C.mutedFg} />
+              : <FileText size={14} color={selectedMeeting ? C.accent : C.mutedFg} />
+            }
+            <span style={{ flex: 1, textAlign: 'left', fontSize: '0.82rem', fontWeight: selectedMeeting ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selectedMeeting ? selectedMeeting.title : 'Choose a meeting…'}
+            </span>
+            {selectedMeeting && !loadingRom && longRomData?.available && (
+              <span style={{ fontSize: '0.62rem', color: C.mutedFg, flexShrink: 0 }}>
+                {longRomData.agendas.length} agendas · {totalLongPoints} pts
+              </span>
+            )}
+            <ChevronDown size={13} color={C.mutedFg} style={{ flexShrink: 0 }} />
+          </button>
+
+          {showMeetingPicker && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 200,
+              background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+              boxShadow: '0 10px 30px rgba(0,0,0,.2)', overflow: 'hidden',
+            }}>
+              <div style={{ padding: '8px 8px 4px' }}>
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Search meetings…"
+                  value={meetingFilter}
+                  onChange={e => setMeetingFilter(e.target.value)}
+                  style={{
+                    width: '100%', padding: '0.4rem 0.65rem',
+                    border: `1px solid ${C.border}`, borderRadius: 7,
+                    background: C.bg, color: C.fg,
+                    fontSize: '0.78rem', fontFamily: 'Inter, sans-serif', outline: 'none',
+                  }}
+                />
               </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: 220, overflowY: 'auto' }}>
-                {meetings.map(m => (
+              <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                {loadingMeetings && (
+                  <div style={{ padding: '1.2rem', textAlign: 'center', color: C.mutedFg, fontSize: '0.8rem' }}>
+                    <Loader size={14} className="spin" style={{ verticalAlign: 'middle', marginRight: 6 }} />Loading…
+                  </div>
+                )}
+                {filteredMeetings.map(m => (
                   <button
                     key={m.id}
                     onClick={() => handleSelectMeeting(m)}
                     style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '0.6rem 0.85rem',
-                      borderRadius: '8px',
-                      border: selectedMeeting?.id === m.id ? '1.5px solid hsl(var(--accent))' : '1px solid hsl(var(--border))',
-                      background: selectedMeeting?.id === m.id ? 'hsl(var(--accent) / .08)' : 'hsl(var(--background))',
-                      cursor: 'pointer', textAlign: 'left',
-                      fontFamily: 'Inter, sans-serif',
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '0.55rem 0.9rem',
+                      background: selectedMeeting?.id === m.id ? C.accentSoft : 'transparent',
+                      border: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'Inter, sans-serif',
                     }}
                   >
-                    <div>
-                      <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'hsl(var(--foreground))' }}>{m.title}</div>
-                      <div style={{ fontSize: '0.7rem', color: 'hsl(var(--muted-foreground))' }}>{m.created_at?.slice(0, 10)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.8rem', fontWeight: 600, color: C.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</div>
+                      <div style={{ fontSize: '0.66rem', color: C.mutedFg }}>{m.created_at?.slice(0, 10)}</div>
                     </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      {m.has_long_rom && (
-                        <span style={{
-                          fontSize: '0.65rem', fontWeight: 700, padding: '2px 6px',
-                          borderRadius: 6, background: 'hsl(142 70% 45% / .15)',
-                          color: 'hsl(142 70% 35%)',
-                        }}>ROM ✓</span>
-                      )}
-                    </div>
+                    {m.has_long_rom && (
+                      <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '1px 5px', borderRadius: 5, background: C.greenSoft, color: C.green, flexShrink: 0 }}>ROM ✓</span>
+                    )}
                   </button>
                 ))}
-                {meetings.length === 0 && (
-                  <div style={{ fontSize: '0.8rem', color: 'hsl(var(--muted-foreground))', textAlign: 'center', padding: '1rem' }}>
-                    No meetings found
-                  </div>
+                {filteredMeetings.length === 0 && !loadingMeetings && (
+                  <div style={{ padding: '1.2rem', textAlign: 'center', color: C.mutedFg, fontSize: '0.78rem' }}>No meetings found</div>
                 )}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Upload manual ROM */}
+        <div style={{ flex: '1 1 320px' }}>
+          <div style={{ fontSize: '0.68rem', fontWeight: 700, color: C.mutedFg, marginBottom: 5, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            Step 2 — Upload Manual ROM
+          </div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '0.6rem 0.9rem', borderRadius: 10,
+            border: `1.5px solid ${momAgendas.length > 0 ? C.purpleBorder : C.border}`,
+            background: momAgendas.length > 0 ? C.purpleSoft : C.bg,
+          }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx,.doc,.txt,.md"
+              style={{ display: 'none' }}
+              onChange={e => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!selectedMeeting || !longRomData?.available || uploading}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                padding: '0.38rem 0.85rem', borderRadius: 7, border: 'none',
+                cursor: !selectedMeeting || !longRomData?.available || uploading ? 'not-allowed' : 'pointer',
+                background: C.accent, color: 'white',
+                fontSize: '0.76rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
+                opacity: !selectedMeeting || !longRomData?.available ? 0.45 : 1,
+                flexShrink: 0,
+              }}
+            >
+              {uploading ? <Loader size={12} className="spin" /> : <Upload size={12} />}
+              {uploading ? 'Extracting…' : 'Choose File'}
+            </button>
+
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {(uploading || matching) && (
+                <div style={{ fontSize: '0.73rem', color: C.mutedFg, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Loader size={11} className="spin" />
+                  {uploading ? 'Extracting document text & structure…' : 'Matching agendas…'}
+                </div>
+              )}
+              {!uploading && !matching && momAgendas.length > 0 && (
+                <>
+                  <div style={{ fontSize: '0.76rem', fontWeight: 600, color: C.purple, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <Check size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />{uploadedFileName}
+                  </div>
+                  <div style={{ fontSize: '0.66rem', color: C.mutedFg }}>
+                    {momAgendas.length} section{momAgendas.length !== 1 ? 's' : ''} · {totalManualPoints} content points
+                  </div>
+                </>
+              )}
+              {!uploading && !matching && !momAgendas.length && !uploadError && (
+                <div style={{ fontSize: '0.73rem', color: C.mutedFg }}>
+                  {!selectedMeeting ? 'Select a meeting first'
+                    : !longRomData?.available ? 'Generate Long ROM for this meeting first'
+                    : 'PDF, DOCX, DOC, or TXT'}
+                </div>
+              )}
+              {uploadError && (
+                <div style={{ fontSize: '0.7rem', color: C.red }}>
+                  <AlertCircle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />{uploadError}
+                </div>
+              )}
+            </div>
+
+            {momAgendas.length > 0 && (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: C.mutedFg, flexShrink: 0 }}
+                title="Re-upload a different document"
+              >
+                <RefreshCw size={13} />
+              </button>
             )}
           </div>
-
-          {/* Existing training data badge */}
-          {selectedMeeting && existingData.length > 0 && (
-            <div style={{
-              padding: '0.75rem', borderRadius: '10px',
-              background: 'hsl(var(--accent) / .08)',
-              border: '1px solid hsl(var(--accent) / .2)',
-              display: 'flex', alignItems: 'center', gap: 8,
-            }}>
-              <Database size={14} style={{ color: 'hsl(var(--accent))' }} />
-              <span style={{ fontSize: '0.78rem', color: 'hsl(var(--accent))', fontWeight: 600 }}>
-                {existingData.length} agenda{existingData.length !== 1 ? 's' : ''} already in database for this meeting
-              </span>
-            </div>
-          )}
-
-          {/* MoM Upload */}
-          {selectedMeeting && longRomData?.available && (
-            <div style={S.card}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
-                <Upload size={16} style={{ color: 'hsl(var(--accent))' }} />
-                <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Upload Manual MoM</span>
-              </div>
-              <p style={{ fontSize: '0.75rem', color: 'hsl(var(--muted-foreground))', marginBottom: '0.75rem' }}>
-                Upload a manually written Minutes of Meeting (PDF, DOCX, or TXT).
-                Points will be extracted exactly as written — no modification.
-              </p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.docx,.doc,.txt"
-                style={{ display: 'none' }}
-                onChange={e => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
-              />
-              <button
-                style={S.btn()}
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-              >
-                {uploading ? <Loader size={14} className="spin" /> : <Upload size={14} />}
-                {uploading ? 'Extracting…' : 'Choose File'}
-              </button>
-              {uploadError && (
-                <div style={{ marginTop: 8, fontSize: '0.75rem', color: 'hsl(var(--destructive))' }}>
-                  <AlertCircle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />{uploadError}
-                </div>
-              )}
-              {momAgendas.length > 0 && (
-                <div style={{ marginTop: 10, fontSize: '0.78rem', color: 'hsl(142 70% 35%)' }}>
-                  <Check size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                  Extracted {momAgendas.length} agenda section{momAgendas.length !== 1 ? 's' : ''}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Agenda Matching */}
-          {matches.length > 0 && (
-            <div style={S.card}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
-                <RefreshCw size={16} style={{ color: 'hsl(var(--accent))' }} />
-                <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Agenda Matching</span>
-                {matchingLoading && <Loader size={12} className="spin" style={{ color: 'hsl(var(--muted-foreground))' }} />}
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {matches.map((m, idx) => {
-                  const override = manualOverrides[m.mom_agenda_idx];
-                  const matchedId = override?.id || m.meeting_agenda_id;
-                  const matchedTitle = override?.title || m.meeting_agenda_title;
-                  const isMatched = Boolean(matchedId);
-                  return (
-                    <div key={idx} style={{
-                      padding: '0.6rem', borderRadius: 8,
-                      border: isMatched ? '1px solid hsl(142 70% 45% / .3)' : '1px solid hsl(var(--destructive) / .3)',
-                      background: isMatched ? 'hsl(142 70% 45% / .05)' : 'hsl(var(--destructive) / .05)',
-                    }}>
-                      <div style={{ fontSize: '0.75rem', fontWeight: 700, marginBottom: 4 }}>
-                        MoM: "{m.mom_agenda_title}"
-                      </div>
-                      {isMatched ? (
-                        <div style={{ fontSize: '0.72rem', color: 'hsl(142 70% 35%)' }}>
-                          <Check size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
-                          Matched → "{matchedTitle}"
-                          {m.confidence > 0 && !override && (
-                            <span style={{ marginLeft: 6, opacity: 0.7 }}>(conf: {(m.confidence * 100).toFixed(0)}%)</span>
-                          )}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: '0.72rem', color: 'hsl(var(--destructive))', marginBottom: 4 }}>
-                          <AlertCircle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
-                          Could not auto-match — select manually:
-                        </div>
-                      )}
-                      {/* Manual override dropdown */}
-                      <select
-                        value={matchedId || ''}
-                        onChange={e => {
-                          const sel = e.target.value;
-                          if (!sel) {
-                            const next = { ...manualOverrides };
-                            delete next[m.mom_agenda_idx];
-                            setManualOverrides(next);
-                          } else {
-                            const ag = longRomData?.agendas.find(a => a.agenda_id === sel);
-                            setManualOverrides(prev => ({
-                              ...prev,
-                              [m.mom_agenda_idx]: { id: sel, title: ag?.agenda_title || sel },
-                            }));
-                          }
-                        }}
-                        style={{
-                          marginTop: 4, width: '100%', padding: '0.3rem 0.5rem',
-                          borderRadius: 6, border: '1px solid hsl(var(--border))',
-                          background: 'hsl(var(--background))', color: 'hsl(var(--foreground))',
-                          fontSize: '0.72rem', fontFamily: 'Inter, sans-serif',
-                        }}
-                      >
-                        <option value="">— Select meeting agenda —</option>
-                        {longRomData?.agendas.map(a => (
-                          <option key={a.agenda_id} value={a.agenda_id}>{a.agenda_title}</option>
-                        ))}
-                      </select>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Save button */}
-              {allMatched && (
-                <div style={{ marginTop: '1rem' }}>
-                  {saved && (
-                    <div style={{ fontSize: '0.78rem', color: 'hsl(142 70% 35%)', marginBottom: 8 }}>
-                      <Check size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                      Saved to database successfully!
-                    </div>
-                  )}
-                  {saveError && (
-                    <div style={{ fontSize: '0.75rem', color: 'hsl(var(--destructive))', marginBottom: 8 }}>
-                      {saveError}
-                    </div>
-                  )}
-                  <button
-                    style={S.btn()}
-                    onClick={handleSave}
-                    disabled={saving}
-                  >
-                    {saving ? <Loader size={14} className="spin" /> : <Database size={14} />}
-                    {saving ? 'Saving…' : 'Add to Database'}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
-        {/* RIGHT PANEL: Long ROM Points */}
-        <div style={S.card}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
-            <FileText size={16} style={{ color: 'hsl(var(--accent))' }} />
-            <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>Long ROM Points</span>
+        {/* Existing saved badge */}
+        {existingData.length > 0 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '0 0.85rem', borderRadius: 10,
+            border: `1px solid ${C.greenBorder}`, background: C.greenSoft,
+            alignSelf: 'flex-end', height: 42,
+            fontSize: '0.73rem', fontWeight: 600, color: C.green,
+          }}>
+            <Database size={13} color={C.green} />
+            {existingData.length} agenda{existingData.length !== 1 ? 's' : ''} saved in database
           </div>
-
-          {!selectedMeeting && (
-            <div style={{ color: 'hsl(var(--muted-foreground))', fontSize: '0.82rem', textAlign: 'center', padding: '2rem' }}>
-              Select a meeting to view its Long ROM points
-            </div>
-          )}
-
-          {selectedMeeting && loadingRom && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'hsl(var(--muted-foreground))' }}>
-              <Loader size={14} className="spin" /> Loading ROM data…
-            </div>
-          )}
-
-          {selectedMeeting && !loadingRom && longRomData && !longRomData.available && (
-            <div style={{ textAlign: 'center', padding: '2rem' }}>
-              <AlertCircle size={32} style={{ color: 'hsl(var(--muted-foreground))', marginBottom: 12 }} />
-              <p style={{ fontSize: '0.82rem', color: 'hsl(var(--muted-foreground))', marginBottom: '1rem' }}>
-                Long ROM Points are not available for this meeting.
-              </p>
-              <button
-                style={S.btn()}
-                onClick={() => navigate(`/dashboard/history/${selectedMeeting.id}/rom`)}
-              >
-                <ExternalLink size={14} /> Generate ROM
-              </button>
-            </div>
-          )}
-
-          {selectedMeeting && !loadingRom && longRomData?.available && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
-              {longRomData.agendas.map(ag => (
-                <div key={ag.agenda_id} style={{
-                  borderRadius: 8,
-                  border: '1px solid hsl(var(--border))',
-                  overflow: 'hidden',
-                }}>
-                  <div style={{
-                    padding: '0.5rem 0.75rem',
-                    background: 'hsl(var(--muted) / .5)',
-                    fontWeight: 700, fontSize: '0.8rem',
-                    borderBottom: '1px solid hsl(var(--border))',
-                  }}>
-                    {ag.agenda_title}
-                    <span style={{ marginLeft: 8, fontWeight: 400, fontSize: '0.7rem', color: 'hsl(var(--muted-foreground))' }}>
-                      ({ag.discussion_points.length} point{ag.discussion_points.length !== 1 ? 's' : ''})
-                    </span>
-                  </div>
-                  <div style={{ padding: '0.5rem 0.75rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {ag.discussion_points.slice(0, 10).map((pt: any, i: number) => (
-                      <div key={i} style={{
-                        fontSize: '0.75rem', color: 'hsl(var(--foreground))',
-                        padding: '0.3rem 0.5rem',
-                        borderLeft: '2px solid hsl(var(--accent) / .4)',
-                        background: 'hsl(var(--accent) / .04)',
-                        borderRadius: '0 4px 4px 0',
-                      }}>
-                        {pt.polished_text || pt.text || JSON.stringify(pt)}
-                      </div>
-                    ))}
-                    {ag.discussion_points.length > 10 && (
-                      <div style={{ fontSize: '0.72rem', color: 'hsl(var(--muted-foreground))', textAlign: 'center' }}>
-                        + {ag.discussion_points.length - 10} more points
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Preview: side-by-side when we have matches */}
-      {matches.length > 0 && longRomData?.available && (
-        <div style={S.card}>
-          <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: '1rem' }}>Data Preview</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {matches.map((m, idx) => {
-              const override = manualOverrides[m.mom_agenda_idx];
-              const meetingAgendaId = override?.id || m.meeting_agenda_id;
-              const longAg = longRomData.agendas.find(a => a.agenda_id === meetingAgendaId);
-              const momAg = momAgendas[m.mom_agenda_idx];
-              if (!longAg || !momAg) return null;
+      {/* ── Warning if meeting has no Long ROM ─────────────────────────────── */}
+      {selectedMeeting && !loadingRom && longRomData && !longRomData.available && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '0.85rem 1.1rem',
+          borderRadius: 10, border: `1px solid ${C.amberBorder}`, background: C.amberSoft,
+        }}>
+          <AlertCircle size={16} color={C.amber} style={{ flexShrink: 0 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '0.82rem', fontWeight: 600, color: C.amber }}>Long ROM not available for this meeting</div>
+            <div style={{ fontSize: '0.72rem', color: C.mutedFg }}>Generate the Long ROM first, then return here to map with manual ROM.</div>
+          </div>
+          <button
+            onClick={() => navigate(`/dashboard/history/${selectedMeeting.id}/rom`)}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '0.38rem 0.8rem',
+              borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: C.accent, color: 'white', fontSize: '0.74rem', fontWeight: 600, fontFamily: 'Inter, sans-serif',
+            }}
+          >
+            <ExternalLink size={12} /> Go to ROM
+          </button>
+        </div>
+      )}
+
+      {/* ════ MAIN WORKSPACE: Side-by-Side Agenda Mapping ═════════════════════ */}
+      {selectedMeeting && longRomData?.available && (
+        <>
+          {/* Section column title headers */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem',
+            padding: '0 0.2rem',
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '0.5rem 0.75rem', borderRadius: 8,
+              background: C.accentSoft, border: `1px solid ${C.accentBorder}`,
+            }}>
+              <BookOpen size={14} color={C.accent} />
+              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: C.accent, flex: 1 }}>Generated Long Points</span>
+              <span style={{ fontSize: '0.67rem', color: C.mutedFg }}>
+                {longRomData.agendas.length} agendas · {totalLongPoints} total points
+              </span>
+            </div>
+
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '0.5rem 0.75rem', borderRadius: 8,
+              background: C.purpleSoft, border: `1px solid ${C.purpleBorder}`,
+            }}>
+              <Layers size={14} color={C.purple} />
+              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: C.purple, flex: 1 }}>Manual ROM</span>
+              <span style={{ fontSize: '0.67rem', color: C.mutedFg }}>
+                {momAgendas.length > 0 ? `${momAgendas.length} sections · ${totalManualPoints} points` : 'Upload file above'}
+              </span>
+            </div>
+          </div>
+
+          {/* Agenda-by-Agenda Rows */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+            {longRomData.agendas.map((ag, agIdx) => {
+              const mappedIndices = agendaMapping[ag.agenda_id] || [];
+              const isMapped = mappedIndices.length > 0;
+              const isCollapsed = collapsedAgendas.has(ag.agenda_id);
+
+              // Find auto match info for badge
+              const matchInfo = autoMatches.find(m => m.meeting_agenda_id === ag.agenda_id);
+
               return (
-                <div key={idx} style={{ borderRadius: 8, border: '1px solid hsl(var(--border))', overflow: 'hidden' }}>
+                <div
+                  key={ag.agenda_id}
+                  style={{
+                    border: `1.5px solid ${isMapped ? C.greenBorder : C.border}`,
+                    borderRadius: 12, overflow: 'hidden', background: C.card,
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+                    transition: 'border-color 0.15s',
+                  }}
+                >
+                  {/* ── Unified Agenda Header ───────────────────────────────── */}
                   <div style={{
-                    padding: '0.5rem 0.75rem',
-                    background: 'hsl(var(--muted) / .5)',
-                    fontWeight: 700, fontSize: '0.8rem',
-                    borderBottom: '1px solid hsl(var(--border))',
+                    padding: '0.6rem 0.9rem',
+                    background: isMapped ? C.greenSoft : 'hsl(var(--muted) / .4)',
+                    borderBottom: `1px solid ${isMapped ? C.greenBorder : C.border}`,
+                    display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
                   }}>
-                    {longAg.agenda_title}
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
-                    <div style={{ padding: '0.75rem', borderRight: '1px solid hsl(var(--border))' }}>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'hsl(var(--accent))', marginBottom: 8 }}>LONG ROM POINTS</div>
-                      {longAg.discussion_points.slice(0, 5).map((pt: any, i: number) => (
-                        <div key={i} style={{ fontSize: '0.72rem', marginBottom: 4, paddingLeft: 8, borderLeft: '2px solid hsl(var(--accent) / .3)' }}>
-                          {pt.polished_text || pt.text || ''}
-                        </div>
-                      ))}
+                    {/* Expand/Collapse toggle */}
+                    <button
+                      onClick={() => setCollapsedAgendas(prev => {
+                        const n = new Set(prev);
+                        n.has(ag.agenda_id) ? n.delete(ag.agenda_id) : n.add(ag.agenda_id);
+                        return n;
+                      })}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: C.fg, display: 'flex', alignItems: 'center' }}
+                    >
+                      {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    </button>
+
+                    {/* Agenda index & title */}
+                    <div style={{ flex: 1, minWidth: 200, display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <span style={{
+                        fontSize: '0.67rem', fontWeight: 800, padding: '2px 6px',
+                        borderRadius: 5, background: C.bg, border: `1px solid ${C.border}`,
+                        color: C.mutedFg, letterSpacing: '0.04em',
+                      }}>
+                        AGENDA {agIdx + 1}
+                      </span>
+                      <span style={{ fontSize: '0.84rem', fontWeight: 700, color: C.fg }}>
+                        {ag.agenda_title}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: C.mutedFg }}>
+                        ({ag.discussion_points.length} long point{ag.discussion_points.length !== 1 ? 's' : ''})
+                      </span>
                     </div>
-                    <div style={{ padding: '0.75rem' }}>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'hsl(280 80% 60%)', marginBottom: 8 }}>MANUAL MoM POINTS</div>
-                      {momAg.points.slice(0, 5).map((pt, i) => (
-                        <div key={i} style={{ fontSize: '0.72rem', marginBottom: 4, paddingLeft: 8, borderLeft: '2px solid hsl(280 80% 60% / .3)' }}>
-                          {pt}
+
+                    {/* Mapping control dropdown */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      {momAgendas.length > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: '0.68rem', fontWeight: 600, color: C.mutedFg }}>
+                            Manual Agenda:
+                          </span>
+                          <select
+                            value={mappedIndices.length === 1 ? mappedIndices[0].toString() : mappedIndices.length > 1 ? '__multiple__' : ''}
+                            onChange={e => setSingleManualSection(ag.agenda_id, e.target.value)}
+                            style={{
+                              fontSize: '0.74rem', padding: '0.28rem 0.55rem', borderRadius: 7,
+                              border: `1.5px solid ${isMapped ? C.green : C.border}`,
+                              background: C.bg, color: C.fg, fontFamily: 'Inter, sans-serif',
+                              cursor: 'pointer', outline: 'none', maxWidth: 240,
+                            }}
+                          >
+                            <option value="">— Unmapped (None) —</option>
+                            {momAgendas.map((mAg, mIdx) => (
+                              <option key={mIdx} value={mIdx.toString()}>
+                                {mAg.agenda_title} ({mAg.points.length} pts)
+                              </option>
+                            ))}
+                          </select>
                         </div>
-                      ))}
+                      )}
+
+                      {/* Status indicator badge */}
+                      {isMapped ? (
+                        <span style={{
+                          fontSize: '0.65rem', fontWeight: 700, padding: '2px 7px',
+                          borderRadius: 6, background: C.green, color: 'white',
+                          display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                        }}>
+                          <Check size={10} /> Mapped
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontSize: '0.65rem', fontWeight: 600, padding: '2px 7px',
+                          borderRadius: 6, background: C.amberSoft, color: C.amber,
+                          border: `1px solid ${C.amberBorder}`, flexShrink: 0,
+                        }}>
+                          Unmapped
+                        </span>
+                      )}
+
+                      {matchInfo && matchInfo.confidence > 0 && (
+                        <span style={{ fontSize: '0.62rem', color: C.mutedFg }}>
+                          {(matchInfo.confidence * 100).toFixed(0)}% auto-confidence
+                        </span>
+                      )}
                     </div>
                   </div>
+
+                  {/* ── Side-by-Side Body ───────────────────────────────────── */}
+                  {!isCollapsed && (
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: '1fr 1fr',
+                      borderTop: 'none',
+                    }}>
+                      {/* Left: Generated Long Points */}
+                      <div style={{
+                        padding: '0.75rem 1rem',
+                        borderRight: `1px solid ${C.border}`,
+                        display: 'flex', flexDirection: 'column', gap: 7,
+                        background: 'hsl(var(--muted) / .08)',
+                      }}>
+                        <div style={{ fontSize: '0.68rem', fontWeight: 700, color: C.accent, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          Generated Discussion Points ({ag.discussion_points.length})
+                        </div>
+
+                        {ag.discussion_points.length === 0 ? (
+                          <div style={{ fontSize: '0.75rem', color: C.mutedFg, fontStyle: 'italic', padding: '0.5rem 0' }}>
+                            No discussion points in this agenda.
+                          </div>
+                        ) : (
+                          ag.discussion_points.map((pt, ptIdx) => {
+                            const ptText = pt.polished_text || pt.text || (typeof pt === 'string' ? pt : JSON.stringify(pt));
+                            const speaker = pt.speaker || pt.speakers?.[0] || null;
+
+                            return (
+                              <div
+                                key={ptIdx}
+                                style={{
+                                  display: 'flex', alignItems: 'flex-start', gap: 8,
+                                  fontSize: '0.76rem', color: C.fg, lineHeight: 1.55,
+                                  padding: '0.35rem 0.5rem', borderRadius: 6,
+                                  background: 'hsl(var(--card))',
+                                  border: `1px solid hsl(var(--border) / .6)`,
+                                }}
+                              >
+                                <span style={{ color: C.accent, fontWeight: 700, marginTop: 1 }}>•</span>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  {speaker && (
+                                    <span style={{
+                                      fontSize: '0.62rem', fontWeight: 700,
+                                      color: C.mutedFg, marginRight: 6,
+                                      textTransform: 'uppercase', letterSpacing: '0.04em',
+                                    }}>
+                                      [{speaker}]
+                                    </span>
+                                  )}
+                                  <span>{ptText}</span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+
+                      {/* Right: Manual ROM Content */}
+                      <div style={{
+                        padding: '0.75rem 1rem',
+                        display: 'flex', flexDirection: 'column', gap: 7,
+                        background: isMapped ? C.purpleSoft : 'hsl(var(--muted) / .04)',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: '0.68rem', fontWeight: 700, color: C.purple, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            Manual ROM Content
+                          </span>
+
+                          {/* Multi-section selector if needed */}
+                          {momAgendas.length > 0 && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <select
+                                value=""
+                                onChange={e => {
+                                  if (e.target.value) {
+                                    assignManualSection(ag.agenda_id, parseInt(e.target.value, 10));
+                                  }
+                                }}
+                                style={{
+                                  fontSize: '0.64rem', padding: '1px 5px', borderRadius: 5,
+                                  border: `1px solid ${C.border}`, background: C.bg, color: C.fg,
+                                  fontFamily: 'Inter, sans-serif', cursor: 'pointer', outline: 'none',
+                                }}
+                              >
+                                <option value="">+ Add manual section</option>
+                                {momAgendas.map((mAg, mIdx) => (
+                                  <option key={mIdx} value={mIdx.toString()} disabled={mappedIndices.includes(mIdx)}>
+                                    {mAg.agenda_title}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Mapped section tags */}
+                        {mappedIndices.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 2 }}>
+                            {mappedIndices.map(mIdx => {
+                              const mAg = momAgendas[mIdx];
+                              if (!mAg) return null;
+                              return (
+                                <span
+                                  key={mIdx}
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                                    fontSize: '0.67rem', fontWeight: 600, padding: '2px 7px',
+                                    borderRadius: 6, background: C.purple, color: 'white',
+                                  }}
+                                >
+                                  <Tag size={10} />
+                                  {mAg.agenda_title}
+                                  <button
+                                    onClick={() => removeManualSection(ag.agenda_id, mIdx)}
+                                    style={{
+                                      background: 'none', border: 'none', cursor: 'pointer',
+                                      color: 'white', padding: 0, marginLeft: 2,
+                                      display: 'inline-flex', alignItems: 'center',
+                                    }}
+                                    title="Unmap this section"
+                                  >
+                                    <X size={11} />
+                                  </button>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {/* Mapped points content */}
+                        {mappedIndices.length === 0 ? (
+                          <div style={{
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                            padding: '2rem 1rem', textAlign: 'center', color: C.mutedFg, gap: 8,
+                          }}>
+                            <Layers size={22} style={{ opacity: 0.3 }} />
+                            <div style={{ fontSize: '0.76rem' }}>
+                              {momAgendas.length > 0
+                                ? 'No manual ROM section mapped to this agenda.'
+                                : 'Upload a manual ROM file above to view and map content.'}
+                            </div>
+                          </div>
+                        ) : (
+                          mappedIndices.map(mIdx => {
+                            const mAg = momAgendas[mIdx];
+                            if (!mAg) return null;
+
+                            return (
+                              <div key={mIdx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {mappedIndices.length > 1 && (
+                                  <div style={{ fontSize: '0.67rem', fontWeight: 700, color: C.purple }}>
+                                    {mAg.agenda_title}:
+                                  </div>
+                                )}
+                                {mAg.points.map((pointText, pIdx) => (
+                                  <div
+                                    key={pIdx}
+                                    style={{
+                                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                                      fontSize: '0.76rem', color: C.fg, lineHeight: 1.55,
+                                      padding: '0.35rem 0.5rem', borderRadius: 6,
+                                      background: 'hsl(var(--card))',
+                                      border: `1px solid ${C.purpleBorder}`,
+                                    }}
+                                  >
+                                    <span style={{ color: C.purple, fontWeight: 700, marginTop: 1 }}>•</span>
+                                    <span style={{ flex: 1 }}>{pointText}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
+          </div>
+
+          {/* ── Unmapped Manual Sections Drawer ──────────────────────────────── */}
+          {momAgendas.length > 0 && unmappedMomSections.length > 0 && (
+            <div style={{
+              border: `1px solid ${C.amberBorder}`, borderRadius: 10,
+              background: C.amberSoft, overflow: 'hidden',
+            }}>
+              <div
+                onClick={() => setShowUnmappedDrawer(v => !v)}
+                style={{
+                  padding: '0.6rem 0.9rem', display: 'flex', alignItems: 'center', gap: 8,
+                  cursor: 'pointer', userSelect: 'none',
+                }}
+              >
+                <AlertCircle size={14} color={C.amber} />
+                <span style={{ fontSize: '0.78rem', fontWeight: 700, color: C.amber, flex: 1 }}>
+                  Unmapped Manual ROM Sections ({unmappedMomSections.length})
+                </span>
+                <span style={{ fontSize: '0.68rem', color: C.mutedFg }}>
+                  These sections are not yet mapped to any generated agenda
+                </span>
+                {showUnmappedDrawer ? <ChevronDown size={13} color={C.amber} /> : <ChevronRight size={13} color={C.amber} />}
+              </div>
+
+              {showUnmappedDrawer && (
+                <div style={{
+                  padding: '0.7rem 0.9rem', display: 'flex', flexDirection: 'column', gap: 8,
+                  borderTop: `1px solid ${C.amberBorder}`, background: C.card,
+                }}>
+                  {unmappedMomSections.map(sec => (
+                    <div
+                      key={sec.idx}
+                      style={{
+                        padding: '0.5rem 0.75rem', borderRadius: 8,
+                        border: `1px solid ${C.border}`, background: C.bg,
+                        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
+                      }}
+                    >
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: C.fg, marginBottom: 4 }}>
+                          {sec.agenda_title}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          {sec.points.slice(0, 3).map((p, pi) => (
+                            <div key={pi} style={{ fontSize: '0.72rem', color: C.mutedFg }}>
+                              • {p}
+                            </div>
+                          ))}
+                          {sec.points.length > 3 && (
+                            <div style={{ fontSize: '0.68rem', color: C.mutedFg, fontStyle: 'italic' }}>
+                              + {sec.points.length - 3} more items…
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Quick assign dropdown */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: '0.68rem', color: C.mutedFg }}>Map to:</span>
+                        <select
+                          value=""
+                          onChange={e => {
+                            if (e.target.value) assignManualSection(e.target.value, sec.idx);
+                          }}
+                          style={{
+                            fontSize: '0.72rem', padding: '0.25rem 0.5rem', borderRadius: 6,
+                            border: `1px solid ${C.border}`, background: C.bg, color: C.fg,
+                            fontFamily: 'Inter, sans-serif', cursor: 'pointer', outline: 'none',
+                          }}
+                        >
+                          <option value="">— Select Agenda —</option>
+                          {longRomData.agendas.map(ag => (
+                            <option key={ag.agenda_id} value={ag.agenda_id}>
+                              {ag.agenda_title}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ════ BOTTOM SAVE BAR ═════════════════════════════════════════════ */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            padding: '0.75rem 1.1rem', borderRadius: 10,
+            border: `1px solid ${C.border}`, background: C.card,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+          }}>
+            {/* Stats */}
+            <div style={{ flex: 1, display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.76rem', color: C.mutedFg }}>
+                <strong style={{ color: C.fg }}>{mappedAgendasCount}</strong> of{' '}
+                <strong style={{ color: C.fg }}>{longRomData.agendas.length}</strong> agendas mapped
+              </span>
+              {saveSuccess && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.76rem', color: C.green, fontWeight: 600 }}>
+                  <Check size={14} /> Training data saved to database successfully!
+                </span>
+              )}
+              {saveError && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.76rem', color: C.red }}>
+                  <AlertCircle size={14} /> {saveError}
+                </span>
+              )}
+            </div>
+
+            {/* Save to Database Button */}
+            <button
+              id="rom-training-save-btn"
+              onClick={handleSave}
+              disabled={saving || mappedAgendasCount === 0}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 7,
+                padding: '0.55rem 1.3rem', borderRadius: 9, border: 'none',
+                cursor: saving || mappedAgendasCount === 0 ? 'not-allowed' : 'pointer',
+                background: mappedAgendasCount > 0 ? C.accent : C.muted,
+                color: mappedAgendasCount > 0 ? 'white' : C.mutedFg,
+                fontSize: '0.84rem', fontWeight: 700, fontFamily: 'Inter, sans-serif',
+                opacity: saving ? 0.7 : 1, transition: 'all 0.15s',
+                boxShadow: mappedAgendasCount > 0 ? `0 0 16px hsl(var(--accent) / .3)` : 'none',
+              }}
+            >
+              {saving ? <Loader size={14} className="spin" /> : <Database size={14} />}
+              {saving ? 'Saving…' : `Save ${mappedAgendasCount} Mapped Agenda${mappedAgendasCount !== 1 ? 's' : ''} to Database`}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Empty State: No meeting selected ──────────────────────────────── */}
+      {!selectedMeeting && (
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          padding: '4.5rem 2rem', gap: 16, color: C.mutedFg,
+          border: `1px dashed ${C.border}`, borderRadius: 12, background: C.card,
+        }}>
+          <BookOpen size={44} style={{ opacity: 0.2 }} />
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: '0.96rem', fontWeight: 700, color: C.fg, marginBottom: 6 }}>
+              Select a Meeting to Begin
+            </div>
+            <div style={{ fontSize: '0.78rem', maxWidth: 420, lineHeight: 1.6 }}>
+              Choose a meeting with generated Long ROM points, then upload your manually written ROM document
+              to map agendas and save training data.
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 24, marginTop: 6 }}>
+            {[
+              { n: '1', label: 'Select Meeting' },
+              { n: '2', label: 'Upload Manual ROM' },
+              { n: '3', label: 'Review Agenda Mapping' },
+              { n: '4', label: 'Save to Database' },
+            ].map(step => (
+              <div key={step.n} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: '50%',
+                  border: `1.5px solid ${C.accentBorder}`, color: C.accent,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.78rem', fontWeight: 700,
+                }}>
+                  {step.n}
+                </div>
+                <div style={{ fontSize: '0.68rem', color: C.mutedFg, textAlign: 'center' }}>{step.label}</div>
+              </div>
+            ))}
           </div>
         </div>
       )}

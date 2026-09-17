@@ -140,6 +140,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "max_tokens_rom_mom_expansion": 3000,
         "max_tokens_rom_agenda_assign_batch": 4096,
         "max_tokens_rom_agenda_doc_points": 1024,
+        "max_tokens_rom_version_short": 4096,
+        "max_tokens_rom_version_medium": 4096,
     }
 
     if not doc:
@@ -309,6 +311,7 @@ async def update_settings(
                         max_tokens_speaker_summary, max_tokens_speaker_key_points, max_tokens_speaker_action_items,
                         max_tokens_collection_chat, max_tokens_collection_compare, max_tokens_collection_topic_growth, max_tokens_vocab_extractor,
                         restrict_reassignment_to_meeting_speakers, rom_short_model_mode, rom_short_model_variant_id,
+                        max_tokens_rom_version_short, max_tokens_rom_version_medium,
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
@@ -322,6 +325,7 @@ async def update_settings(
                         :max_tokens_speaker_summary, :max_tokens_speaker_key_points, :max_tokens_speaker_action_items,
                         :max_tokens_collection_chat, :max_tokens_collection_compare, :max_tokens_collection_topic_growth, :max_tokens_vocab_extractor,
                         :restrict_reassignment_to_meeting_speakers, :rom_short_model_mode, :rom_short_model_variant_id,
+                        :max_tokens_rom_version_short, :max_tokens_rom_version_medium,
                         :updated_at)
                 """),
                 {
@@ -377,6 +381,8 @@ async def update_settings(
                     "restrict_reassignment_to_meeting_speakers": patch.get("restrict_reassignment_to_meeting_speakers", 0),
                     "rom_short_model_mode": patch.get("rom_short_model_mode", "base"),
                     "rom_short_model_variant_id": patch.get("rom_short_model_variant_id", None),
+                    "max_tokens_rom_version_short": patch.get("max_tokens_rom_version_short", 4096),
+                    "max_tokens_rom_version_medium": patch.get("max_tokens_rom_version_medium", 4096),
                     "updated_at": dt_to_str(now),
                 },
             )

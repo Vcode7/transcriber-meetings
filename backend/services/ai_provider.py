@@ -3399,6 +3399,8 @@ class QwenProvider(AIProvider):
             "max_tokens_raw_mom_to_mom": 3000,
             "max_tokens_raw_mom_extraction": 1024,
             "max_tokens_raw_mom_repair": 1024,
+            "max_tokens_rom_version_short": 4096,
+            "max_tokens_rom_version_medium": 4096,
         }
 
         import sqlite3

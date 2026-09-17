@@ -96,6 +96,8 @@ interface UserSettings {
   max_tokens_rom_mom_expansion?: number
   max_tokens_rom_agenda_assign_batch?: number
   max_tokens_rom_agenda_doc_points?: number
+  max_tokens_rom_version_short?: number
+  max_tokens_rom_version_medium?: number
 
   // Task max tokens
   max_tokens_mom?: number
@@ -1211,6 +1213,8 @@ export default function SettingsPage() {
                     <TokenInput label="Stage 3 Previous MoM Expansion" val={settings.max_tokens_rom_mom_expansion ?? 3000} onChange={v => setSettings({ ...settings, max_tokens_rom_mom_expansion: v })} />
                     <TokenInput label="Stage 3 Agenda Batch Mapping" val={settings.max_tokens_rom_agenda_assign_batch ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_agenda_assign_batch: v })} />
                     <TokenInput label="Stage 3 Supporting Doc Points" val={settings.max_tokens_rom_agenda_doc_points ?? 1024} onChange={v => setSettings({ ...settings, max_tokens_rom_agenda_doc_points: v })} />
+                    <TokenInput label="Short ROM Version Generation" val={settings.max_tokens_rom_version_short ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_version_short: v })} />
+                    <TokenInput label="Medium ROM Version Generation" val={settings.max_tokens_rom_version_medium ?? 4096} onChange={v => setSettings({ ...settings, max_tokens_rom_version_medium: v })} />
                   </div>
                 )}
               </div>

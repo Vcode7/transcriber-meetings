@@ -883,6 +883,55 @@ def _convert_legacy_doc_or_ppt(file_path: str, target_ext: str) -> str | None:
     return None
 
 
+def _extract_doc_binary(file_path: str) -> str:
+    """
+    Fallback text extractor for legacy binary .doc (Word 97-2003) files when LibreOffice is not installed.
+    Extracts UTF-16LE and ASCII text runs from the binary stream, filtering out binary metadata/noise.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        paragraphs = []
+        seen = set()
+
+        # 1. UTF-16LE runs (Word documents primarily store Unicode text in UTF-16LE)
+        utf16_pattern = re.compile(rb'(?:[\x20-\x7e\r\n\t]\x00){4,}')
+        for match in utf16_pattern.finditer(data):
+            try:
+                chunk = match.group(0).decode("utf-16le", errors="ignore").strip()
+                # Skip known Word metadata/font names/boilerplates
+                if len(chunk) >= 3 and not chunk.startswith((
+                    "Times New Roman", "Calibri", "Arial", "Symbol", "Normal.dot",
+                    "Courier New", "Cambria", "Tahoma", "Verdana", "Segoe UI"
+                )):
+                    if chunk not in seen:
+                        seen.add(chunk)
+                        paragraphs.append(chunk)
+            except Exception:
+                pass
+
+        # 2. ASCII/CP1252 runs (for older 8-bit text streams in .doc)
+        ascii_pattern = re.compile(rb'[\x20-\x7e\r\n\t]{6,}')
+        for match in ascii_pattern.finditer(data):
+            try:
+                chunk = match.group(0).decode("latin1", errors="ignore").strip()
+                if len(chunk) >= 12 and not any(m in chunk for m in [
+                    "WordDocument", "Microsoft Word", "CompObj", "SummaryInformation",
+                    "DocumentSummaryInformation", "Normal.dotm", "Heading", "Table Grid"
+                ]):
+                    if chunk not in seen:
+                        seen.add(chunk)
+                        paragraphs.append(chunk)
+            except Exception:
+                pass
+
+        return "\n\n".join(paragraphs).strip()
+    except Exception as e:
+        logger.warning(f"[DocExtractor] Binary .doc fallback extraction failed for {file_path}: {e}")
+        return ""
+
+
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md",
     ".png", ".jpg", ".jpeg", ".webp",
@@ -892,8 +941,30 @@ SUPPORTED_EXTENSIONS = {
 UNSUPPORTED_EXTENSIONS: set[str] = set()
 
 
-def extract_text_from_file(file_path: str, filename: str) -> str:
+def extract_text_from_bytes(content: bytes, filename: str = "document") -> str:
+    """Extract plain text from in-memory file bytes by writing to a temporary file."""
+    import tempfile
+    suffix = os.path.splitext(filename.lower())[1] or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        return extract_text_from_file(tmp_path, filename)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def extract_text_from_file(file_path: str | bytes, filename: str = "", content_type: str = "") -> str:
     """Extract plain text from a document, image, or spreadsheet file."""
+    if isinstance(file_path, (bytes, bytearray)):
+        return extract_text_from_bytes(file_path, filename or "uploaded_file")
+
+    if not filename:
+        filename = os.path.basename(file_path)
+
     ext = os.path.splitext(filename.lower())[1]
 
     if ext == ".pdf":
@@ -914,7 +985,7 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
                 except Exception:
                     pass
         else:
-            text = ""
+            text = _extract_doc_binary(file_path)
     elif ext == ".ppt":
         converted = _convert_legacy_doc_or_ppt(file_path, ".pptx")
         if converted and os.path.isfile(converted):

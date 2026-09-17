@@ -64,31 +64,56 @@ async def extract_mom(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Upload a manual MoM file (PDF/DOCX/TXT).
+    Upload a manual MoM file (PDF/DOCX/DOC/TXT).
     Extracts agenda sections and points exactly as written.
     """
     user_id = _uid(current_user)
 
     content = await file.read()
-    filename = file.filename or ""
-    content_type = file.content_type or ""
+    filename = file.filename or "uploaded_mom"
 
-    # Extract text from file
+    import tempfile, os, asyncio
+    suffix = os.path.splitext(filename.lower())[1] or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    text_content = ""
     try:
         from services.doc_extractor import extract_text_from_file
-        text_content = extract_text_from_file(content, filename, content_type)
+        loop = asyncio.get_running_loop()
+        text_content = await loop.run_in_executor(
+            None, lambda: extract_text_from_file(tmp_path, filename)
+        )
     except Exception as e:
-        # Fallback: try to decode as UTF-8
+        logger.error(f"[RomTraining] extract_text_from_file failed for {filename}: {e}", exc_info=True)
+        if suffix in (".txt", ".md", ".csv", ".json"):
+            try:
+                text_content = content.decode("utf-8", errors="replace")
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Could not extract text from file: {e}")
+        else:
+            raise HTTPException(status_code=400, detail=f"Failed to extract text from {suffix.upper() or 'uploaded'} file: {e}")
+    finally:
         try:
-            text_content = content.decode("utf-8", errors="replace")
+            os.unlink(tmp_path)
         except Exception:
-            raise HTTPException(status_code=400, detail=f"Could not extract text from file: {e}")
+            pass
 
-    if not text_content or not text_content.strip():
-        raise HTTPException(status_code=400, detail="No text could be extracted from the uploaded file.")
+    text_content = (text_content or "").strip()
+    if not text_content:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No readable text could be extracted from '{filename}'. Please make sure the file contains text or clear scanned pages.",
+        )
 
-    # Extract MoM structure using LLM
-    agendas = ds.extract_mom_points_from_text(text_content, user_id)
+    logger.info(f"[RomTraining] Extracted {len(text_content)} chars from '{filename}'. Extracting structure with LLM...")
+
+    # Extract MoM structure using LLM in threadpool to avoid blocking event loop
+    loop = asyncio.get_running_loop()
+    agendas = await loop.run_in_executor(
+        None, lambda: ds.extract_mom_points_from_text(text_content, user_id)
+    )
 
     return {
         "agendas": agendas,

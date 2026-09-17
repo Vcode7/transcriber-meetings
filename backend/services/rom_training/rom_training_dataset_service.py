@@ -20,14 +20,30 @@ logger = logging.getLogger(__name__)
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _similarity(a: str, b: str) -> float:
-    """Simple word-overlap Jaccard similarity for agenda title matching."""
-    a_words = set(re.sub(r'[^a-z0-9 ]', '', a.lower()).split())
-    b_words = set(re.sub(r'[^a-z0-9 ]', '', b.lower()).split())
+    """Word-overlap Jaccard + substring similarity for agenda title matching."""
+    if not a or not b:
+        return 0.0
+    a_clean = re.sub(r'[^a-z0-9 ]', '', str(a).lower()).strip()
+    b_clean = re.sub(r'[^a-z0-9 ]', '', str(b).lower()).strip()
+    if not a_clean or not b_clean:
+        return 0.0
+    if a_clean == b_clean:
+        return 1.0
+    # Exact substring match if meaningful length
+    if (len(a_clean) >= 4 and a_clean in b_clean) or (len(b_clean) >= 4 and b_clean in a_clean):
+        min_len = min(len(a_clean), len(b_clean))
+        max_len = max(len(a_clean), len(b_clean))
+        return round(0.75 + 0.25 * (min_len / max_len), 3)
+
+    a_words = set(a_clean.split())
+    b_words = set(b_clean.split())
     if not a_words or not b_words:
         return 0.0
     intersection = a_words & b_words
     union = a_words | b_words
-    return len(intersection) / union
+    if not union:
+        return 0.0
+    return round(len(intersection) / len(union), 3)
 
 
 def _safe_parse_rom_data(raw_data: Any) -> dict:
@@ -184,6 +200,104 @@ async def get_meetings_with_rom_status(user_id: str, db: AsyncSession) -> List[D
 
 # ── MoM Extraction ──────────────────────────────────────────────────────────
 
+def _parse_llm_json_response(raw: str) -> List[Dict[str, Any]]:
+    """Parse JSON array of agendas from LLM output, resilient to markdown, preambles, and malformed JSON."""
+    if not raw or not str(raw).strip():
+        return []
+
+    # Strip thinking tags
+    cleaned = re.sub(r'<(?:think|thought)>.*?</(?:think|thought)>', '', str(raw), flags=re.DOTALL).strip()
+
+    candidate_texts = []
+    # If markdown code block exists, extract its content
+    code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', cleaned, re.IGNORECASE)
+    if code_block_match:
+        candidate_texts.append(code_block_match.group(1).strip())
+
+    # Search for outer JSON array [...]
+    array_match = re.search(r'(\[\s*\{[\s\S]*\}\s*\])', cleaned)
+    if array_match:
+        candidate_texts.append(array_match.group(1).strip())
+
+    # Search for outer JSON object {...}
+    obj_match = re.search(r'(\{\s*"(?:agendas|sections|items|points)"[\s\S]*\})', cleaned)
+    if obj_match:
+        candidate_texts.append(obj_match.group(1).strip())
+
+    candidate_texts.append(cleaned)
+
+    parsed = None
+    for cand in candidate_texts:
+        if not cand:
+            continue
+        try:
+            parsed = json.loads(cand)
+            if parsed:
+                break
+        except Exception:
+            pass
+
+    # Fallback to json_repair if standard json.loads failed
+    if parsed is None:
+        try:
+            import json_repair
+            for cand in candidate_texts:
+                if not cand:
+                    continue
+                try:
+                    repaired = json_repair.loads(cand)
+                    if repaired:
+                        parsed = repaired
+                        break
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+
+    # Unwrap if wrapped in a dict e.g. {"agendas": [...]} or {"items": [...]}
+    if isinstance(parsed, dict):
+        for k in ("agendas", "sections", "items", "data", "results", "points"):
+            if k in parsed and isinstance(parsed[k], list):
+                parsed = parsed[k]
+                break
+        else:
+            if "agenda_title" in parsed:
+                parsed = [parsed]
+            else:
+                parsed = []
+
+    if not isinstance(parsed, list):
+        return []
+
+    normalized = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("agenda_title") or item.get("title") or item.get("heading") or "General").strip()
+        raw_pts = item.get("points") or item.get("bullet_points") or item.get("items") or []
+        if isinstance(raw_pts, str):
+            pts = [p.strip() for p in raw_pts.splitlines() if p.strip()]
+        elif isinstance(raw_pts, list):
+            pts = []
+            for p in raw_pts:
+                if isinstance(p, dict):
+                    p_text = str(p.get("text") or p.get("point") or "").strip()
+                else:
+                    p_text = str(p).strip()
+                if p_text:
+                    pts.append(p_text)
+        else:
+            pts = []
+
+        if title or pts:
+            normalized.append({
+                "agenda_title": title or "General",
+                "points": pts,
+            })
+
+    return normalized
+
+
 def extract_mom_points_from_text(text_content: str, user_id: str) -> List[Dict[str, Any]]:
     """
     Extract agenda items and their points from manually written MoM text.
@@ -192,9 +306,11 @@ def extract_mom_points_from_text(text_content: str, user_id: str) -> List[Dict[s
     Returns list of {agenda_title, points: [str]}.
     """
     from services.ai_provider import get_provider
-    from services.prompt_service import get_prompt_sync
 
     provider = get_provider()
+
+    # Pass up to 24000 chars of text_content
+    prompt_text = text_content[:24000].strip()
 
     prompt = f"""You are a structured data extractor. Extract the agenda sections and their bullet points from the following Minutes of Meeting document.
 
@@ -207,7 +323,7 @@ RULES (STRICTLY FOLLOW):
 6. Do NOT include any explanation or markdown fences.
 
 Minutes of Meeting:
-{text_content[:8000]}
+{prompt_text}
 
 JSON array:"""
 
@@ -217,18 +333,15 @@ JSON array:"""
         else:
             raw = provider._infer(prompt, max_new_tokens=4096)
 
-        # Strip think tags
-        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-        # Strip markdown fences
-        raw = re.sub(r'^```[a-z]*\n?', '', raw).rstrip('`').strip()
-
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
+        parsed = _parse_llm_json_response(raw)
+        if parsed:
+            logger.info(f"[RomTrainingDataset] Successfully extracted {len(parsed)} agendas using LLM.")
             return parsed
-        return []
+        logger.warning("[RomTrainingDataset] LLM returned empty or unparseable JSON array. Falling back to regex.")
     except Exception as e:
         logger.warning(f"[RomTrainingDataset] MoM extraction failed: {e}. Falling back to regex.")
-        return _extract_mom_regex(text_content)
+
+    return _extract_mom_regex(text_content)
 
 
 def _extract_mom_regex(text_content: str) -> List[Dict[str, Any]]:
@@ -242,20 +355,56 @@ def _extract_mom_regex(text_content: str) -> List[Dict[str, Any]]:
         stripped = line.strip()
         if not stripped:
             continue
-        # Detect heading: short line without leading bullet, or ALL CAPS / ends with colon
-        is_heading = (
-            (not re.match(r'^[\-\*•\d]', stripped) and len(stripped) < 80 and stripped.endswith(':'))
-            or re.match(r'^[A-Z][A-Z ]{5,}$', stripped)
-        )
+
+        is_heading = False
+        heading_title = ""
+
+        # Markdown header: #, ##, ###
+        m_md = re.match(r'^#{1,4}\s+(.+)$', stripped)
+        if m_md:
+            is_heading = True
+            heading_title = m_md.group(1).strip()
+
+        # Bold header: **Title**
+        m_bold = re.match(r'^\*\*(.+?)\*\*:?$', stripped)
+        if not is_heading and m_bold:
+            is_heading = True
+            heading_title = m_bold.group(1).strip()
+
+        # Numbered/Lettered agenda: "1. Title", "Agenda 1: Title", "Item 2 - Title", "Section A. Title"
+        m_num = re.match(r'^(?:Agenda\s+\d+|Item\s+\d+|Section\s+[A-Z0-9]+|\d+[\.\)]|[A-Z][\.\)])\s*[:\-–]?\s+(.+)$', stripped, re.IGNORECASE)
+        if not is_heading and m_num and len(stripped) < 120 and not stripped.endswith('.'):
+            is_heading = True
+            heading_title = stripped
+
+        # All caps heading
+        if not is_heading and re.match(r'^[A-Z0-9\s,\-–:]{4,80}$', stripped) and any(c.isalpha() for c in stripped) and len(stripped.split()) <= 10:
+            if not stripped.lower().startswith(('date:', 'time:', 'location:', 'attendees:', 'present:', 'absent:', 'page ')):
+                is_heading = True
+                heading_title = stripped.rstrip(':')
+
+        # Line ending with colon, short, no bullet
+        if not is_heading and stripped.endswith(':') and len(stripped) < 80 and not re.match(r'^[\-\*•\d]', stripped):
+            if not stripped.lower().startswith(('date:', 'time:', 'location:', 'attendees:', 'note:')):
+                is_heading = True
+                heading_title = stripped.rstrip(':')
+
         if is_heading:
-            if current_agenda is not None:
+            if current_agenda is not None and current_points:
                 agendas.append({"agenda_title": current_agenda, "points": current_points})
-            current_agenda = stripped.rstrip(':')
+            current_agenda = heading_title or stripped
             current_points = []
-        elif re.match(r'^[\-\*•]\s+', stripped):
-            point = re.sub(r'^[\-\*•]\s+', '', stripped)
-            current_points.append(point)
-        elif current_agenda and stripped:
+            continue
+
+        # Bullet points: -, *, •, –, or numbered sub-points
+        m_bullet = re.match(r'^(?:[\-\*•–]|\d+[\.\)]|[a-z][\.\)])\s+(.+)$', stripped)
+        if m_bullet:
+            current_points.append(m_bullet.group(1).strip())
+        elif current_points:
+            # Continuation of previous point
+            current_points[-1] = current_points[-1] + " " + stripped
+        elif current_agenda:
+            # First text under heading
             current_points.append(stripped)
 
     if current_agenda is not None and current_points:

@@ -191,6 +191,8 @@ async def connect_db():
                 rom_action_generation_chunk_size INTEGER NOT NULL DEFAULT 10,
                 rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
                 restrict_reassignment_to_meeting_speakers INTEGER NOT NULL DEFAULT 0,
+                max_tokens_rom_version_short INTEGER NOT NULL DEFAULT 4096,
+                max_tokens_rom_version_medium INTEGER NOT NULL DEFAULT 4096,
                 updated_at TEXT NOT NULL
             )
 
@@ -436,6 +438,8 @@ async def connect_db():
             ("max_tokens_vocab_extractor", "INTEGER NOT NULL DEFAULT 512"),
             ("embedding_model", "TEXT NOT NULL DEFAULT 'Qwen3-Embedding-0.6B'"),
             ("restrict_reassignment_to_meeting_speakers", "INTEGER NOT NULL DEFAULT 0"),
+            ("max_tokens_rom_version_short", "INTEGER NOT NULL DEFAULT 4096"),
+            ("max_tokens_rom_version_medium", "INTEGER NOT NULL DEFAULT 4096"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))

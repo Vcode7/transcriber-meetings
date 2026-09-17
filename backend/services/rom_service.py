@@ -4861,7 +4861,7 @@ class RomService:
                     if hasattr(provider, "query"):
                         raw = provider.query(prompt, max_tokens=4096, temperature=0.2)
                     else:
-                        raw = provider._infer(prompt, max_new_tokens=4096)
+                        raw = provider._infer(prompt, task_key=prompt_key)
 
                     # Robustly parse points from LLM output (handles <think>, markdown fences, arrays, bullets)
                     parsed_texts = self._parse_condensed_points(raw)

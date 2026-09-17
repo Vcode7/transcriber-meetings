@@ -95,6 +95,8 @@ class UserSettings(BaseModel):
     max_tokens_rom_mom_expansion: int = Field(default=3000, ge=1)
     max_tokens_rom_agenda_assign_batch: int = Field(default=4096, ge=1)
     max_tokens_rom_agenda_doc_points: int = Field(default=1024, ge=1)
+    max_tokens_rom_version_short: int = Field(default=4096, ge=1)
+    max_tokens_rom_version_medium: int = Field(default=4096, ge=1)
 
     # Low-Volume Speech Transcription Pipeline Enhancements
     enable_vad: bool = True
@@ -224,6 +226,8 @@ class UserSettingsUpdate(BaseModel):
     max_tokens_rom_mom_expansion: int | None = Field(default=None, ge=1)
     max_tokens_rom_agenda_assign_batch: int | None = Field(default=None, ge=1)
     max_tokens_rom_agenda_doc_points: int | None = Field(default=None, ge=1)
+    max_tokens_rom_version_short: int | None = Field(default=None, ge=1)
+    max_tokens_rom_version_medium: int | None = Field(default=None, ge=1)
 
     # Low-Volume Speech Transcription Pipeline Enhancements
     enable_vad: bool | None = None
