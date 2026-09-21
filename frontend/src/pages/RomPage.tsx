@@ -1113,6 +1113,23 @@ export default function RomPage() {
   const [includeActionPointsInRom, setIncludeActionPointsInRom] = useState(false)
   const [togglingActionPoints, setTogglingActionPoints] = useState(false)
 
+  // Reasoning Mode state (Short ROM & Action Point from Enhanced Point)
+  const [reasoningModeShortRom, setReasoningModeShortRom] = useState(false)
+  const [reasoningModeActionPoints, setReasoningModeActionPoints] = useState(false)
+
+  useEffect(() => {
+    api.get('/settings').then(res => {
+      if (res.data) {
+        if (typeof res.data.reasoning_mode_short_rom === 'boolean') {
+          setReasoningModeShortRom(res.data.reasoning_mode_short_rom)
+        }
+        if (typeof res.data.reasoning_mode_action_points === 'boolean') {
+          setReasoningModeActionPoints(res.data.reasoning_mode_action_points)
+        }
+      }
+    }).catch(() => {})
+  }, [])
+
   // Stage 3 – Agenda Discussion Order & Approximate Timeline Optional Controls
   const [discussionOrder, setDiscussionOrder] = useState<string[]>([])
   const [agendaTimeline, setAgendaTimeline] = useState<Record<string, AgendaTimelineRange>>({})
@@ -1627,6 +1644,7 @@ export default function RomPage() {
           return Object.keys(skipped).length > 0 ? skipped : undefined
         })(),
         include_action_points: includeActionPointsInRom,
+        reasoning_mode_action_points: reasoningModeActionPoints,
       })
       const fullData = res.data.rom_data || {
         ...(romData || {} as RomData),
@@ -2362,6 +2380,7 @@ export default function RomPage() {
     try {
       const res = await api.post(`/rom/${id}/final/action-points`, {
         include_action_points: enabled,
+        reasoning_mode: reasoningModeActionPoints,
       })
       if (res.data?.rom_data) {
         setRomData(res.data.rom_data)
@@ -2392,6 +2411,7 @@ export default function RomPage() {
         writing_rules: writingRules || '',
         base_final_rom: baseRom,
         important_points: importantPoints,
+        reasoning_mode: targetVersion === 'short' ? reasoningModeShortRom : false,
       })
       const rewrittenFinalRom = res.data.rewritten_final_rom || res.data.final_rom
       if (rewrittenFinalRom && rewrittenFinalRom.agendas?.length) {
@@ -3386,6 +3406,19 @@ export default function RomPage() {
               />
               <span style={{ fontWeight: 600 }}>Include Action Points</span>
             </label>
+
+            {includeActionPointsInRom && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '.71rem', color: 'hsl(var(--ink))', padding: '.25rem .4rem', borderRadius: 6, background: reasoningModeActionPoints ? 'hsl(205,85%,55%/.12)' : 'transparent', border: `1px solid ${reasoningModeActionPoints ? 'hsl(205,85%,55%/.35)' : 'hsl(var(--border)/.3)'}`, transition: 'all .15s' }} title="Use 2-call Reasoning Mode for Action Points">
+                <input
+                  type="checkbox"
+                  checked={reasoningModeActionPoints}
+                  onChange={e => setReasoningModeActionPoints(e.target.checked)}
+                  style={{ accentColor: 'hsl(205,85%,55%)', width: 12, height: 12 }}
+                />
+                <Brain size={11} style={{ color: 'hsl(205,85%,55%)' }} />
+                <span style={{ fontWeight: 600 }}>Reasoning Mode</span>
+              </label>
+            )}
 
             <button
               onClick={runGenerateFinalRom}
@@ -4789,6 +4822,27 @@ export default function RomPage() {
                       )}
                       <span>Include Action Points</span>
                     </label>
+                    {/* Action Points Reasoning Mode Toggle */}
+                    {includeActionPointsInRom && (
+                      <label style={{
+                        display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                        fontSize: '.72rem', fontWeight: 600,
+                        color: reasoningModeActionPoints ? 'hsl(205,85%,45%)' : 'hsl(var(--ink))',
+                        background: reasoningModeActionPoints ? 'hsl(205,85%,55%/.12)' : 'hsl(var(--card))',
+                        border: `1.5px solid ${reasoningModeActionPoints ? 'hsl(205,85%,55%/.45)' : 'hsl(var(--border)/.6)'}`,
+                        padding: '.28rem .6rem', borderRadius: 7, transition: 'all .15s ease',
+                        userSelect: 'none'
+                      }} title="Use 2-call Reasoning Mode when generating/extracting Action Points">
+                        <input
+                          type="checkbox"
+                          checked={reasoningModeActionPoints}
+                          onChange={e => setReasoningModeActionPoints(e.target.checked)}
+                          style={{ accentColor: 'hsl(205,85%,55%)', width: 12, height: 12 }}
+                        />
+                        <Brain size={12} style={{ color: 'hsl(205,85%,55%)' }} />
+                        <span>Reasoning Mode</span>
+                      </label>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
@@ -4955,6 +5009,26 @@ export default function RomPage() {
                         Regenerate {romVersion.charAt(0).toUpperCase() + romVersion.slice(1)}
                       </button>
                     )}
+                    {romVersion === 'short' && isCurrentVersionGenerated && (
+                      <label style={{
+                        display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                        fontSize: '.72rem', fontWeight: 600,
+                        color: reasoningModeShortRom ? 'hsl(280,75%,50%)' : 'hsl(var(--ink))',
+                        background: reasoningModeShortRom ? 'hsl(280,75%,60%/.12)' : 'hsl(var(--card))',
+                        border: `1.5px solid ${reasoningModeShortRom ? 'hsl(280,75%,60%/.45)' : 'hsl(var(--border)/.6)'}`,
+                        padding: '.25rem .6rem', borderRadius: 6, transition: 'all .15s ease',
+                        userSelect: 'none'
+                      }} title="Use 2-call Reasoning Mode (2,000 token analysis call + generation call with REASONING BLOCK)">
+                        <input
+                          type="checkbox"
+                          checked={reasoningModeShortRom}
+                          onChange={e => setReasoningModeShortRom(e.target.checked)}
+                          style={{ accentColor: 'hsl(280,75%,60%)', width: 12, height: 12 }}
+                        />
+                        <Brain size={12} style={{ color: 'hsl(280,75%,60%)' }} />
+                        <span>Reasoning Mode</span>
+                      </label>
+                    )}
                     <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>
                       {romVersion === 'long' && 'Stage 2 points with full discussion details'}
                       {romVersion === 'short' && 'Agenda-wise condensed: action points & decisions only'}
@@ -5076,6 +5150,26 @@ export default function RomPage() {
                         }
                       </p>
                     </div>
+                    {romVersion === 'short' && (
+                      <label style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
+                        fontSize: '.82rem', fontWeight: 700,
+                        color: reasoningModeShortRom ? 'hsl(280,75%,45%)' : 'hsl(var(--ink))',
+                        background: reasoningModeShortRom ? 'hsl(280,75%,60%/.12)' : 'hsl(var(--muted)/.4)',
+                        border: `1.5px solid ${reasoningModeShortRom ? 'hsl(280,75%,60%/.5)' : 'hsl(var(--border)/.6)'}`,
+                        padding: '.4rem .9rem', borderRadius: 8, transition: 'all .15s ease',
+                        userSelect: 'none'
+                      }} title="Use 2-call Reasoning Mode (2,000 token analysis call + generation call with REASONING BLOCK)">
+                        <input
+                          type="checkbox"
+                          checked={reasoningModeShortRom}
+                          onChange={e => setReasoningModeShortRom(e.target.checked)}
+                          style={{ accentColor: 'hsl(280,75%,60%)', width: 14, height: 14 }}
+                        />
+                        <Brain size={15} style={{ color: 'hsl(280,75%,60%)' }} />
+                        <span>Reasoning Mode (2 LLM Calls)</span>
+                      </label>
+                    )}
                     <button
                       onClick={() => runGenerateRomVersion(romVersion as 'short' | 'medium')}
                       disabled={generatingVersion}

@@ -43,4 +43,7 @@ chromadb>=0.5.0
 # ── Video OCR pipeline ─────────────────────────────────────────────────────
 # Pillow for image handling
 Pillow>=10.0.0
-
+# ── Model Fine-Tuning & Training (LoRA/QLoRA) ─────────────────────────────
+peft>=0.14.0
+datasets>=3.0.0
+trl>=0.12.0

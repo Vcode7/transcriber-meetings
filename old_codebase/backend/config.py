@@ -1,0 +1,242 @@
+"""Application settings — loaded from .env file."""
+import sys
+import os
+from pathlib import Path
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+
+def _resolve_base_dir() -> Path:
+    """
+    Return the application base directory.
+    - When running as a PyInstaller .exe: parent of sys.executable
+    - When running normally (development): parent of this config.py file
+    """
+    if getattr(sys, "frozen", False):
+        # Running as compiled PyInstaller executable
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+BASE_DIR = _resolve_base_dir()
+
+def _resolve_runtime_dir() -> Path:
+    """
+    Return the application runtime directory.
+    - When running as a PyInstaller .exe: sibling 'runtime' folder to backend (i.e. sys.executable's grandparent / runtime)
+    - When running normally (development): BASE_DIR / "runtime"
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent.parent / "runtime"
+    return BASE_DIR / "runtime"
+
+RUNTIME_DIR = _resolve_runtime_dir()
+
+def _resolve_models_dir() -> Path:
+    # In development mode, check if sibling Application directory has models
+    dev_models = BASE_DIR.parent / "Application" / "runtime" / "models"
+    if dev_models.is_dir() and not getattr(sys, "frozen", False):
+        return dev_models
+    dev_models_backend = BASE_DIR.parent / "Application" / "backend" / "runtime" / "models"
+    if dev_models_backend.is_dir() and not getattr(sys, "frozen", False):
+        return dev_models_backend
+    return RUNTIME_DIR / "models"
+
+DEFAULT_MODELS_DIR = _resolve_models_dir()
+
+
+class Settings(BaseSettings):
+    # SQLite database — relative to runtime/
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{(RUNTIME_DIR / 'data' / 'voicesum.db').as_posix()}"
+
+    # ── RAG / Text Embedding ──────────────────────────────────────────────────
+    # The active embedding model to load from local runtime directory.
+    # Supported: "Qwen3-Embedding-0.6B", "Qwen3-Embedding-4B-Instruct-INT8", etc.
+    EMBEDDING_MODEL: str = "Qwen3-Embedding-0.6B"
+
+    # Backward-compatible model name. Automatically synchronized with EMBEDDING_MODEL in __init__.
+    QWEN_EMBEDDING_MODEL_NAME: Optional[str] = None
+
+    @property
+    def QWEN_EMBEDDING_MODEL_DIR(self) -> str:
+        """
+        Resolved path to the embedding model directory.
+        Checks Application/runtime/embeddings/<model_name>/ first, then falls back
+        to <runtime_dir>/embeddings/<model_name>/.
+        """
+        dev_path = BASE_DIR.parent / "Application" / "runtime" / "embeddings" / self.EMBEDDING_MODEL
+        if dev_path.is_dir() and not getattr(sys, "frozen", False):
+            return str(dev_path)
+        return str(RUNTIME_DIR / "embeddings" / self.EMBEDDING_MODEL)
+
+    # FAISS vector store base directory (legacy — kept for migration detection)
+    VECTOR_STORE_DIR: str = str(RUNTIME_DIR / "vector_store")
+
+    # ChromaDB persistent storage directory (new vector store backend)
+    CHROMADB_DIR: str = str(RUNTIME_DIR / "chromadb")
+
+    # RAG chunking parameters
+    RAG_CHUNK_SIZE: int = 400        # target words per chunk
+    RAG_CHUNK_OVERLAP: int = 50      # words of overlap between chunks
+
+    # RAG retrieval — top-K per source
+    RAG_RETRIEVAL_K_GLOBAL: int = 2      # global context docs
+    RAG_RETRIEVAL_K_MEETING: int = 3     # meeting context attachments
+    RAG_RETRIEVAL_K_TRANSCRIPT: int = 10  # transcript chunks
+    RAG_RELATIVE_SCORE_CUTOFF: float = 0.01  # similarity score window
+
+    # JWT — Access token (short-lived, in-memory on client)
+    JWT_SECRET: str = "change-me-in-production-use-long-random-string"
+    JWT_ALGORITHM: str = "HS256"
+
+    # Environment ("development" | "production") — controls Secure cookie flag
+    ENVIRONMENT: str = "development"
+
+    # Rate limiting — login endpoint
+    RATE_LIMIT_LOGIN_MAX: int = 5          # max failed attempts
+    RATE_LIMIT_LOGIN_WINDOW_SECONDS: int = 300  # 5-minute window
+    ACCOUNT_LOCKOUT_SECONDS: int = 900     # 15-minute lockout after max attempts
+
+    # Local Qwen3 4B Instruct (4-bit quantized) — offline inference
+    QWEN_MODEL_ID: str = "Qwen/Qwen3-4B"
+    QWEN_MAX_NEW_TOKENS: int = 1024
+    QWEN_LOAD_IN_4BIT: bool = True  # Requires bitsandbytes; saves ~50% VRAM
+
+    # Ollama offline fallback settings
+    OLLAMA_SERVER_URL: str = "http://localhost:11434"
+    OLLAMA_PORT: int = 11434
+    OLLAMA_MODEL_PRIORITY: str = "gemma,qwen,llama,deepseek,mistral"
+
+    # Configurable token threshold for switching to Section-wise MoM Generation
+    MOM_CONTEXT_TOKEN_THRESHOLD: int = 3000
+
+    # HuggingFace (optional — enables pyannote diarization + Qwen3 download)
+    HF_TOKEN: Optional[str] = ""
+
+    # Audio storage — relative to runtime/
+    UPLOAD_DIR: str = str(RUNTIME_DIR / "uploads")
+
+    # Models directory (encrypted .dat files in production)
+    MODELS_DIR: str = str(DEFAULT_MODELS_DIR)
+
+    # Offline mode — when True, never attempt internet downloads
+    OFFLINE_MODE: bool = True
+
+
+    # Speaker identification
+    # --- Embedding model used for speaker ID ---
+    # Valid values: "ecapa_tdnn" (others reserved for future)
+    SPEAKER_EMBEDDING_MODEL: str = "ecapa_tdnn"
+
+    # --- Similarity thresholds ---
+    # SPEAKER_SIMILARITY_THRESHOLD is the user-visible global default.
+    # ECAPA-TDNN cosine scores differ from CAM++ — 0.75 is a good starting point.
+    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75          # backward-compat user default
+    SPEAKER_SIMILARITY_THRESHOLD_ECAPA_TDNN: float = 0.72  # model-specific default
+    SPEAKER_SIMILARITY_THRESHOLD_ERES2NET: float = 0.55   # ERes2Net-Large default (different score distribution)
+
+    MIN_SEGMENT_DURATION: float = 1.5  # seconds
+
+    speaker_refinement_margin: float = 0.30  # margins/similarity difference for refinement
+    speaker_refinement_high_threshold: float = 0.82  # absolute confidence threshold for ECAPA refinement override
+    speaker_refinement_min_threshold: float = 0.20   # minimum similarity floor for ECAPA margin-based override
+    speaker_refinement_high_threshold_eres2net: float = 0.70  # absolute confidence threshold for ERes2Net refinement override
+    speaker_refinement_min_threshold_eres2net: float = 0.15   # minimum similarity floor for ERes2Net margin-based override
+    RESTRICT_REASSIGNMENT_TO_MEETING_SPEAKERS: bool = False   # Restrict reassignment to meeting speakers only
+
+    # --- Audio preprocessing before alignment ---
+    # When True, a lightweight cleanup pass (silence trim, clipping repair,
+    # loudness normalization) is applied to the audio before WhisperX alignment.
+    # Set to False to skip preprocessing and use the raw WAV directly.
+    AUDIO_PREPROCESS_BEFORE_ALIGNMENT: bool = True
+
+    # Transcription
+    WHISPER_MODEL_SIZE: str = "large-v3"
+    WHISPER_DEVICE: str = "auto"  # "cuda", "cpu", "auto"
+    WHISPER_COMPUTE_TYPE: str = "int8"
+    WHISPER_BATCH_SIZE: int = 8
+
+    # Parallel Whisper processing (server-level, .env only — not per-user).
+    # When 1 (default), the existing sequential transcription pipeline runs unchanged.
+    # When > 1, the source audio is split into WHISPER_PARALLEL_CHUNK_MINUTES-minute
+    # chunks and each chunk is transcribed in its own subprocess (ProcessPoolExecutor).
+    # Each worker loads its own Whisper model copy; all copies are explicitly unloaded
+    # and VRAM is released after processing.
+    # WARNING: VRAM usage scales linearly with worker count (e.g. 2 workers = 2× model VRAM).
+    WHISPER_PARALLEL_PROCESSING: int = 1
+
+    # Duration (minutes) of each audio chunk when parallel processing is enabled.
+    # Shorter chunks = more workers active simultaneously but more overhead per chunk.
+    WHISPER_PARALLEL_CHUNK_MINUTES: int = 10
+
+
+    # ROM Parallel Window Processing
+    ROM_PARALLEL_WINDOW_PROCESSING: int = 2
+
+    # Word confidence thresholds
+    WORD_CONF_LOW: float = 0.7
+    WORD_CONF_MID: float = 0.85
+
+    # Minimum average segment confidence for downstream AI processing.
+    # Segments whose average word probability < this threshold are excluded
+    # from MoM and AI Insights generation (but remain in the transcript).
+    MIN_AVG_SEGMENT_CONFIDENCE: float = 0.40
+
+    # Overlap detection model (Wav2Vec2-based binary classifier)
+    # Default is relative to base dir; override in .env with absolute path if needed
+    OVERLAP_MODEL_PATH: str = str(BASE_DIR / "checkpoints" / "overlap_model.pth")
+
+    # --- Low-Volume Speech Transcription Pipeline Defaults ---
+    ENABLE_VAD: bool = True
+    ENABLE_TRANSCRIPTION_VAD: bool = True
+    ENABLE_ALIGNMENT_VAD: bool = True
+
+    ENABLE_AUDIO_NORMALIZATION: bool = True
+    NORM_TARGET_DBFS: float = -3.0
+    NORM_COMPRESSION_RATIO: float = 2.0
+
+    ENABLE_ADAPTIVE_VAD: bool = True
+    VAD_SPEECH_THRESHOLD: float = 0.15
+    VAD_SILENCE_THRESHOLD: float = 0.10
+    VAD_MIN_SPEECH_MS: int = 250
+    VAD_MIN_SILENCE_MS: int = 400
+
+    ENABLE_SPEECH_PADDING: bool = True
+    SPEECH_PAD_MS: int = 400
+
+    ENABLE_SPEECH_SEGMENT_MERGING: bool = True
+    MAX_MERGE_SILENCE_MS: int = 500
+
+    ENABLE_LOW_VOLUME_RECOVERY: bool = True
+    RECOVERY_ENERGY_THRESHOLD: float = -45.0
+    RECOVERY_MIN_DURATION_MS: int = 300
+    MISSING_SEGMENT_MIN_DURATION_SEC: float = 2.0
+
+
+    def __init__(self, **values):
+        super().__init__(**values)
+        if self.QWEN_EMBEDDING_MODEL_NAME is not None:
+            self.EMBEDDING_MODEL = self.QWEN_EMBEDDING_MODEL_NAME
+        else:
+            self.QWEN_EMBEDDING_MODEL_NAME = self.EMBEDDING_MODEL
+
+    @property
+    def RUNTIME_DIR(self) -> Path:
+        return RUNTIME_DIR
+
+    model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
+
+
+settings = Settings()
+
+# Ensure critical runtime directories exist at import time
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+os.makedirs(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")).parent, exist_ok=True)
+os.makedirs(settings.VECTOR_STORE_DIR, exist_ok=True)
+os.makedirs(settings.CHROMADB_DIR, exist_ok=True)
+
+# Print resolved paths to standard output
+print(f"[Config] Resolved MODELS_DIR to: {settings.MODELS_DIR}")
+print(f"[Config] Resolved VECTOR_STORE_DIR to: {settings.VECTOR_STORE_DIR}")
+print(f"[Config] Resolved QWEN_EMBEDDING_MODEL_DIR to: {settings.QWEN_EMBEDDING_MODEL_DIR}")
+

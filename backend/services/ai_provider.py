@@ -2352,24 +2352,101 @@ Return a JSON object with an "expansions" array covering ALL agenda items:
 # PURPOSE: Stage 3 Step 2: Batch maps enhanced discussion points to agendas to construct the Final ROM.
 # ===========================================================================
 #region ROM_AGENDA_ASSIGN_BATCH_PROMPT
-ROM_AGENDA_ASSIGN_BATCH_PROMPT = """You are an expert meeting analyst. Assign each discussion point in this batch to the most appropriate agenda from the complete agenda list.
+ROM_AGENDA_ASSIGN_BATCH_PROMPT = """You are an expert meeting analyst responsible for accurately mapping discussion points to the correct agenda item.
+
+Your task is to assign EACH discussion point to the single most appropriate agenda from the provided AGENDA REFERENCE.
+
+IMPORTANT:
+Each discussion point has already been independently created and refined in an earlier stage. Treat every point as a separate discussion point.
+
+DO NOT merge, split, combine, rewrite, summarize, or modify discussion points.
 
 ASSIGNMENT RULES:
-- You MUST assign an assigned_agenda_id selected from the AGENDA REFERENCE list provided below.
-- Do NOT invent new agenda names or IDs.
-- Do NOT assign an agenda_id that is not present in the AGENDA REFERENCE list.
-- Transcript content and actual spoken evidence are the PRIMARY SOURCE OF TRUTH. Always match discussion points based on what was actually discussed.
-- Any discussion order or approximate timeline provided below is for LOW-PRIORITY CONTEXTUAL GUIDANCE ONLY. Do NOT force an assignment purely based on timestamp or sequence if the spoken content clearly belongs to a different agenda.
-- If you are uncertain, choose the closest agenda and set confidence to "low".
-- Write a concise 1-sentence reason for each assignment.
-- Confidence levels: "high" = clearly on-topic, "medium" = likely related, "low" = uncertain but best match.
 
-AGENDA REFERENCE (titles and descriptions for context):
+1. AGENDA IDENTITY IS THE HIGHEST PRIORITY
+- Assign only an agenda_id that exists in the AGENDA REFERENCE.
+- Do NOT invent, modify, or create agenda IDs.
+- Identify the agenda primarily by comparing the discussion point with the actual information provided for each agenda.
+- Look for specific information that clearly connects the discussion point to an agenda, such as:
+  - Specific subject or topic
+  - Project, program, initiative, or activity
+  - Organization, department, team, or entity
+  - Location or other relevant context
+  - Specific issue, proposal, decision, or discussion subject
+  - Any other distinctive information present in both the discussion point and agenda
+- Specific identifying information should take priority over general semantic similarity.
+
+2. MATCH THE ACTUAL DISCUSSION
+- Use the content of the discussion point as the primary source of truth.
+- Match the point to the agenda whose subject matter is actually being discussed.
+- The selected agenda must be supported by information contained in the discussion point.
+- Do NOT assign a point simply because it is broadly or semantically similar to an agenda.
+
+3. DO NOT USE POSITION AS PROOF
+- Discussion order and timeline are only supporting context.
+- A point appearing immediately after another agenda does NOT mean it belongs to that agenda.
+- If the discussion content clearly supports another agenda, assign the agenda supported by the content.
+- Never use chronological position as the primary reason for an assignment.
+
+4. REQUIRE CLEAR EVIDENCE
+- Every assignment must have a clear reason based on information present in the discussion point.
+- The reason must explain the specific connection between the discussion point and the selected agenda.
+- Avoid vague reasons that only state that the point is "related" to the agenda.
+- Use the most specific evidence available in the discussion point.
+
+5. AVOID FALSE MATCHES
+- Do NOT assign an agenda based only on broad or generic similarity.
+- When multiple agendas could appear related to a discussion point, identify the agenda using the most specific and distinctive information available.
+- Do not treat common or general terminology as sufficient evidence by itself.
+- Prefer direct subject-matter evidence over broad semantic similarity.
+
+6. HANDLE UNCERTAINTY CORRECTLY
+- If the discussion point cannot be confidently matched to a specific agenda, assign it to the closest relevant agenda based on the available evidence.
+- Set "confidence": "low" when the match is uncertain or only partially supported.
+- NEVER return null for assigned_agenda_id.
+- NEVER use the first agenda as a fallback without considering the discussion content.
+- Always select the agenda that has the strongest available connection to the discussion point, even when the evidence is weak.
+
+7. CONFIDENCE
+Use:
+- "high" = The discussion point contains clear and specific evidence connecting it to the selected agenda.
+- "medium" = The discussion point strongly matches the agenda subject but does not contain highly specific identifying information.
+- "low" = The evidence is weak, ambiguous, or insufficient for a reliable assignment.
+
+8. ONE POINT = ONE ASSIGNMENT
+- Each discussion point must receive exactly one assignment.
+- The assignment must contain either:
+  - one valid agenda_id, or
+  - null when there is insufficient evidence.
+- Do not merge discussion points.
+- Do not split discussion points.
+- Do not combine multiple discussion points.
+- Do not rewrite or modify the discussion point.
+- Do not change the point_id.
+
+AGENDA REFERENCE:
+
 {agenda_reference}
+
 {discussion_order_guidance}
+
 {timeline_guidance}
-DISCUSSION POINTS BATCH:
+
+DISCUSSION POINTS:
+
 {batch_json}
+
+FINAL VALIDATION BEFORE RETURNING:
+
+For every discussion point, verify:
+
+1. The assigned agenda exists in the AGENDA REFERENCE.
+2. The assignment is supported by the actual discussion content.
+3. The assignment is not based only on chronological position.
+4. The assignment is not based only on broad semantic similarity.
+5. The selected agenda is the one most specifically supported by the available evidence.
+6. If sufficient evidence does not exist, assigned_agenda_id is null and confidence is low.
+7. The discussion point itself has not been changed, merged, or split.
 
 Return ONLY a JSON object. One entry per discussion point, in the same order as the batch:
 ```json
@@ -3401,6 +3478,8 @@ class QwenProvider(AIProvider):
             "max_tokens_raw_mom_repair": 1024,
             "max_tokens_rom_version_short": 4096,
             "max_tokens_rom_version_medium": 4096,
+            "reasoning_mode_short_rom": False,
+            "reasoning_mode_action_points": False,
         }
 
         import sqlite3
@@ -3508,7 +3587,7 @@ class QwenProvider(AIProvider):
         return None
 
     @classmethod
-    def _call_ollama(cls, server_url: str, model: str, prompt: str, max_new_tokens: int) -> Optional[str]:
+    def _call_ollama(cls, server_url: str, model: str, prompt: str, max_new_tokens: int, think: Optional[bool] = None) -> Optional[str]:
         """Perform chat generation call using configured Ollama server endpoint."""
         import urllib.request
         import json
@@ -3533,7 +3612,10 @@ class QwenProvider(AIProvider):
 
         selected_num_ctx = calculated_num_ctx if dynamic_enabled else manual_num_ctx
 
-        think_enabled = bool(cfg.get("ollama_think", False))
+        if think is not None:
+            think_enabled = bool(think)
+        else:
+            think_enabled = bool(cfg.get("ollama_think", False))
 
         # Prepare options payload with validation defaults
         options = {
@@ -3654,7 +3736,7 @@ class QwenProvider(AIProvider):
             logger.error(f"[QwenAI] Ollama chat inference failed for model '{model}' at {base_url}: {e}")
         return None
 
-    def _infer(self, prompt: str, max_new_tokens: int = 5120, task_key: Optional[str] = None) -> str:
+    def _infer(self, prompt: str, max_new_tokens: int = 5120, task_key: Optional[str] = None, think: Optional[bool] = None) -> str:
         """Run inference using Ollama offline fallback or local Qwen3 model."""
         cls = self.__class__
         
@@ -3686,7 +3768,7 @@ class QwenProvider(AIProvider):
             model_name = getattr(cls, "_cached_ollama_model", None)
             if model_name is not None:
                 logger.info(f"[QwenAI] Attempting inference using cached Ollama model '{model_name}' at {server_url}...")
-                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens)
+                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think)
                 if res is not None:
                     logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
                     return res
@@ -3704,7 +3786,7 @@ class QwenProvider(AIProvider):
                 cls._cached_ollama_model = model_name
                 
                 logger.info(f"[QwenAI] Ollama model detected. Running inference with '{model_name}' at {server_url}...")
-                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens)
+                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think)
                 if res is not None:
                     logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
                     return res
@@ -3736,11 +3818,12 @@ class QwenProvider(AIProvider):
 
             # Apply Qwen3 chat template with thinking disabled
             tokenizer = self._tokenizer
+            enable_think = bool(think) if think is not None else False
             text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,  # Qwen3: disable chain-of-thought preamble
+                enable_thinking=enable_think,  # Qwen3: control chain-of-thought preamble
             )
 
             rep_penalty = cfg.get("ollama_repeat_penalty", 1.15)
@@ -5063,16 +5146,20 @@ class QwenProvider(AIProvider):
         self,
         polished_points: List[Dict],
         chunk_size: Optional[int] = None,
+        reasoning_mode: Optional[bool] = None,
     ) -> List[Dict]:
-        """Extract action items from enhanced Stage 2 discussion points in chunks (default mode, no separate extraction).
+        """Extract action items from enhanced Stage 2 discussion points in chunks.
 
-        Used during MoM generation when separate_action_extraction is disabled.
-        Passes discussion points in configurable chunks (default 10) to MOM_EXTRACT_ACTIONS_FROM_POINTS_PROMPT
-        to extract any tasks/commitments/actions that were embedded in the discussion text.
+        - Disabled: Keep current pipeline unchanged — one normal LLM call (without thinking mode).
+        - Enabled: Use 2 LLM calls:
+          1. Reasoning call: Ask LLM to analyze/reason about the input only. Max 2000 tokens.
+          2. Generation call: Pass reasoning in REASONING BLOCK, disable thinking/reasoning,
+             generate only final output in valid JSON format.
 
         Args:
             polished_points: List of Stage 2 enhanced discussion point dicts.
             chunk_size:      Number of points per LLM call (defaults to user setting or 10).
+            reasoning_mode:  Optional bool override for two-call reasoning mode.
 
         Returns:
             List of action item dicts: [{task, owner, deadline, source_point_id}, ...]
@@ -5085,6 +5172,11 @@ class QwenProvider(AIProvider):
 
         cfg = self._get_active_settings()
         max_tokens = cfg.get("max_tokens_mom_extract_actions") or 4096
+
+        if reasoning_mode is not None:
+            use_reasoning = bool(reasoning_mode)
+        else:
+            use_reasoning = bool(cfg.get("reasoning_mode_action_points", False))
 
         # Determine effective chunk size (param > setting > default 10)
         try:
@@ -5130,18 +5222,58 @@ class QwenProvider(AIProvider):
         is_custom = bool(active_prompt.strip() and active_prompt.strip() != default_prompt.strip())
         logger.info(
             f"[QwenAI] extract_actions_from_enhanced_points: chunking enabled — processing {total_points} point(s) "
-            f"across {len(chunks)} chunk(s) (chunk_size={effective_chunk_size}, custom_prompt={is_custom})"
+            f"across {len(chunks)} chunk(s) (chunk_size={effective_chunk_size}, reasoning_mode={use_reasoning}, custom_prompt={is_custom})"
         )
 
         for chunk_idx, chunk in enumerate(chunks, 1):
             chunk_info = f"chunk {chunk_idx}/{len(chunks)}"
-            logger.info(f"[QwenAI] Processing action extraction {chunk_info} ({len(chunk)} point(s))...")
+            logger.info(f"[QwenAI] Processing action extraction {chunk_info} ({len(chunk)} point(s), reasoning_mode={use_reasoning})...")
             points_json = json.dumps(chunk, ensure_ascii=False, indent=2)
             if "{points_json}" in active_prompt:
-                prompt = active_prompt.replace("{points_json}", points_json)
+                base_prompt = active_prompt.replace("{points_json}", points_json)
             else:
-                prompt = f"{active_prompt.strip()}\n\nDISCUSSION POINTS:\n{points_json}"
-            raw = self._infer(prompt, max_new_tokens=max_tokens, task_key="mom_extract_actions")
+                base_prompt = f"{active_prompt.strip()}\n\nDISCUSSION POINTS:\n{points_json}"
+
+            if not use_reasoning:
+                # ── Disabled: Keep current pipeline unchanged — one normal LLM call (without thinking mode) ──
+                raw = self._infer(base_prompt, max_new_tokens=max_tokens, task_key="mom_extract_actions", think=False)
+            else:
+                # ── Enabled: 2 LLM calls (Reasoning call -> Generation call) ──
+                # 1. Reasoning call: Ask LLM to analyze/reason about input only. Max 2000 tokens. No final response.
+                reasoning_prompt = (
+                    "You are an expert executive meeting analyst.\n\n"
+                    "Analyze and reason about the following enhanced meeting discussion points to determine what actionable tasks, "
+                    "commitments, directives, or deliverables exist, who the true owners are, and what deadlines or outcomes apply.\n\n"
+                    f"DISCUSSION POINTS:\n{points_json}\n\n"
+                    "REASONING INSTRUCTIONS:\n"
+                    "1. Evaluate each discussion point: determine whether it contains an explicit commitment, directive, delegated task, "
+                    "or agreed next step versus an informational update, background context, retrospective, or opinion with no action assigned.\n"
+                    "2. Identify the true action owner for each valid action item: distinguish explicitly assigned or volunteering individuals "
+                    "from participants who were merely speaking or presenting. If unassigned, note that.\n"
+                    "3. Identify any specific deadlines or timeframes mentioned (never invent dates).\n"
+                    "4. Formulate the concrete task description and expected outcome for each genuine action item.\n\n"
+                    "CRITICAL CONSTRAINT: Provide your analysis and reasoning ONLY. Do NOT generate the final JSON response or action_items list. "
+                    "Focus strictly on reasoning through which points contain genuine action items and what their attributes are."
+                )
+                logger.info(f"[QwenAI] Action extraction {chunk_info} executing reasoning call (max 2000 tokens)...")
+                reasoning_raw = self._infer(reasoning_prompt, max_new_tokens=2000, task_key="mom_extract_actions_reasoning")
+                reasoning_text = strip_thinking(reasoning_raw).strip()
+                logger.info(f"[QwenAI] Action extraction {chunk_info} reasoning call completed ({len(reasoning_text)} chars).")
+
+                # 2. Generation call: Pass reasoning in REASONING BLOCK, disable thinking/reasoning, generate only final valid JSON output.
+                generation_prompt = (
+                    f"{base_prompt}\n\n"
+                    f"==================================================\n"
+                    f"REASONING BLOCK:\n"
+                    f"{reasoning_text}\n"
+                    f"==================================================\n\n"
+                    f"CRITICAL INSTRUCTIONS:\n"
+                    f"- Use the reasoning in the REASONING BLOCK above to formulate the final action items.\n"
+                    f"- Disable thinking/reasoning: do NOT repeat the reasoning text or include any explanatory comments.\n"
+                    f"- Generate ONLY the final output in the existing valid JSON format with the 'action_items' key as specified above.\n"
+                )
+                logger.info(f"[QwenAI] Action extraction {chunk_info} executing generation call (think=False)...")
+                raw = self._infer(generation_prompt, max_new_tokens=max_tokens, task_key="mom_extract_actions", think=False)
 
             if not raw or not raw.strip():
                 logger.warning(f"[QwenAI] Action extraction {chunk_info} received empty response from LLM.")

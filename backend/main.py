@@ -273,18 +273,19 @@ app = FastAPI(
 
 
 # ── License Middleware ─────────────────────────────────────────
-# Runs before every request. Returns HTTP 503 after the license expiry date.
+# Runs before every request. Returns HTTP 503 after the license expiry date or on verification failure.
 # Passes /health through so the frontend can detect the expired state.
 class LicenseMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        valid, _ = check_license()
+        valid, msg = check_license()
         if not valid:
-            # Allow /health so clients can detect the expired state
+            # Allow /health and / so clients can detect the expired/tampered state
             if request.url.path in ("/health", "/"):
                 return await call_next(request)
+            from license import get_license_expired_body
             return JSONResponse(
                 status_code=503,
-                content=LICENSE_EXPIRED_BODY,
+                content=get_license_expired_body(msg),
             )
         return await call_next(request)
 
@@ -349,12 +350,14 @@ async def root():
 async def health():
     from services.diarization import is_pyannote_available
     from services.ai_provider import QwenProvider
-    from license import check_license, LICENSE_EXPIRY_DATE
-    license_valid, _ = check_license()
+    from license import check_license, get_license_info
+    license_valid, lic_msg = check_license()
+    lic_info = get_license_info()
     return {
         "status": "ok",
         "license_valid": license_valid,
-        "license_expiry": LICENSE_EXPIRY_DATE.isoformat(),
+        "license_expiry": lic_info.get("expiry_date", "2026-10-15"),
+        "license_message": lic_msg if not license_valid else "Valid",
         "pyannote_available": is_pyannote_available(),
         "llm_ready": QwenProvider._pipeline is not None,
         "llm_model": settings.QWEN_MODEL_ID,

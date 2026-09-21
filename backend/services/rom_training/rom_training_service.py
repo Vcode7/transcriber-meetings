@@ -250,7 +250,12 @@ def _run_lora_training(
             BitsAndBytesConfig, DataCollatorForSeq2Seq,
         )
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
-        from trl import SFTTrainer
+        try:
+            from trl import SFTTrainer, SFTConfig
+            has_sft_config = True
+        except ImportError:
+            from trl import SFTTrainer
+            has_sft_config = False
         from datasets import Dataset
     except ImportError as e:
         raise RuntimeError(
@@ -324,33 +329,64 @@ def _run_lora_training(
     hf_dataset = Dataset.from_list(raw_dataset)
 
     # Training arguments
-    training_args = TrainingArguments(
-        output_dir=adapter_path,
-        num_train_epochs=lora_config.get("num_epochs", 3),
-        per_device_train_batch_size=lora_config.get("per_device_train_batch_size", 2),
-        gradient_accumulation_steps=lora_config.get("gradient_accumulation_steps", 4),
-        learning_rate=lora_config.get("learning_rate", 2e-4),
-        logging_steps=1,
-        save_steps=50,
-        save_total_limit=2,
-        fp16=not use_4bit,
-        bf16=False,
-        report_to="none",
-        remove_unused_columns=False,
-        warmup_ratio=0.03,
-        lr_scheduler_type="cosine",
-    )
+    max_seq_len = lora_config.get("max_seq_length", 2048)
 
-    trainer = SFTTrainer(
-        model=model,
-        train_dataset=hf_dataset,
-        peft_config=peft_config,
-        dataset_text_field="text",
-        max_seq_length=lora_config.get("max_seq_length", 2048),
-        tokenizer=tokenizer,
-        args=training_args,
-        packing=False,
-    )
+    if has_sft_config:
+        training_args = SFTConfig(
+            output_dir=adapter_path,
+            num_train_epochs=lora_config.get("num_epochs", 3),
+            per_device_train_batch_size=lora_config.get("per_device_train_batch_size", 2),
+            gradient_accumulation_steps=lora_config.get("gradient_accumulation_steps", 4),
+            learning_rate=lora_config.get("learning_rate", 2e-4),
+            logging_steps=1,
+            save_steps=50,
+            save_total_limit=2,
+            fp16=not use_4bit,
+            bf16=False,
+            report_to="none",
+            remove_unused_columns=False,
+            warmup_ratio=0.03,
+            lr_scheduler_type="cosine",
+            dataset_text_field="text",
+            max_length=max_seq_len,
+            packing=False,
+        )
+
+        trainer = SFTTrainer(
+            model=model,
+            train_dataset=hf_dataset,
+            peft_config=peft_config,
+            processing_class=tokenizer,
+            args=training_args,
+        )
+    else:
+        training_args = TrainingArguments(
+            output_dir=adapter_path,
+            num_train_epochs=lora_config.get("num_epochs", 3),
+            per_device_train_batch_size=lora_config.get("per_device_train_batch_size", 2),
+            gradient_accumulation_steps=lora_config.get("gradient_accumulation_steps", 4),
+            learning_rate=lora_config.get("learning_rate", 2e-4),
+            logging_steps=1,
+            save_steps=50,
+            save_total_limit=2,
+            fp16=not use_4bit,
+            bf16=False,
+            report_to="none",
+            remove_unused_columns=False,
+            warmup_ratio=0.03,
+            lr_scheduler_type="cosine",
+        )
+
+        trainer = SFTTrainer(
+            model=model,
+            train_dataset=hf_dataset,
+            peft_config=peft_config,
+            dataset_text_field="text",
+            max_seq_length=max_seq_len,
+            tokenizer=tokenizer,
+            args=training_args,
+            packing=False,
+        )
 
     trainer.train()
     trainer.save_model(adapter_path)

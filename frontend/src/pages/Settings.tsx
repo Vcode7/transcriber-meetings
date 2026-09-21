@@ -3,7 +3,7 @@ import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
   MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database, Volume2, Activity,
   Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check,
-  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info, Play, Pause, Plus, PlusCircle
+  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info, Play, Pause, Plus, PlusCircle, Brain
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -98,6 +98,8 @@ interface UserSettings {
   max_tokens_rom_agenda_doc_points?: number
   max_tokens_rom_version_short?: number
   max_tokens_rom_version_medium?: number
+  reasoning_mode_short_rom?: boolean
+  reasoning_mode_action_points?: boolean
 
   // Task max tokens
   max_tokens_mom?: number
@@ -1093,6 +1095,40 @@ export default function SettingsPage() {
                   </div>
                 )}
 
+                {/* Reasoning Mode for Action Point Generation */}
+                {settings && (
+                  <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(205,85%,55%/.2)', background: 'hsl(205,85%,55%/.04)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1.5rem' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Brain size={15} style={{ color: 'hsl(205,85%,55%)' }} /> Reasoning Mode for Action Point Generation
+                      </div>
+                      <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5 }}>
+                        When enabled, extracting action points from enhanced points uses a 2-step LLM flow: a 2,000-token reasoning call to analyze commitments and owners first, then passes the reasoning block to generate valid JSON with thinking disabled. When disabled, uses the standard single normal LLM call (default).
+                      </div>
+                    </div>
+                    <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>{settings.reasoning_mode_action_points ? 'Enabled' : 'Disabled'}</span>
+                      <button
+                        onClick={() => setSettings({ ...settings, reasoning_mode_action_points: !settings.reasoning_mode_action_points })}
+                        style={{
+                          width: 44, height: 24, borderRadius: 12,
+                          background: settings.reasoning_mode_action_points ? 'hsl(205,85%,55%)' : 'hsl(var(--muted))',
+                          border: 'none', cursor: 'pointer', position: 'relative', transition: 'background .2s',
+                          flexShrink: 0
+                        }}
+                        aria-label="Toggle Reasoning Mode for Action Point Generation"
+                      >
+                        <span style={{
+                          position: 'absolute', top: 3,
+                          left: settings.reasoning_mode_action_points ? 23 : 3,
+                          width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                          transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.25)'
+                        }} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* ROM Pipeline Variant Selector */}
                 {settings && (
                   <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(205,85%,55%/.25)', background: 'hsl(205,85%,55%/.04)' }}>
@@ -1190,6 +1226,38 @@ export default function SettingsPage() {
                         </select>
                       </div>
                     )}
+
+                    {/* Reasoning Mode for Short ROM */}
+                    <div style={{ marginTop: '.85rem', paddingTop: '.75rem', borderTop: '1px solid hsl(var(--border)/.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1.5rem' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Brain size={14} style={{ color: 'hsl(280,75%,60%)' }} /> Reasoning Mode (2 LLM Calls)
+                        </div>
+                        <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', lineHeight: 1.45 }}>
+                          Runs a 2,000-token analysis call first to reason about the agenda discussion, then passes the reasoning block to generate the final condensed points in valid JSON format with thinking disabled.
+                        </div>
+                      </div>
+                      <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>{settings.reasoning_mode_short_rom ? 'Enabled' : 'Disabled'}</span>
+                        <button
+                          onClick={() => setSettings({ ...settings, reasoning_mode_short_rom: !settings.reasoning_mode_short_rom })}
+                          style={{
+                            width: 44, height: 24, borderRadius: 12,
+                            background: settings.reasoning_mode_short_rom ? 'hsl(280,75%,60%)' : 'hsl(var(--muted))',
+                            border: 'none', cursor: 'pointer', position: 'relative', transition: 'background .2s',
+                            flexShrink: 0
+                          }}
+                          aria-label="Toggle Reasoning Mode for Short ROM Generation"
+                        >
+                          <span style={{
+                            position: 'absolute', top: 3,
+                            left: settings.reasoning_mode_short_rom ? 23 : 3,
+                            width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                            transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.25)'
+                          }} />
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>

@@ -128,6 +128,7 @@ class GenerateFinalRomRequest(BaseModel):
     enable_agenda_timeline: bool = Field(default=False, description="If True, pass timeline guidance to LLM. If False, omit.")
     skipped_agendas: Optional[Dict[str, dict]] = Field(default=None, description="Agenda IDs to skip from point mapping, e.g. {'A2': {'note': 'Forward to next meeting'}}")
     include_action_points: bool = Field(default=False, description="If True, include action points mapped to discussion points in the Final ROM")
+    reasoning_mode_action_points: Optional[bool] = Field(default=None, description="If True, use 2-call reasoning mode for action point extraction")
 
 class UpdateStage3AgendasRequest(BaseModel):
     agendas: List[dict]
@@ -144,6 +145,7 @@ class UpdateFinalRomRequest(BaseModel):
 
 class ToggleActionPointsRequest(BaseModel):
     include_action_points: bool = True
+    reasoning_mode: Optional[bool] = None
 
 class SelectRomVersionRequest(BaseModel):
     version: str = Field(..., description="'long', 'short', or 'medium'")
@@ -180,6 +182,7 @@ class GenerateRomVersionRequest(BaseModel):
     writing_rules: str = Field(default="", description="Optional writing rules from a reference document")
     base_final_rom: Optional[Dict] = Field(default=None, description="Base final ROM with original Stage 2 points")
     important_points: Optional[List[Dict]] = Field(default=None, description="List of user-marked very important points")
+    reasoning_mode: Optional[bool] = None
 
 
 class ExtractWritingRulesRequest(BaseModel):
@@ -1373,6 +1376,7 @@ async def _populate_action_points_for_agendas(
     polished_points: List[dict],
     stage1_points: List[dict],
     recording_id: str = "",
+    reasoning_mode: Optional[bool] = None,
 ) -> List[dict]:
     """Collect or generate action points for discussion points within agendas.
     1. First checks for existing action_items on Stage 2 polished points and Stage 1 discussion points.
@@ -1441,7 +1445,7 @@ async def _populate_action_points_for_agendas(
         try:
             raw_extracted = await loop.run_in_executor(
                 None,
-                lambda: provider.extract_actions_from_enhanced_points(polished_points)
+                lambda: provider.extract_actions_from_enhanced_points(polished_points, reasoning_mode=reasoning_mode)
             )
         except Exception as _ex:
             logger.warning(f"[{recording_id}] Fallback action extraction failed ({_ex}).")
@@ -1604,6 +1608,7 @@ async def generate_final_rom_from_agendas(
             polished_points=polished_points,
             stage1_points=data.get("stage1", {}).get("discussion_points", []) if data.get("stage1") else [],
             recording_id=recording_id,
+            reasoning_mode=req.reasoning_mode_action_points,
         )
 
     existing_final = data.get("final_rom") or {}
@@ -1897,6 +1902,7 @@ async def toggle_final_rom_action_points(
                 polished_points=polished_points,
                 stage1_points=stage1_points,
                 recording_id=recording_id,
+                reasoning_mode=req.reasoning_mode,
             )
 
     # Also update across final_rom_versions
@@ -2095,6 +2101,7 @@ async def generate_rom_version(
                 version=version,
                 writing_rules=req.writing_rules or "",
                 important_points=important_points,
+                reasoning_mode=req.reasoning_mode,
             )
         )
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle, Replace, Zap } from 'lucide-react'
+import { ArrowLeft, Loader, Clock, Users, FileAudio, FileText, Sparkles, RefreshCw, MoreVertical, UserCheck, Video, RotateCcw, AlertTriangle, Replace, Zap, ChevronLeft, ChevronRight } from 'lucide-react'
 import { toast } from 'sonner'
 import TranscriptViewer from '../components/TranscriptViewer'
 import VideoTranscriptViewer from '../components/VideoTranscriptViewer'
@@ -352,9 +352,12 @@ export default function HistoryDetail() {
     <div className="workspace-split" style={{
       display: 'grid', gridTemplateColumns: `1fr ${chatW}`,
       position: 'relative', transition: isDragging.current ? 'none' : 'grid-template-columns .25s ease',
-
+      height: '100%', minHeight: 0, overflow: 'hidden',
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%' }}>
+      <div className="center-panel" style={{
+        position: 'relative', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden',
+        display: 'flex', flexDirection: 'column'
+      }}>
 
         {/* Header */}
         <div className="panel-header history-detail-header">
@@ -779,7 +782,19 @@ export default function HistoryDetail() {
       </div>
 
       {/* Drag handle + Right Panel (AI Chat or Corrections) */}
-      <div className={`insights-pane ${chatOpen ? 'is-open' : ''}`} style={{ position: 'relative', display: 'flex', flexDirection: 'column' }}>
+      <div
+        className={`insights-pane ${chatOpen ? 'is-open' : ''}`}
+        style={{
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
+          minHeight: 0,
+          minWidth: 0,
+          overflow: 'hidden',
+          borderLeft: '1px solid hsl(var(--border) / .35)',
+        }}
+      >
         {/* Drag handle — only visible when panel is open */}
         {chatOpen && (
           <div
@@ -798,94 +813,199 @@ export default function HistoryDetail() {
           />
         )}
 
-        {/* Mode selector tabs — only when panel is open */}
+        {/* Mode selector tabs + collapse button — only when panel is open */}
         {chatOpen && (
           <div style={{
-            display: 'flex', borderBottom: '1px solid hsl(var(--border)/.5)',
-            background: 'hsl(var(--card))', flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '7px 12px',
+            borderBottom: '1px solid hsl(var(--border) / .35)',
+            background: 'hsl(var(--card))',
+            flexShrink: 0,
+            minHeight: '44px',
+            gap: '8px',
           }}>
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              background: 'hsl(var(--muted) / .6)',
+              padding: '3px',
+              borderRadius: '8px',
+              gap: '3px',
+            }}>
+              <button
+                id="tab-ai-panel"
+                onClick={() => setRightPanelMode('chat')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '.3rem .75rem',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  background: rightPanelMode === 'chat' ? 'hsl(var(--card))' : 'transparent',
+                  color: rightPanelMode === 'chat' ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                  fontWeight: rightPanelMode === 'chat' ? 700 : 500,
+                  fontSize: '.75rem',
+                  boxShadow: rightPanelMode === 'chat' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  fontFamily: 'Inter, sans-serif',
+                  transition: 'all .15s ease',
+                }}
+              >
+                <Sparkles size={12} />
+                AI Assistant & MoM
+              </button>
+              <button
+                id="tab-corrections-panel"
+                onClick={() => setRightPanelMode('corrections')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '.3rem .75rem',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  background: rightPanelMode === 'corrections' ? 'hsl(var(--card))' : 'transparent',
+                  color: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%)' : 'hsl(var(--pencil))',
+                  fontWeight: rightPanelMode === 'corrections' ? 700 : 500,
+                  fontSize: '.75rem',
+                  boxShadow: rightPanelMode === 'corrections' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  fontFamily: 'Inter, sans-serif',
+                  transition: 'all .15s ease',
+                }}
+              >
+                <Zap size={12} />
+                Corrections
+              </button>
+            </div>
+
             <button
-              onClick={() => setRightPanelMode('chat')}
+              className="icon-btn"
+              onClick={() => setChatOpen(false)}
+              title="Collapse panel"
               style={{
-                flex: 1, padding: '.4rem .5rem', border: 'none', cursor: 'pointer',
-                background: rightPanelMode === 'chat' ? 'hsl(var(--accent)/.1)' : 'transparent',
-                color: rightPanelMode === 'chat' ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
-                fontWeight: rightPanelMode === 'chat' ? 700 : 500,
-                fontSize: '.75rem', borderBottom: rightPanelMode === 'chat' ? '2px solid hsl(var(--accent))' : '2px solid transparent',
-                fontFamily: 'Inter, sans-serif', transition: 'all .15s',
-              }}
-            >AI Chat</button>
-            <button
-              onClick={() => setRightPanelMode('corrections')}
-              style={{
-                flex: 1, padding: '.4rem .5rem', border: 'none', cursor: 'pointer',
-                background: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%/.1)' : 'transparent',
-                color: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%)' : 'hsl(var(--pencil))',
-                fontWeight: rightPanelMode === 'corrections' ? 700 : 500,
-                fontSize: '.75rem', borderBottom: rightPanelMode === 'corrections' ? '2px solid hsl(220,80%,60%)' : '2px solid transparent',
-                fontFamily: 'Inter, sans-serif', transition: 'all .15s',
+                width: '28px',
+                height: '28px',
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: '6px',
+                color: 'hsl(var(--pencil))',
               }}
             >
-              <Zap size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }} />
-              Corrections
+              <ChevronRight size={15} />
             </button>
           </div>
         )}
 
-        {/* Panel content */}
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {/* AI Chat — hidden (not unmounted) when corrections active to preserve chat state */}
-          <div style={{ display: rightPanelMode === 'chat' ? 'flex' : 'none', flex: 1, flexDirection: 'column' }}>
-            <AIChatPanel
-              recordingId={id!}
-              summary={rec.summary}
-              shortSummary={rec.short_summary as string | undefined}
-              detailedSummary={rec.detailed_summary as string | undefined}
-              keyPoints={rec.key_points}
-              actionItems={rec.action_items}
-              speakerSummary={rec.speaker_summary}
-              momData={momData}
-              isOpen={chatOpen}
-              onToggle={() => setChatOpen((o) => !o)}
-              onGenerateInsights={handleGenerateInsights}
-              isGeneratingInsights={isGeneratingInsights}
-              onScrollToSegment={handleScrollToSegment}
-              onTranscriptChanged={() => reloadDetail()}
-            />
-          </div>
-
-          {/* Corrections panel */}
-          {rightPanelMode === 'corrections' && chatOpen && id && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-              <CorrectionPanel
-                recordingId={id}
+        {/* Panel content (when open) */}
+        {chatOpen && (
+          <div style={{ flex: 1, minHeight: 0, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
+            {/* AI Chat — hidden (not unmounted) when corrections active to preserve state */}
+            <div style={{ display: rightPanelMode === 'chat' ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0, height: '100%', flexDirection: 'column', overflow: 'hidden' }}>
+              <AIChatPanel
+                recordingId={id!}
+                summary={rec.summary}
+                shortSummary={rec.short_summary as string | undefined}
+                detailedSummary={rec.detailed_summary as string | undefined}
+                keyPoints={rec.key_points}
+                actionItems={rec.action_items}
+                speakerSummary={rec.speaker_summary}
+                momData={momData}
+                isOpen={true}
+                hideCollapseBtn={true}
+                onToggle={() => setChatOpen((o) => !o)}
+                onGenerateInsights={handleGenerateInsights}
+                isGeneratingInsights={isGeneratingInsights}
+                onScrollToSegment={handleScrollToSegment}
                 onTranscriptChanged={() => reloadDetail()}
               />
             </div>
-          )}
 
-          {/* Collapsed toggle button (only shown when panel is closed) */}
-          {!chatOpen && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0', gap: '4px' }}>
+            {/* Corrections panel */}
+            {rightPanelMode === 'corrections' && id && (
+              <div style={{ flex: 1, minHeight: 0, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <CorrectionPanel
+                  recordingId={id}
+                  onTranscriptChanged={() => reloadDetail()}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Collapsed rail (only shown when panel is closed) */}
+        {!chatOpen && (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '12px 0',
+            height: '100%',
+            gap: '12px',
+          }}>
+            <button
+              className="icon-btn"
+              onClick={() => setChatOpen(true)}
+              title="Expand panel"
+              style={{ width: '32px', height: '32px' }}
+            >
+              <ChevronLeft size={16} />
+            </button>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
               <button
                 className="icon-btn"
                 onClick={() => { setRightPanelMode('chat'); setChatOpen(true) }}
-                title="Open AI Chat"
-                style={{ opacity: 0.6 }}
+                title="Open AI Assistant & MoM"
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: rightPanelMode === 'chat'
+                    ? 'linear-gradient(135deg, hsl(var(--accent) / .2), hsl(var(--accent) / .08))'
+                    : 'transparent',
+                  border: rightPanelMode === 'chat'
+                    ? '1.5px solid hsl(var(--accent) / .4)'
+                    : '1px solid transparent',
+                  color: rightPanelMode === 'chat' ? 'hsl(var(--accent))' : 'hsl(var(--pencil))',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
               >
                 <Sparkles size={16} />
               </button>
+
               <button
                 className="icon-btn"
                 onClick={() => { setRightPanelMode('corrections'); setChatOpen(true) }}
                 title="Open Corrections"
-                style={{ opacity: 0.6 }}
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: rightPanelMode === 'corrections'
+                    ? 'linear-gradient(135deg, hsl(220,80%,60% / .2), hsl(220,80%,60% / .08))'
+                    : 'transparent',
+                  border: rightPanelMode === 'corrections'
+                    ? '1.5px solid hsl(220,80%,60% / .4)'
+                    : '1px solid transparent',
+                  color: rightPanelMode === 'corrections' ? 'hsl(220,80%,60%)' : 'hsl(var(--pencil))',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
               >
                 <Zap size={16} />
               </button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* ── Correct Mistake Modal ── */}

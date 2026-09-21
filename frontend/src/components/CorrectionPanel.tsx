@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   CheckSquare, Square, ChevronDown, ChevronRight, Loader,
   BookOpen, AlertCircle, Edit2, Check, X, RotateCcw, Zap, Save
@@ -321,7 +321,7 @@ export default function CorrectionPanel({ recordingId, onTranscriptChanged }: Co
   const panelStyle: React.CSSProperties = {
     display: 'flex', flexDirection: 'column', height: '100%',
     background: 'hsl(var(--card))',
-    borderLeft: '1px solid hsl(var(--border)/.6)',
+    borderLeft: 'none',
     fontFamily: 'Inter, sans-serif',
     overflow: 'hidden',
   }
@@ -422,7 +422,7 @@ export default function CorrectionPanel({ recordingId, onTranscriptChanged }: Co
       </div>
 
       {/* Content */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '.75rem 1rem' }}>
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '.75rem 1rem' }}>
 
         {hasNoData ? (
           <div style={{

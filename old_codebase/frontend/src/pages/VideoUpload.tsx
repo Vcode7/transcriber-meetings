@@ -1,0 +1,815 @@
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { Video, FileVideo, X, Loader, CheckCircle, CloudUpload, RotateCcw, Clock, FileText, MonitorPlay } from 'lucide-react'
+import { toast } from 'sonner'
+import { useJobPoller } from '../hooks/useJobPoller'
+import TranscriptViewer from '../components/TranscriptViewer'
+import AIChatPanel from '../components/AIChatPanel'
+import ProcessingOverlay from '../components/ProcessingOverlay'
+import PDFButton from '../components/PDFButton'
+import AdvancedOptionsPanel, { type AdvancedOptions } from '../components/AdvancedOptions'
+import { useProcessingStore, type ProcessingStage } from '../store/processing'
+import api from '../api/client'
+import { getApiErrorDetail } from '../lib/errors'
+import { isActiveJobStatus } from '../lib/jobState'
+import type { ProcessingResult } from '../types/recording'
+import { useJobsStore } from '../store/jobs'
+
+import AudioTrimmer from '../components/AudioTrimmer'
+import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
+import ErrorBoundary from '../components/ErrorBoundary'
+
+interface OcrBlock {
+  start: number
+  end: number
+  text: string
+}
+
+const SUPPORTED_VIDEO_TYPES = ['video/mp4', 'video/x-msvideo', 'video/quicktime', 'video/x-matroska', 'video/webm']
+const SUPPORTED_VIDEO_EXTS = ['.mp4', '.avi', '.mov', '.mkv', '.webm']
+
+function formatTime(sec: number): string {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = Math.floor(sec % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function isVideoFile(f: File): boolean {
+  if (SUPPORTED_VIDEO_TYPES.includes(f.type)) return true
+  const ext = '.' + f.name.split('.').pop()?.toLowerCase()
+  return SUPPORTED_VIDEO_EXTS.includes(ext)
+}
+
+// ── OCR Timeline component ─────────────────────────────────────────────────
+function OcrTimeline({ blocks }: { blocks: OcrBlock[] }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (!blocks.length) return null
+
+  const visible = expanded ? blocks : blocks.slice(0, 5)
+
+  return (
+    <div style={{
+      margin: '0 1.5rem 1.5rem',
+      borderRadius: '14px',
+      border: '1.5px solid hsl(var(--accent) / .2)',
+      overflow: 'hidden',
+      background: 'hsl(var(--card))',
+    }}>
+      {/* Header */}
+      <div
+        style={{
+          padding: '0.85rem 1.25rem',
+          background: 'hsl(var(--accent) / .06)',
+          borderBottom: '1.5px solid hsl(var(--accent) / .15)',
+          display: 'flex', alignItems: 'center', gap: '10px',
+          cursor: 'pointer', userSelect: 'none',
+        }}
+        onClick={() => setExpanded(e => !e)}
+      >
+        <div style={{
+          width: '28px', height: '28px', borderRadius: '8px',
+          background: 'hsl(var(--accent) / .15)',
+          border: '1.5px solid hsl(var(--accent) / .3)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <MonitorPlay size={14} style={{ color: 'hsl(var(--accent))' }} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: '.87rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif' }}>
+            Screen Text Timeline
+          </div>
+          <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+            {blocks.length} slide text block{blocks.length !== 1 ? 's' : ''} extracted via OCR
+          </div>
+        </div>
+        <span style={{
+          fontSize: '.72rem', fontWeight: 600, padding: '2px 8px',
+          borderRadius: '999px',
+          background: 'hsl(var(--accent) / .12)',
+          color: 'hsl(var(--accent))',
+          fontFamily: 'Inter, sans-serif',
+        }}>
+          {expanded ? 'Collapse ↑' : 'Expand ↓'}
+        </span>
+      </div>
+
+      {/* Blocks */}
+      <div style={{ padding: '0.75rem' }}>
+        {visible.map((block, i) => (
+          <div key={i} style={{
+            display: 'flex', gap: '12px', alignItems: 'flex-start',
+            padding: '0.7rem 0.85rem',
+            marginBottom: i < visible.length - 1 ? '6px' : 0,
+            borderRadius: '10px',
+            background: i % 2 === 0 ? 'hsl(var(--muted) / .4)' : 'transparent',
+            border: '1px solid hsl(var(--ink) / .06)',
+          }}>
+            {/* Timestamp badge */}
+            <div style={{
+              flexShrink: 0,
+              display: 'flex', alignItems: 'center', gap: '4px',
+              padding: '3px 8px', borderRadius: '6px',
+              background: 'hsl(var(--accent) / .1)',
+              border: '1px solid hsl(var(--accent) / .2)',
+              fontSize: '.68rem', fontWeight: 700,
+              color: 'hsl(var(--accent))',
+              fontFamily: 'JetBrains Mono, monospace',
+              whiteSpace: 'nowrap',
+              minWidth: '110px',
+              justifyContent: 'center',
+            }}>
+              <Clock size={10} />
+              {formatTime(block.start)} → {formatTime(block.end)}
+            </div>
+            {/* OCR text */}
+            <div style={{
+              flex: 1,
+              fontSize: '.82rem',
+              color: 'hsl(var(--ink))',
+              fontFamily: 'Inter, sans-serif',
+              lineHeight: 1.55,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {block.text}
+            </div>
+          </div>
+        ))}
+
+        {blocks.length > 5 && (
+          <button
+            onClick={() => setExpanded(e => !e)}
+            style={{
+              marginTop: '8px', width: '100%',
+              padding: '0.5rem',
+              border: '1.5px dashed hsl(var(--accent) / .3)',
+              borderRadius: '8px',
+              background: 'hsl(var(--accent) / .04)',
+              color: 'hsl(var(--accent))',
+              fontSize: '.78rem', fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: 'Inter, sans-serif',
+              transition: 'all .2s',
+            }}
+          >
+            {expanded
+              ? `Show less ↑`
+              : `Show ${blocks.length - 5} more blocks ↓`}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── OCR Status badge ───────────────────────────────────────────────────────
+function OcrStatusBadge({ status }: { status: string }) {
+  const cfg: Record<string, { label: string; color: string; bg: string }> = {
+    pending: { label: 'OCR Queued', color: 'hsl(45,90%,45%)', bg: 'hsl(45,90%,50% / .1)' },
+    processing: { label: 'OCR Running', color: 'hsl(205,85%,50%)', bg: 'hsl(205,85%,55% / .1)' },
+    done: { label: 'OCR Complete', color: 'hsl(var(--success))', bg: 'hsl(var(--success) / .1)' },
+    skipped: { label: 'No Slides Found', color: 'hsl(var(--pencil))', bg: 'hsl(var(--muted))' },
+    error: { label: 'OCR Failed', color: 'hsl(var(--destructive))', bg: 'hsl(var(--destructive) / .1)' },
+    unknown: { label: 'OCR Pending', color: 'hsl(var(--pencil))', bg: 'hsl(var(--muted))' },
+  }
+  const c = cfg[status] ?? cfg.unknown
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: '5px',
+      fontSize: '.72rem', fontWeight: 700, padding: '3px 10px',
+      borderRadius: '999px',
+      color: c.color, background: c.bg,
+      fontFamily: 'Inter, sans-serif',
+      border: `1px solid ${c.color}40`,
+    }}>
+      {status === 'processing' && <Loader size={10} className="spin" />}
+      {status === 'done' && <CheckCircle size={10} />}
+      {status === 'pending' && <Clock size={10} />}
+      {c.label}
+    </span>
+  )
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────
+export default function VideoUploadPage() {
+  const [showConfidence, setShowConfidence] = useState(true)
+  const [file, setFile] = useState<File | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [recordingId, setRecordingId] = useState<string | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [result, setResult] = useState<ProcessingResult | null>(null)
+  const [error, setError] = useState('')
+  const [ocrStatus, setOcrStatus] = useState<string>('unknown')
+  const [ocrBlocks, setOcrBlocks] = useState<OcrBlock[]>([])
+  const [ocrPollerActive, setOcrPollerActive] = useState(false)
+
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!file) { setVideoUrl(null); return }
+    const url = URL.createObjectURL(file)
+    setVideoUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file])
+
+  const [chatOpen, setChatOpen] = useState(true)
+  const [isGeneratingMom, setIsGeneratingMom] = useState(false)
+  const [momData, setMomData] = useState<Record<string, unknown> | null>(null)
+  const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
+  const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
+    meetingPrompt: '', expectedSpeakers: null, selectedVoiceIds: [],
+    useDictionary: false, useVocabularyInPrompt: false, speakerSummary: false,
+  })
+
+  const { setProcessing, updateStage, clearProcessing, stage, startedAt, source } = useProcessingStore()
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    const saved = localStorage.getItem('ai-chat-panel-width')
+    return saved ? parseInt(saved, 10) : 340
+  })
+  const isDraggingPanel = useRef(false)
+  const dragStartX = useRef(0)
+  const dragStartWidth = useRef(0)
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    isDraggingPanel.current = true
+    dragStartX.current = e.clientX
+    dragStartWidth.current = chatWidth
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingPanel.current) return
+      const delta = dragStartX.current - ev.clientX
+      const newW = Math.min(680, Math.max(220, dragStartWidth.current + delta))
+      setChatWidth(newW)
+    }
+    const onUp = () => {
+      isDraggingPanel.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      setChatWidth(w => { localStorage.setItem('ai-chat-panel-width', String(w)); return w })
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [chatWidth])
+
+  const jobs = useJobsStore((s) => s.jobs)
+  const addJob = useJobsStore((s) => s.addJob)
+  const currentJob = jobs.find((j) => j.jobId === recordingId)
+
+  const onTranscriptReady = useCallback((data: Partial<ProcessingResult>) => {
+    setResult(data as ProcessingResult)
+    setIsGeneratingMom(true)
+    clearProcessing()
+  }, [clearProcessing])
+
+  const onDone = useCallback((data: ProcessingResult) => {
+    setResult(data)
+    setIsGeneratingMom(false)
+    clearProcessing()
+  }, [clearProcessing])
+
+  const shouldPoll = recordingId && !result && !currentJob
+  const jobData = useJobPoller(shouldPoll ? recordingId : null, { onTranscriptReady, onDone })
+
+  // ── Restore in-flight job on mount ─────────────────────────────────────
+  useEffect(() => {
+    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'video-upload')
+    if (!priorJob) return
+    setRecordingId(priorJob.jobId)
+    if (priorJob.result?.transcript) {
+      setResult(priorJob.result as ProcessingResult)
+      setIsGeneratingMom(priorJob.status === 'transcript_ready')
+      clearProcessing()
+    } else if (isActiveJobStatus(priorJob.status)) {
+      setIsGeneratingMom(priorJob.status === 'transcript_ready')
+      setProcessing('video-upload' as ProcessingStage, priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
+    } else {
+      setIsGeneratingMom(false)
+      clearProcessing()
+    }
+  }, [setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Sync from global job store ─────────────────────────────────────────
+  useEffect(() => {
+    if (!currentJob) { if (recordingId) clearProcessing(); return }
+    if (currentJob.status === 'cancelled') {
+      setFile(null); setRecordingId(null); setResult(null); setError(''); setIsGeneratingMom(false); clearProcessing()
+    } else if (currentJob.status === 'done') {
+      if (currentJob.result?.transcript && result !== currentJob.result) setResult(currentJob.result as ProcessingResult)
+      setIsGeneratingMom(false); clearProcessing()
+    } else if (currentJob.status === 'error') {
+      setIsGeneratingMom(false); clearProcessing()
+    } else if (currentJob.status === 'transcript_ready') {
+      if (currentJob.result?.transcript && result !== currentJob.result) setResult(currentJob.result as ProcessingResult)
+      setIsGeneratingMom(true)
+    } else if (currentJob.status === 'pending_transcript_review') {
+      clearProcessing()
+    } else {
+      setProcessing('video-upload' as ProcessingStage, currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
+    }
+  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (jobData?.progress) updateStage(jobData.progress as ProcessingStage)
+    if (jobData?.status === 'error') clearProcessing()
+  }, [jobData?.progress, jobData?.status, updateStage, clearProcessing])
+
+  useEffect(() => () => { clearProcessing() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Poll OCR status independently ─────────────────────────────────────
+  useEffect(() => {
+    if (!recordingId || !ocrPollerActive) return
+    if (ocrStatus === 'done' || ocrStatus === 'skipped' || ocrStatus === 'error') return
+
+    let cancelled = false
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const res = await api.get(`/video/jobs/${recordingId}/ocr-status`)
+          if (cancelled) return
+          const status = res.data.ocr_status
+          setOcrStatus(status)
+          if (status === 'done') {
+            // Fetch the actual transcript
+            const vt = await api.get(`/video/jobs/${recordingId}/video-transcript`)
+            if (!cancelled) setOcrBlocks(vt.data.video_transcript || [])
+            return
+          }
+          if (status === 'skipped' || status === 'error') return
+        } catch {
+          // Non-fatal: OCR status poll failure
+        }
+        await new Promise(r => setTimeout(r, 5000))
+      }
+    }
+    poll()
+    return () => { cancelled = true }
+  }, [recordingId, ocrPollerActive, ocrStatus])
+
+  // ── File handlers ──────────────────────────────────────────────────────
+  const handleFile = (f: File) => {
+    if (!isVideoFile(f)) {
+      toast.error(`Unsupported format. Accepted: ${SUPPORTED_VIDEO_EXTS.join(', ')}`)
+      return
+    }
+    setFile(f); setResult(null); setRecordingId(null); setError('')
+    setOcrStatus('unknown'); setOcrBlocks([])
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragging(false)
+    const f = e.dataTransfer.files[0]
+    if (f) handleFile(f)
+  }
+
+  const handleReset = () => {
+    if (recordingId) useJobsStore.getState().removeJob(recordingId)
+    setFile(null); setRecordingId(null); setResult(null); setError('')
+    setIsGeneratingMom(false); clearProcessing()
+    setOcrStatus('unknown'); setOcrBlocks([]); setOcrPollerActive(false)
+  }
+
+  const handleCancel = async () => {
+    if (!recordingId) return
+    try {
+      await api.post(`/audio/jobs/${recordingId}/cancel`)
+      useJobsStore.getState().removeJob(recordingId)
+      setFile(null); setRecordingId(null); setResult(null); setError('')
+      setIsGeneratingMom(false); clearProcessing()
+      setOcrStatus('unknown'); setOcrBlocks([]); setOcrPollerActive(false)
+      toast.success('Processing cancelled successfully')
+    } catch (err: unknown) {
+      console.error('[Cancel] Failed:', err)
+      toast.error('Failed to cancel processing')
+    }
+  }
+
+  const handleUpload = async (
+    trimStartSec?: number,
+    trimEndSec?: number,
+    cutStartSec?: number,
+    cutEndSec?: number
+  ) => {
+    if (!file) return
+    setUploading(true); setError('')
+    setProcessing('video-upload' as ProcessingStage, 'uploading')
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      form.append('meeting_prompt', advancedOpts.meetingPrompt)
+      form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
+      form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
+      form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
+      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
+        form.append('trim_start_sec', String(trimStartSec))
+        form.append('trim_end_sec', String(trimEndSec))
+      }
+      if (cutStartSec !== undefined && cutEndSec !== undefined && cutEndSec > cutStartSec) {
+        form.append('cut_start_sec', String(cutStartSec))
+        form.append('cut_end_sec', String(cutEndSec))
+      }
+      const res = await api.post('/video/upload', form)
+      const rId = res.data.recording_id
+      setRecordingId(rId)
+      setOcrStatus('pending')
+      setOcrPollerActive(true)
+      addJob({
+        jobId: rId,
+        source: 'video-upload',
+        filename: file.name,
+        startedAt: new Date().toISOString(),
+      })
+      updateStage('queued')
+    } catch (e: unknown) {
+      setError(getApiErrorDetail(e, 'Upload failed.'))
+      clearProcessing()
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // Fetch MoM when pipeline completes
+  useEffect(() => {
+    if (!recordingId || !result) return
+    const isTerminal = currentJob?.status === 'done' || currentJob?.status === 'error'
+    if (isTerminal) {
+      api.get(`/mom/${recordingId}`)
+        .then((r) => setMomData(r.data))
+        .catch(() => setMomData(null))
+    }
+  }, [recordingId, result, currentJob?.status])
+
+  const handleGenerateInsights = useCallback(async (tasks: string[]) => {
+    if (!recordingId || isGeneratingInsights) return
+    setIsGeneratingInsights(true)
+    try {
+      const res = await api.post(`/history/${recordingId}/generate-insights`, { tasks })
+      setResult((prev) => prev ? {
+        ...prev,
+        summary: res.data.short_summary ?? prev.summary,
+        short_summary: res.data.short_summary ?? prev.short_summary,
+        detailed_summary: res.data.detailed_summary ?? prev.detailed_summary,
+        key_points: res.data.key_points ?? prev.key_points,
+        action_items: res.data.action_items ?? prev.action_items,
+      } : prev)
+    } catch (err: unknown) {
+      console.error('[GenerateInsights] Failed:', err)
+    } finally {
+      setIsGeneratingInsights(false)
+    }
+  }, [recordingId, isGeneratingInsights])
+
+  const isProcessingActive = useProcessingStore((s) => s.isProcessing && s.source === 'video-upload')
+  const fmtSize = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`
+  const chatW = chatOpen ? `${chatWidth}px` : '48px'
+
+  return (
+    <div className="workspace-split" style={{
+      display: 'grid',
+      gridTemplateColumns: `1fr ${chatW}`,
+      transition: isDraggingPanel.current ? 'none' : 'grid-template-columns .25s ease',
+    }}>
+      <div className="center-panel" style={{ position: 'relative' }}>
+
+        {isProcessingActive && (
+          <ProcessingOverlay stage={stage} startedAt={startedAt} source={source} onCancel={handleCancel} />
+        )}
+
+        {/* Header */}
+        <div className="panel-header">
+          <div style={{
+            width: '34px', height: '34px', borderRadius: '10px', flexShrink: 0,
+            background: result ? 'hsl(var(--success) / .12)' : 'hsl(260 80% 60% / .12)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: `2px solid ${result ? 'hsl(var(--success) / .3)' : 'hsl(260 80% 60% / .3)'}`,
+            transition: 'all .3s',
+          }}>
+            {result
+              ? <CheckCircle size={16} style={{ color: 'hsl(var(--success))' }} />
+              : <Video size={16} style={{ color: 'hsl(260 80% 65%)' }} />}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1>{result ? 'Transcript' : 'Upload Video'}</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <p style={{ fontSize: '.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', fontWeight: 400, marginTop: '1px' }}>
+                {result && file ? file.name : 'MP4 · AVI · MOV · MKV · WebM'}
+              </p>
+              {recordingId && ocrStatus !== 'unknown' && (
+                <OcrStatusBadge status={ocrStatus} />
+              )}
+            </div>
+          </div>
+          {result && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <PDFButton recordingId={recordingId} filename={file?.name} variant="ghost" />
+              <button
+                className="btn btn-ghost animate-bounce-in"
+                onClick={handleReset}
+                style={{ flexShrink: 0, fontSize: '.82rem', padding: '.4rem .85rem' }}
+              >
+                <RotateCcw size={14} /> New Upload
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Upload area */}
+        {!result && (
+          <div className="capture-setup" style={{ padding: '1.75rem 2rem', borderBottom: '2px dashed hsl(var(--border))' }}>
+            <div
+              onDragEnter={() => setDragging(true)}
+              onDragOver={(e) => e.preventDefault()}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileRef.current?.click()}
+              style={{
+                border: `2px dashed ${dragging ? 'hsl(260 80% 60%)' : 'hsl(var(--ink) / .2)'}`,
+                borderRadius: '14px',
+                padding: '3rem 2rem',
+                textAlign: 'center',
+                cursor: 'pointer',
+                background: dragging ? 'hsl(260 80% 60% / .06)' : 'hsl(var(--card))',
+                transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                marginBottom: '1.25rem',
+                position: 'relative', overflow: 'hidden',
+              }}
+            >
+              <div style={{
+                position: 'absolute', top: '-50%', left: '-50%',
+                width: '200%', height: '200%',
+                background: 'radial-gradient(circle, hsl(260 80% 60% / .08) 0%, transparent 65%)',
+                opacity: dragging ? 1 : 0, transition: 'opacity .3s', pointerEvents: 'none',
+              }} />
+
+              <div style={{
+                width: '56px', height: '56px', borderRadius: '14px',
+                background: dragging ? 'hsl(260 80% 60% / .2)' : 'hsl(260 80% 60% / .1)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 1.25rem',
+                border: `2px solid ${dragging ? 'hsl(260 80% 60% / .5)' : 'hsl(260 80% 60% / .2)'}`,
+                transition: 'all .25s', position: 'relative',
+              }}>
+                <CloudUpload size={24} style={{ color: 'hsl(260 80% 65%)', position: 'relative' }}
+                  className={dragging ? 'animate-bounce-in' : 'animate-float'} />
+              </div>
+
+              <p style={{ fontWeight: 700, marginBottom: '0.4rem', fontSize: '1rem', fontFamily: 'Inter, sans-serif', color: 'hsl(var(--ink))', position: 'relative' }}>
+                {dragging ? 'Drop it here!' : 'Drop video file here'}
+              </p>
+              <p style={{ fontSize: '0.85rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', position: 'relative' }}>
+                or <span style={{ color: 'hsl(260 80% 65%)', fontWeight: 600 }}>click to browse</span>
+              </p>
+              <p style={{ fontSize: '0.75rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', marginTop: '0.5rem', opacity: 0.7, position: 'relative' }}>
+                MP4 · AVI · MOV · MKV · WebM
+              </p>
+              <input
+                ref={fileRef} type="file"
+                accept={SUPPORTED_VIDEO_EXTS.map(e => `video/${e.slice(1)}`).concat(SUPPORTED_VIDEO_EXTS).join(',')}
+                hidden
+                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+              />
+            </div>
+
+            {/* File card */}
+            {file && (
+              <div className="animate-slide-up" style={{
+                display: 'flex', alignItems: 'center', gap: '12px',
+                padding: '1rem 1.25rem', marginBottom: '1rem',
+                background: 'hsl(var(--card))',
+                border: '1.5px solid hsl(var(--ink) / .1)',
+                borderLeft: '4px solid hsl(260 80% 60%)',
+                borderRadius: '0 10px 10px 0',
+              }}>
+                <div style={{
+                  width: '40px', height: '40px', borderRadius: '10px',
+                  background: 'hsl(260 80% 60% / .12)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  border: '1.5px solid hsl(260 80% 60% / .25)', flexShrink: 0,
+                }}>
+                  <FileVideo size={18} style={{ color: 'hsl(260 80% 65%)' }} />
+                </div>
+                <div style={{ flex: 1, overflow: 'hidden' }}>
+                  <div style={{ fontWeight: 600, fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', marginBottom: '3px' }}>
+                    {file.name}
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }}>
+                    {fmtSize(file.size)}
+                  </div>
+                </div>
+                <button onClick={handleReset} className="icon-btn" style={{ flexShrink: 0 }}>
+                  <X size={15} />
+                </button>
+              </div>
+            )}
+
+            {/* Video info banner */}
+            {file && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '.6rem 1rem', marginBottom: '1rem',
+                background: 'hsl(260 80% 60% / .06)',
+                border: '1px solid hsl(260 80% 60% / .2)',
+                borderRadius: '10px',
+              }}>
+                <MonitorPlay size={14} style={{ color: 'hsl(260 80% 65%)', flexShrink: 0 }} />
+                <span style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+                  Audio will be extracted automatically · Slide text will be captured via OCR
+                </span>
+              </div>
+            )}
+
+            {error && (
+              <div className="animate-shake" style={{
+                color: 'hsl(var(--destructive))', fontSize: '0.87rem', marginBottom: '1rem',
+                padding: '.7rem 1rem',
+                background: 'hsl(var(--destructive) / .08)',
+                border: '1.5px solid hsl(var(--destructive) / .25)',
+                borderRadius: '10px', fontFamily: 'Inter, sans-serif', fontWeight: 500,
+                display: 'flex', alignItems: 'center', gap: '8px',
+              }}>
+                ⚠ {error}
+              </div>
+            )}
+
+            {file && !recordingId && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+                <ErrorBoundary
+                  fallback={
+                    <div style={{
+                      padding: '1.25rem',
+                      borderRadius: '12px',
+                      background: 'hsl(var(--card))',
+                      border: '1.5px solid hsl(var(--border))',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                    }}>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'hsl(var(--foreground))' }}>
+                        Video Trimmer Unavailable for this file format
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))' }}>
+                        You can continue to upload and process the complete video recording.
+                      </div>
+                      <button
+                        onClick={() => handleUpload()}
+                        style={{
+                          alignSelf: 'flex-start',
+                          padding: '0.55rem 1.1rem',
+                          borderRadius: '8px',
+                          background: 'hsl(var(--primary))',
+                          color: 'hsl(var(--primary-foreground))',
+                          fontWeight: 600,
+                          fontSize: '0.85rem',
+                          border: 'none',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Process Full Video
+                      </button>
+                    </div>
+                  }
+                >
+                  <AudioTrimmer
+                    file={file}
+                    fileName={file.name}
+                    onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
+                    onSkip={() => handleUpload()}
+                  />
+                </ErrorBoundary>
+                <AdvancedOptionsPanel onChange={setAdvancedOpts} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {(currentJob?.status === 'pending_transcript_review' || jobData?.status === 'pending_transcript_review') && recordingId && (
+          <TranscriptReviewPanel
+            recordingId={recordingId}
+            onResumed={() => {
+              updateStage('diarizing')
+              setProcessing('video-upload' as ProcessingStage, 'diarizing')
+            }}
+          />
+        )}
+
+        {/* OCR Timeline (shown after result is ready and OCR ran) */}
+        {result && ocrBlocks.length > 0 && (
+          <OcrTimeline blocks={ocrBlocks} />
+        )}
+
+        {/* Video player (shown after upload, before result) */}
+        {!result && recordingId && videoUrl && (
+          <div style={{ padding: '1.25rem 1.5rem' }}>
+            <div style={{
+              borderRadius: '12px', overflow: 'hidden',
+              border: '1.5px solid hsl(var(--ink) / .12)',
+              background: '#000',
+            }}>
+              <video
+                src={videoUrl}
+                controls
+                style={{ width: '100%', maxHeight: '280px', display: 'block' }}
+              />
+            </div>
+            <div style={{
+              marginTop: '0.75rem', padding: '.6rem 1rem',
+              background: 'hsl(260 80% 60% / .06)',
+              border: '1px solid hsl(260 80% 60% / .2)',
+              borderRadius: '10px',
+              display: 'flex', alignItems: 'center', gap: '8px',
+            }}>
+              <Loader size={13} className="spin" style={{ color: 'hsl(260 80% 65%)', flexShrink: 0 }} />
+              <span style={{ fontSize: '.78rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif' }}>
+                Extracting audio & running OCR — transcript will appear when ready
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Transcript */}
+        <div className="transcript-scroll" style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem', background: 'hsl(var(--paper) / .4)' }}>
+          {result?.transcript?.length > 0 && (
+            <div className="animate-slide-up" style={{ marginBottom: '.75rem', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'hsl(var(--ink))', fontFamily: 'Inter, sans-serif', letterSpacing: '-.01em', margin: 0 }}>
+                  Transcript
+                </h3>
+                <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--pencil))', background: 'hsl(var(--muted))', padding: '.15rem .5rem', borderRadius: '999px', fontFamily: 'Inter, sans-serif' }}>
+                  {result.transcript.length} segments
+                </span>
+                {ocrBlocks.length > 0 && (
+                  <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(260 80% 65%)', background: 'hsl(260 80% 60% / .1)', padding: '.15rem .5rem', borderRadius: '999px', fontFamily: 'Inter, sans-serif', border: '1px solid hsl(260 80% 60% / .2)' }}>
+                    <FileText size={10} style={{ display: 'inline', marginRight: '3px' }} />{ocrBlocks.length} OCR blocks
+                  </span>
+                )}
+              </div>
+              <div className="confidence-legend" style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700, fontFamily: 'Inter, sans-serif' }}>
+                  Confidence
+                </span>
+                <span className="confidence-legend-item"><span className="conf-dot" style={{ background: 'hsl(var(--sticky-green))' }} />High</span>
+                <span className="confidence-legend-item"><span className="conf-dot" style={{ background: 'hsl(45,90%,50%)' }} />Mid</span>
+                <span className="confidence-legend-item"><span className="conf-dot" style={{ background: 'hsl(var(--destructive))' }} />Low</span>
+                <div style={{ flex: 1 }} />
+                <label className="confidence-switch">
+                  <span>Highlight</span>
+                  <input type="checkbox" checked={showConfidence} onChange={(e) => setShowConfidence(e.target.checked)} />
+                  <span className="slider" />
+                </label>
+              </div>
+            </div>
+          )}
+          <TranscriptViewer
+            segments={result?.transcript || []}
+            showConfidence={showConfidence}
+            audioUrl={undefined}
+            recordingId={recordingId || undefined}
+            onSegmentsChange={(updated) => {
+              if (result) setResult({ ...result, transcript: updated })
+            }}
+          />
+        </div>
+      </div>
+
+      {/* AI Chat Panel */}
+      <div className={`insights-pane ${chatOpen ? 'is-open' : ''}`} style={{ position: 'relative', display: 'flex' }}>
+        {chatOpen && (
+          <div
+            onMouseDown={handleDragStart}
+            title="Drag to resize"
+            style={{
+              position: 'absolute', left: 0, top: 0, bottom: 0, width: '6px',
+              cursor: 'col-resize', zIndex: 10, background: 'transparent', transition: 'background .15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'hsl(260 80% 60% / .25)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          />
+        )}
+        <AIChatPanel
+          recordingId={recordingId}
+          summary={result?.summary}
+          shortSummary={result?.short_summary as string | undefined}
+          detailedSummary={result?.detailed_summary as string | undefined}
+          keyPoints={result?.key_points}
+          actionItems={result?.action_items}
+          speakerSummary={result?.speaker_summary}
+          momData={momData as any}
+          isOpen={chatOpen}
+          onToggle={() => setChatOpen(o => !o)}
+          isGeneratingMom={isGeneratingMom}
+          onGenerateInsights={handleGenerateInsights}
+          isGeneratingInsights={isGeneratingInsights}
+          onScrollToSegment={() => {}}
+          onTranscriptChanged={() => {}}
+        />
+      </div>
+    </div>
+  )
+}

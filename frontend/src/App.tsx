@@ -37,7 +37,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 const BASE_URL = "http://127.0.0.1:8000";
 
 // ── License expiry date (must match backend/license.py) ───────
-const LICENSE_EXPIRY = new Date("2026-09-30T23:59:59");
+const LICENSE_EXPIRY = new Date("2026-10-15T23:59:59");
 
 /**
  * AuthBootstrap — runs once on app mount.
@@ -184,6 +184,7 @@ function LicenseGate({ children }: { children: React.ReactNode }) {
   // Client-side date check — fast, no network required
   const [expired] = useState<boolean>(() => new Date() > LICENSE_EXPIRY);
   const [serverExpired, setServerExpired] = useState(false);
+  const [licenseMessage, setLicenseMessage] = useState<string | undefined>();
 
   useEffect(() => {
     // Cross-check with backend /health — reads license_valid field.
@@ -193,6 +194,9 @@ function LicenseGate({ children }: { children: React.ReactNode }) {
       .then((res) => {
         if (res.data?.license_valid === false) {
           setServerExpired(true);
+          if (res.data?.license_message) {
+            setLicenseMessage(res.data.license_message);
+          }
         }
       })
       .catch((err) => {
@@ -202,13 +206,16 @@ function LicenseGate({ children }: { children: React.ReactNode }) {
           err.response?.data?.error === "license_expired"
         ) {
           setServerExpired(true);
+          if (err.response?.data?.message) {
+            setLicenseMessage(err.response.data.message);
+          }
         }
         // Network errors (backend offline) — do not block the app
       });
   }, []);
 
   if (expired || serverExpired) {
-    return <LicenseExpired />;
+    return <LicenseExpired message={licenseMessage} />;
   }
 
   return <>{children}</>;

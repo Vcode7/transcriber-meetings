@@ -97,6 +97,8 @@ class UserSettings(BaseModel):
     max_tokens_rom_agenda_doc_points: int = Field(default=1024, ge=1)
     max_tokens_rom_version_short: int = Field(default=4096, ge=1)
     max_tokens_rom_version_medium: int = Field(default=4096, ge=1)
+    reasoning_mode_short_rom: bool = False
+    reasoning_mode_action_points: bool = False
 
     # Low-Volume Speech Transcription Pipeline Enhancements
     enable_vad: bool = True
@@ -228,6 +230,8 @@ class UserSettingsUpdate(BaseModel):
     max_tokens_rom_agenda_doc_points: int | None = Field(default=None, ge=1)
     max_tokens_rom_version_short: int | None = Field(default=None, ge=1)
     max_tokens_rom_version_medium: int | None = Field(default=None, ge=1)
+    reasoning_mode_short_rom: bool | None = None
+    reasoning_mode_action_points: bool | None = None
 
     # Low-Volume Speech Transcription Pipeline Enhancements
     enable_vad: bool | None = None

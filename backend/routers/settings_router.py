@@ -142,6 +142,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "max_tokens_rom_agenda_doc_points": 1024,
         "max_tokens_rom_version_short": 4096,
         "max_tokens_rom_version_medium": 4096,
+        "reasoning_mode_short_rom": False,
+        "reasoning_mode_action_points": False,
     }
 
     if not doc:
@@ -171,6 +173,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
     res["missing_segment_min_duration_sec"] = float(res.get("missing_segment_min_duration_sec") or 2.0)
     res["restrict_reassignment_to_meeting_speakers"] = bool(res.get("restrict_reassignment_to_meeting_speakers", 0))
+    res["reasoning_mode_short_rom"] = bool(res.get("reasoning_mode_short_rom", 0))
+    res["reasoning_mode_action_points"] = bool(res.get("reasoning_mode_action_points", 0))
 
     if res.get("embedding_model"):
         from config import settings
@@ -234,6 +238,10 @@ async def update_settings(
         patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
     if "rom_separate_action_extraction" in patch:
         patch["rom_separate_action_extraction"] = 1 if patch["rom_separate_action_extraction"] else 0
+    if "reasoning_mode_short_rom" in patch:
+        patch["reasoning_mode_short_rom"] = 1 if patch["reasoning_mode_short_rom"] else 0
+    if "reasoning_mode_action_points" in patch:
+        patch["reasoning_mode_action_points"] = 1 if patch["reasoning_mode_action_points"] else 0
     if "rom_action_generation_chunk_size" in patch:
         try:
             val = int(patch["rom_action_generation_chunk_size"])
@@ -312,6 +320,7 @@ async def update_settings(
                         max_tokens_collection_chat, max_tokens_collection_compare, max_tokens_collection_topic_growth, max_tokens_vocab_extractor,
                         restrict_reassignment_to_meeting_speakers, rom_short_model_mode, rom_short_model_variant_id,
                         max_tokens_rom_version_short, max_tokens_rom_version_medium,
+                        reasoning_mode_short_rom, reasoning_mode_action_points,
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
@@ -326,6 +335,7 @@ async def update_settings(
                         :max_tokens_collection_chat, :max_tokens_collection_compare, :max_tokens_collection_topic_growth, :max_tokens_vocab_extractor,
                         :restrict_reassignment_to_meeting_speakers, :rom_short_model_mode, :rom_short_model_variant_id,
                         :max_tokens_rom_version_short, :max_tokens_rom_version_medium,
+                        :reasoning_mode_short_rom, :reasoning_mode_action_points,
                         :updated_at)
                 """),
                 {
@@ -383,6 +393,8 @@ async def update_settings(
                     "rom_short_model_variant_id": patch.get("rom_short_model_variant_id", None),
                     "max_tokens_rom_version_short": patch.get("max_tokens_rom_version_short", 4096),
                     "max_tokens_rom_version_medium": patch.get("max_tokens_rom_version_medium", 4096),
+                    "reasoning_mode_short_rom": patch.get("reasoning_mode_short_rom", 0),
+                    "reasoning_mode_action_points": patch.get("reasoning_mode_action_points", 0),
                     "updated_at": dt_to_str(now),
                 },
             )
@@ -395,6 +407,10 @@ async def update_settings(
         patch["generate_mom_auto"] = bool(patch["generate_mom_auto"])
     if "restrict_reassignment_to_meeting_speakers" in patch:
         patch["restrict_reassignment_to_meeting_speakers"] = bool(patch["restrict_reassignment_to_meeting_speakers"])
+    if "reasoning_mode_short_rom" in patch:
+        patch["reasoning_mode_short_rom"] = bool(patch["reasoning_mode_short_rom"])
+    if "reasoning_mode_action_points" in patch:
+        patch["reasoning_mode_action_points"] = bool(patch["reasoning_mode_action_points"])
 
     return {"message": "Settings updated.", **patch}
 

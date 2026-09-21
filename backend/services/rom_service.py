@@ -4661,16 +4661,56 @@ class RomService:
                         if pts:
                             return pts
                 except Exception:
-                    # Try repairing trailing commas: [ "a", "b", ]
+                    # Try repairing trailing commas and invalid backslash escapes (e.g. \approx, Windows paths)
                     try:
                         fixed = re.sub(r",\s*([\]\}])", r"\1", json_substr)
+                        fixed = re.sub(r'\\(?![/"\\bfnrtu])', r'\\\\', fixed)
                         data = _json.loads(fixed)
                         if isinstance(data, list):
-                            pts = [str(x).strip() for x in data if str(x).strip()]
+                            pts = []
+                            for item in data:
+                                if isinstance(item, dict):
+                                    t = (
+                                        item.get("text")
+                                        or item.get("polished_text")
+                                        or item.get("point")
+                                        or item.get("discussion")
+                                        or str(item)
+                                    )
+                                    if t and str(t).strip():
+                                        pts.append(str(t).strip())
+                                elif item and str(item).strip():
+                                    pts.append(str(item).strip())
                             if pts:
                                 return pts
                     except Exception:
-                        pass
+                        # Try parsing multiple separate array blocks: [ "pt 1" ] \n [ "pt 2" ]
+                        try:
+                            multi_arrays = re.findall(r'\[[\s\S]*?\]', cand_str)
+                            if len(multi_arrays) > 1:
+                                multi_pts = []
+                                for arr_str in multi_arrays:
+                                    fixed_arr = re.sub(r",\s*([\]\}])", r"\1", arr_str)
+                                    fixed_arr = re.sub(r'\\(?![/"\\bfnrtu])', r'\\\\', fixed_arr)
+                                    arr_data = _json.loads(fixed_arr)
+                                    if isinstance(arr_data, list):
+                                        for item in arr_data:
+                                            if isinstance(item, dict):
+                                                t = (
+                                                    item.get("text")
+                                                    or item.get("polished_text")
+                                                    or item.get("point")
+                                                    or item.get("discussion")
+                                                    or str(item)
+                                                )
+                                            else:
+                                                t = str(item)
+                                            if t and str(t).strip():
+                                                multi_pts.append(str(t).strip())
+                                if multi_pts:
+                                    return multi_pts
+                        except Exception:
+                            pass
 
         # 3. Fallback: Parse line-by-line (numbered lists or bullet points)
         bullet_pts = []
@@ -4744,6 +4784,7 @@ class RomService:
         version: str,
         writing_rules: str = "",
         important_points: list = None,
+        reasoning_mode: Optional[bool] = None,
     ) -> Dict:
         """
         Generate a condensed Short or Medium version of the Final ROM.
@@ -4794,6 +4835,15 @@ class RomService:
 
         from services.ai_provider import get_provider
         provider = get_provider()
+
+        if reasoning_mode is not None:
+            use_reasoning = bool(reasoning_mode)
+        else:
+            try:
+                active_cfg = provider._get_active_settings() if hasattr(provider, "_get_active_settings") else {}
+                use_reasoning = bool(active_cfg.get("reasoning_mode_short_rom", False))
+            except Exception:
+                use_reasoning = False
         try:
             for agenda in agendas:
                 if not isinstance(agenda, dict):
@@ -4858,10 +4908,60 @@ class RomService:
                 )
 
                 try:
-                    if hasattr(provider, "query"):
-                        raw = provider.query(prompt, max_tokens=4096, temperature=0.2)
+                    if version == "short" and use_reasoning:
+                        # ── Reasoning Mode ON: 2 LLM calls ──
+                        # 1. Reasoning call: Ask LLM to analyze/reason about input only. Max 2000 tokens.
+                        reasoning_prompt = (
+                            "You are an expert meeting-record editor.\n\n"
+                            "Analyze and reason about the following agenda discussion to prepare for generating a concise Short ROM.\n\n"
+                            f"AGENDA:\n{agenda_title}\n\n"
+                            f"DISCUSSION POINTS:\n{points_json}\n\n"
+                            f"{rules_section}{mandatory_section}\n\n"
+                            "WHOLE-AGENDA SYNTHESIS & POINT-REDUCTION INSTRUCTIONS:\n"
+                            "1. Consider all points together holistically under this agenda as ONE unified conversation, NOT as isolated individual points.\n"
+                            "2. Actively reduce the total number of points: do NOT produce a 1-to-1 mapping of input points.\n"
+                            "3. Merge and consolidate related discussion threads, debates, decisions, and updates into a substantially smaller number of comprehensive, high-density points (aim for roughly 3 to 6 synthesized points for an agenda with 8-15 input points).\n"
+                            "4. Identify the unifying themes and group related points together (e.g., group infrastructure upgrades together, observability/stability reviews together, data integrity/security policies together).\n"
+                            "5. Ensure critical details—explicit action owners, deadlines, key metrics, and agreed decisions—are identified so they can be smoothly woven into the merged points.\n"
+                            "6. Formulate the concrete synthesis plan for each resulting consolidated point.\n\n"
+                            "CRITICAL CONSTRAINT: Provide your analysis, topic groupings, and synthesis plan ONLY. Do NOT generate the final JSON array or finalized response. "
+                            "Focus strictly on planning how to consolidate and reduce the discussion points across the entire agenda."
+                        )
+                        logger.info(f"[RomService] Short ROM agenda '{agenda_title}' executing reasoning call (max 2000 tokens)...")
+                        if hasattr(provider, "query"):
+                            reasoning_raw = provider.query(reasoning_prompt, max_tokens=2000, temperature=0.2)
+                        else:
+                            reasoning_raw = provider._infer(reasoning_prompt, max_new_tokens=2000, task_key="rom_version_short_reasoning")
+
+                        from services.ai_provider import strip_thinking
+                        reasoning_text = strip_thinking(reasoning_raw).strip()
+                        logger.info(f"[RomService] Short ROM agenda '{agenda_title}' reasoning call complete ({len(reasoning_text)} chars).")
+
+                        # 2. Generation call: Pass reasoning in REASONING BLOCK, disable thinking/reasoning, generate only final valid JSON output.
+                        generation_prompt = (
+                            f"{prompt}\n\n"
+                            f"==================================================\n"
+                            f"REASONING BLOCK:\n"
+                            f"{reasoning_text}\n"
+                            f"==================================================\n\n"
+                            f"CRITICAL INSTRUCTIONS FOR POINT REDUCTION & WHOLE-AGENDA SYNTHESIS:\n"
+                            f"- Consider all points together under this agenda as one conversation and use the REASONING BLOCK above to synthesize them.\n"
+                            f"- Do NOT output a 1-to-1 mapping of input points. Actively consolidate and reduce the total number of points into a smaller, unified set of comprehensive points (aim for roughly 3 to 6 high-impact points for this agenda).\n"
+                            f"- In each consolidated point, naturally weave together the relevant decisions, technical details, action owners, and deadlines identified in the reasoning block.\n"
+                            f"- Disable thinking/reasoning: do NOT repeat the reasoning text or include any explanatory comments.\n"
+                            f"- Return ONLY a valid JSON array of the consolidated point strings: [\"point 1\", \"point 2\", ...]\n"
+                        )
+                        logger.info(f"[RomService] Short ROM agenda '{agenda_title}' executing generation call (think=False)...")
+                        if hasattr(provider, "query"):
+                            raw = provider.query(generation_prompt, max_tokens=4096, temperature=0.2)
+                        else:
+                            raw = provider._infer(generation_prompt, task_key=prompt_key, think=False)
                     else:
-                        raw = provider._infer(prompt, task_key=prompt_key)
+                        # ── Reasoning Mode OFF (or medium version): 1 normal LLM call (without thinking mode) ──
+                        if hasattr(provider, "query"):
+                            raw = provider.query(prompt, max_tokens=4096, temperature=0.2)
+                        else:
+                            raw = provider._infer(prompt, task_key=prompt_key, think=False)
 
                     # Robustly parse points from LLM output (handles <think>, markdown fences, arrays, bullets)
                     parsed_texts = self._parse_condensed_points(raw)

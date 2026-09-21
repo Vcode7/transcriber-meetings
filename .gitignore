@@ -119,3 +119,8 @@ vector_store
 /vector_store
 backend/vector_store
 backend/vector_store/*
+
+backend/wheels
+backend/wheels/*
+backend/wheels_training
+backend/wheels_training/*

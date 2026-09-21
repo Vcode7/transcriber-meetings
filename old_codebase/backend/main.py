@@ -1,0 +1,467 @@
+"""FastAPI application entry point."""
+# ── Force HuggingFace offline mode BEFORE any HF library is imported ──────────
+# This must be the very first code that runs. HF hub performs connectivity checks
+# at import time (not just at model-load time), so setting these env vars after
+# any `import transformers / whisperx / pyannote` is already too late.
+import os
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+# Enable PyTorch expandable segments to avoid VRAM fragmentation and prevent CUDA OOM on long audio files.
+# if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+#     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# ─────────────────────────────────────────────────────────────────────────────
+# ── Apply SpeechBrain / torchaudio compatibility patches ──────────────────────
+# Must run BEFORE any import of whisperx, pyannote, speechbrain, or ECAPA so
+# that SpeechBrain's k2/flair lazy-import machinery is mocked out in advance.
+from services.compat import apply_compatibility_patches
+apply_compatibility_patches()
+# ─────────────────────────────────────────────────────────────────────────────
+import json
+import logging
+import warnings
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+import torch
+import torchaudio
+
+from license import check_license, LICENSE_EXPIRED_BODY
+
+# Suppress warnings
+warnings.filterwarnings('ignore', category=UserWarning, module=r'pyannote.*')
+warnings.filterwarnings('ignore', category=UserWarning, module=r'torchcodec.*')
+warnings.filterwarnings('ignore', category=UserWarning, message=r'.*torchcodec.*')
+warnings.filterwarnings('ignore', category=FutureWarning, module=r'librosa.*')
+
+from config import settings
+from database import connect_db, close_db
+from services.diarization import init_diarization
+from routers.auth import router as auth_router
+from routers.voice import router as voice_router
+from routers.audio import router as audio_router
+from routers.history import router as history_router
+from routers.settings_router import router as settings_router
+from routers.pdf_router import router as pdf_router
+from routers.mom_router import router as mom_router
+from routers.prompt_router import router as prompt_router
+from routers.dictionary_router import router as dictionary_router
+from routers.analytics_router import router as analytics_router
+from routers.attachments_router import router as attachments_router
+from routers.global_context_router import router as global_context_router
+from routers.raw_mom_router import router as raw_mom_router
+from routers.rom_router import router as rom_router
+from routers.dashboard_router import router as dashboard_router
+from routers.prompt_templates_router import router as prompt_templates_router
+from routers.collections_router import router as collections_router
+from routers.collection_ai_router import router as collection_ai_router
+from routers.ai_chat_router import router as ai_chat_router
+from routers.video_router import router as video_router
+from routers.speaker_management_router import router as speaker_management_router
+from routers.training_routes import router as training_router
+from routers.rom_training_router import router as rom_training_router
+from routers.arena_router import router as arena_router
+from routers.correction_router import router as correction_router
+from routers.embedding_training_router import router as embedding_training_router
+
+from services.record import OverlapModel
+from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
+
+import time
+from collections import deque
+from datetime import datetime
+
+STARTUP_TIME = time.time()
+
+class InMemoryLogHandler(logging.Handler):
+    def __init__(self, max_records=2000, log_file_path="voicesum.log"):
+        super().__init__()
+        self.records = deque(maxlen=max_records)
+        self.log_file_path = log_file_path
+        
+    def emit(self, record):
+        try:
+            log_entry = {
+                "timestamp": datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3],
+                "name": record.name,
+                "level": record.levelname,
+                "message": self.format(record),
+            }
+            self.records.append(log_entry)
+            
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"{log_entry['timestamp']} [{log_entry['level']}] {log_entry['name']} — {log_entry['message']}\n")
+        except Exception:
+            pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+in_memory_log_handler = InMemoryLogHandler()
+in_memory_log_handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(in_memory_log_handler)
+
+# ── Overlap model — loaded once at startup, may be None ──────
+_overlap_model: OverlapModel | None = None
+_overlap_device: str = "cpu"
+
+
+def _load_overlap_model() -> OverlapModel | None:
+    """Load the Wav2Vec2-based overlap classifier. Returns None if unavailable."""
+    model_path = settings.OVERLAP_MODEL_PATH
+    if not model_path:
+        logger.info(
+            "[OverlapModel] OVERLAP_MODEL_PATH not configured — "
+            "cross-talk detection disabled (set it in .env to enable)."
+        )
+        return None
+    if not os.path.exists(model_path):
+        logger.info(
+            f"[OverlapModel] Model file not found at '{model_path}' — "
+            "cross-talk detection disabled. Set OVERLAP_MODEL_PATH in .env to enable."
+        )
+        return None
+
+    # Resolve the local Wav2Vec2 encoder directory.
+    wav2vec2_dir: str | None = None
+    try:
+        from services.model_loader import ModelLoader
+        align_path = ModelLoader.get_model_path("align_engine")
+        if align_path and align_path.exists():
+            wav2vec2_dir = str(align_path)
+            logger.info(f"[OverlapModel] Using local Wav2Vec2 encoder from: {wav2vec2_dir}")
+        else:
+            logger.error(
+                "[OverlapModel] align_engine/ not found in MODELS_DIR. "
+                "Cross-talk detection cannot start in offline mode."
+            )
+            return None
+    except Exception as e:
+        logger.error(f"[OverlapModel] Could not resolve align_engine path ({e}).")
+        return None
+
+    try:
+        m = OverlapModel(model_dir=wav2vec2_dir)
+        m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+        m.eval()
+        logger.info(f"[OverlapModel] Loaded from '{model_path}' ✓")
+        return m
+    except Exception as e:
+        logger.error(f"[OverlapModel] Failed to load: {e}")
+        return None
+
+
+def get_overlap_model() -> OverlapModel | None:
+    """Lazy-load overlap model when first required."""
+    global _overlap_model, _overlap_device
+    if _overlap_model is None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-load Overlap Classifier")
+        logger.info("[OverlapModel] Lazy loading overlap classifier...")
+        _overlap_model = _load_overlap_model()
+        if _overlap_model is not None:
+            _overlap_model.to(_overlap_device)
+        log_gpu_memory("Post-load Overlap Classifier")
+    return _overlap_model
+
+
+def unload_overlap_model():
+    """Unload overlap model from memory."""
+    global _overlap_model
+    if _overlap_model is not None:
+        from services.device_utils import log_gpu_memory
+        log_gpu_memory("Pre-unload Overlap Classifier")
+        logger.info("[OverlapModel] Unloading overlap classifier...")
+        del _overlap_model
+        _overlap_model = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[OverlapModel] Overlap classifier unloaded.")
+        log_gpu_memory("Post-unload Overlap Classifier")
+
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _overlap_model, _overlap_device
+
+    # Startup
+    logger.info("Starting VoiceSum API (fully offline mode)...")
+
+    # Disable access logs for /audio/jobs endpoint
+    class EndpointFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.args:
+                for arg in record.args:
+                    if isinstance(arg, str) and "/audio/jobs" in arg:
+                        return False
+            try:
+                msg = record.getMessage()
+                if "/audio/jobs" in msg:
+                    return False
+            except Exception:
+                pass
+            return True
+
+    logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
+
+    # ── License check ─────────────────────────────────────────────
+    _valid, _msg = check_license()
+    if not _valid:
+        logger.critical(f"[License] APPLICATION LICENSE HAS EXPIRED: {_msg}")
+        logger.critical("[License] All API requests will be rejected with HTTP 503.")
+    else:
+        logger.info("[License] License valid — application is authorized to run.")
+    # ─────────────────────────────────────────────────────────────
+
+    # Apply HF offline environment settings (belt-and-suspenders after top-of-file injection)
+    from services.model_loader import setup_offline_hf_environment
+    setup_offline_hf_environment()
+    _log_device()           # logs "Using CUDA -- GPU: ..." or "using CPU"
+    await connect_db()
+    init_diarization()      # try load pyannote if HF_TOKEN set
+
+    # Pre-load prompt templates into in-memory cache
+    try:
+        from services.prompt_service import _ensure_cache_loaded
+        from database import get_db_context
+        async with get_db_context() as db:
+            await _ensure_cache_loaded(db)
+        logger.info("[PromptService] Prompt templates cache loaded at startup.")
+    except Exception as e:
+        logger.warning(f"[PromptService] Failed to preload prompt cache at startup: {e}")
+
+    # Overlap model device setup (do not pre-load model to save RAM/VRAM)
+    _overlap_device = _ML_DEVICE
+
+    # Ensure upload dir exists
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+    # Warm up the Qwen3 model (now a deferred log to optimize startup/idle footprint)
+    try:
+        from services.ai_provider import warm_up_model
+        warm_up_model()
+    except Exception as e:
+        logger.warning(f"[Startup] Qwen3 model warm-up skipped: {e}")
+
+    yield
+
+    # Shutdown
+    await close_db()
+    logger.info("VoiceSum API shut down.")
+
+
+app = FastAPI(
+    title="VoiceSum API",
+    description="Voice Conversation Summarization with Speaker Identification",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+# ── License Middleware ─────────────────────────────────────────
+# Runs before every request. Returns HTTP 503 after the license expiry date or on verification failure.
+# Passes /health through so the frontend can detect the expired state.
+class LicenseMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        valid, msg = check_license()
+        if not valid:
+            # Allow /health and / so clients can detect the expired/tampered state
+            if request.url.path in ("/health", "/"):
+                return await call_next(request)
+            from license import get_license_expired_body
+            return JSONResponse(
+                status_code=503,
+                content=get_license_expired_body(msg),
+            )
+        return await call_next(request)
+
+
+app.add_middleware(LicenseMiddleware)
+
+# ── CORS ──────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
+)
+
+# ── Routers ───────────────────────────────────────────────────
+app.include_router(auth_router)
+app.include_router(voice_router)
+app.include_router(audio_router)
+app.include_router(history_router)
+app.include_router(settings_router)
+app.include_router(pdf_router)
+app.include_router(mom_router)
+app.include_router(prompt_router)
+app.include_router(dictionary_router)
+app.include_router(analytics_router)
+app.include_router(attachments_router)
+app.include_router(global_context_router)
+app.include_router(raw_mom_router)
+app.include_router(rom_router)
+app.include_router(dashboard_router)
+app.include_router(prompt_templates_router)
+app.include_router(collections_router)
+app.include_router(collection_ai_router)
+app.include_router(ai_chat_router)
+app.include_router(video_router)
+app.include_router(speaker_management_router)
+app.include_router(training_router)
+app.include_router(rom_training_router)
+app.include_router(arena_router)
+app.include_router(correction_router)
+app.include_router(embedding_training_router)
+
+# ── Serve uploaded audio files ────────────────────────────────
+if os.path.exists(settings.UPLOAD_DIR):
+    app.mount("/files", StaticFiles(directory=settings.UPLOAD_DIR), name="files")
+
+
+@app.get("/", tags=["health"])
+async def root():
+    return {"status": "ok", "service": "VoiceSum API", "version": "1.0.0"}
+
+
+@app.get("/health", tags=["health"])
+async def health():
+    from services.diarization import is_pyannote_available
+    from services.ai_provider import QwenProvider
+    from license import check_license, get_license_info
+    license_valid, lic_msg = check_license()
+    lic_info = get_license_info()
+    return {
+        "status": "ok",
+        "license_valid": license_valid,
+        "license_expiry": lic_info.get("expiry_date", "2026-10-15"),
+        "license_message": lic_msg if not license_valid else "Valid",
+        "pyannote_available": is_pyannote_available(),
+        "llm_ready": QwenProvider._pipeline is not None,
+        "llm_model": settings.QWEN_MODEL_ID,
+        "offline_mode": True,
+        "overlap_model_loaded": _overlap_model is not None,
+        "overlap_device": _overlap_device,
+    }
+
+
+# ── Cross-talk / overlap detection ───────────────────────────
+# Registered under /api/detect-overlap (prefix matches frontend call)
+@app.post("/api/detect-overlap", tags=["realtime"])
+async def detect_overlap(file: UploadFile = File(...)):
+    """
+    Accept a ~1-second audio chunk (webm/opus/wav) and return
+    {"overlap": 1} if cross-talk is detected, {"overlap": 0} otherwise.
+    """
+    import subprocess, tempfile, uuid
+
+    model = get_overlap_model()
+    if model is None:
+        return {"overlap": 0, "status": "disabled"}
+
+    audio_bytes = await file.read()
+    uid = uuid.uuid4().hex[:8]
+
+    # Browser MediaRecorder sends WebM/Opus — save with correct extension
+    # so ffmpeg can auto-detect the container.
+    src_path = os.path.join(settings.UPLOAD_DIR, f"_overlap_src_{uid}.webm")
+    dst_path = os.path.join(settings.UPLOAD_DIR, f"_overlap_wav_{uid}.wav")
+
+    with open(src_path, "wb") as f:
+        f.write(audio_bytes)
+
+    try:
+        run_kwargs = {
+            "capture_output": True,
+            "timeout": 5,
+        }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", src_path,
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "wav",
+                dst_path,
+            ],
+            **run_kwargs
+        )
+        if result.returncode != 0:
+            logger.warning(
+                f"[OverlapDetect] ffmpeg failed (rc={result.returncode}): "
+                f"{result.stderr.decode(errors='replace')[-300:]}"
+            )
+            return {"overlap": 0}
+
+        waveform, sr = torchaudio.load(dst_path)
+    except FileNotFoundError:
+        logger.warning("[OverlapDetect] ffmpeg not found — cannot decode WebM chunks.")
+        return {"overlap": 0}
+    except Exception as e:
+        logger.warning(f"[OverlapDetect] Failed to load audio: {e}")
+        return {"overlap": 0}
+    finally:
+        for p in (src_path, dst_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    # torchaudio.load already honours the -ar 16000 conversion above,
+    # but resample defensively if something changed.
+    if sr != 16000:
+        waveform = torchaudio.transforms.Resample(sr, 16000)(waveform)
+
+    waveform = waveform.squeeze(0)
+
+    # Normalise
+    peak = waveform.abs().max()
+    if peak > 0:
+        waveform = waveform / peak
+
+    # Pad or trim to exactly 1 second (16 000 samples)
+    target_len = 16000
+    if waveform.shape[0] < target_len:
+        waveform = torch.cat([waveform, torch.zeros(target_len - waveform.shape[0])])
+    else:
+        waveform = waveform[:target_len]
+
+    waveform = waveform.unsqueeze(0).to(_overlap_device)
+
+    with torch.no_grad():
+        prob: float = model(waveform).item()
+    logger.debug(f"[OverlapDetect] overlap_prob={prob:.4f}")
+    return {"overlap": 1 if prob > 0.6 else 0, "probability": round(prob, 4)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Pass the app object directly so Uvicorn does not attempt to import "main" at runtime (fails in PyInstaller)
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+
+
