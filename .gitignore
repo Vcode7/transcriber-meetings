@@ -120,6 +120,10 @@ vector_store
 backend/vector_store
 backend/vector_store/*
 
+
+old_codebase
+old_codebase/*
+
 backend/wheels
 backend/wheels/*
 backend/wheels_training
