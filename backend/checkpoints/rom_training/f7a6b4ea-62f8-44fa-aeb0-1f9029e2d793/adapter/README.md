@@ -8,8 +8,8 @@ tags:
 - transformers
 - trl
 licence: license
-pipeline_tag: text-generation
 base_model: E:\projects\Transcriber-meeting-initial\Application\runtime\nlp_engine
+pipeline_tag: text-generation
 ---
 
 # Model Card for adapter

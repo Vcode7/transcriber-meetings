@@ -5106,6 +5106,247 @@ class RomService:
 
         return rewritten
 
+    def generate_rom_version_with_variant(
+        self,
+        final_rom: Dict,
+        version: str,
+        writing_rules: str = "",
+        important_points: list = None,
+        variant_id: str = "",
+        adapter_path: str = "",
+        base_model: str = "",
+    ) -> Dict:
+        """
+        Generate a condensed Short ROM using a trained LoRA variant.
+        Evaluates each agenda discussion using infer_short_rom_with_variant,
+        bypassing Ollama and running through the fine-tuned adapter.
+        """
+        import copy
+        import gc
+        import logging
+        import re
+
+        logger = logging.getLogger(__name__)
+
+        if not final_rom or not isinstance(final_rom, dict):
+            return {}
+
+        if version != "short" or not variant_id or not adapter_path:
+            # Fallback to base model for medium version or if variant is missing
+            return self.generate_rom_version(
+                final_rom=final_rom,
+                version=version,
+                writing_rules=writing_rules,
+                important_points=important_points,
+            )
+
+        rewritten = copy.deepcopy(final_rom)
+        agendas = rewritten.get("agendas", [])
+        if not agendas:
+            return rewritten
+
+        from services.prompt_service import get_prompt_sync
+        prompt_template = get_prompt_sync("rom_version_short")
+        rules_section = self._build_rules_section(writing_rules)
+
+        from services.rom_training.rom_training_inference import infer_short_rom_with_variant
+
+        try:
+            for agenda in agendas:
+                if not isinstance(agenda, dict):
+                    continue
+                pts = agenda.get("discussion_points", [])
+                if not isinstance(pts, list) or not pts:
+                    continue
+
+                agenda_title = agenda.get("title", "General Discussion")
+                agenda_id = agenda.get("agenda_id", "")
+
+                # 1. Identify all points in this agenda marked as Very Important
+                marked_pts = []
+                for pt in pts:
+                    if self._is_point_very_important(pt, agenda_id, important_points):
+                        marked_pts.append(pt)
+
+                # 2. Build structured input per point
+                lines = []
+                for i, pt in enumerate(pts):
+                    pt_id = pt.get("id", f"P{i+1}")
+                    speaker = (
+                        pt.get("speaker") or
+                        (pt.get("speakers") or [None])[0] or
+                        "Unknown"
+                    )
+                    discussion = (pt.get("polished_text") or pt.get("text") or "").strip()
+                    action_owner = pt.get("action_owner") or "N/A"
+                    is_pt_marked = pt in marked_pts
+                    imp_tag = " | *** VERY IMPORTANT - PRESERVE INTACT WITHOUT SUMMARIZATION ***" if is_pt_marked else ""
+                    lines.append(
+                        f"[Point {i+1}] ID={pt_id} | Speaker={speaker} | "
+                        f"Action Owner={action_owner}{imp_tag}\n{discussion}"
+                    )
+                points_json = "\n\n".join(lines)
+
+                # 3. Build mandatory section from marked Very Important points
+                if marked_pts:
+                    mandatory_section = (
+                        "\n\nMANDATORY POINTS (MUST BE PRESERVED IN OUTPUT INTACT):\n" +
+                        "\n".join(
+                            f"- {m.get('polished_text') or m.get('text', '')}"
+                            for m in marked_pts
+                            if (m.get("polished_text") or m.get("text"))
+                        )
+                    )
+                else:
+                    mandatory_section = ""
+
+                prompt = prompt_template.format(
+                    agenda_title=agenda_title,
+                    points_json=points_json,
+                    rules_section=rules_section,
+                    mandatory_section=mandatory_section,
+                )
+
+                try:
+                    logger.info(f"[RomService] Generating Short ROM for agenda '{agenda_title}' using trained variant '{variant_id}'...")
+                    raw = infer_short_rom_with_variant(
+                        prompt=prompt,
+                        variant_id=variant_id,
+                        adapter_path=adapter_path,
+                        base_model=base_model,
+                        max_tokens=4096,
+                        use_adapter=True,
+                    )
+
+                    # Parse points from model output
+                    parsed_texts = self._parse_condensed_points(raw)
+                    if not parsed_texts:
+                        logger.warning(
+                            f"[RomService] generate_rom_version_with_variant: agenda='{agenda_title}' "
+                            f"Variant returned unparseable response, keeping originals. Raw: {str(raw)[:150]}"
+                        )
+                        continue
+
+                    # Guarantee every marked Very Important point is preserved intact
+                    claimed_parsed_indices = set()
+                    pt_matches = {}
+
+                    for m_idx, m_pt in enumerate(marked_pts):
+                        orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                        if not orig_content:
+                            continue
+                        orig_norm = re.sub(r'[\s\W_]+', ' ', orig_content.lower()).strip()
+                        orig_words = set(orig_norm.split())
+
+                        best_idx = None
+                        best_score = 0.0
+
+                        for p_idx, p_text in enumerate(parsed_texts):
+                            if p_idx in claimed_parsed_indices:
+                                continue
+                            cand_norm = re.sub(r'[\s\W_]+', ' ', str(p_text).lower()).strip()
+                            if not cand_norm:
+                                continue
+
+                            if cand_norm == orig_norm or cand_norm in orig_norm or orig_norm in cand_norm:
+                                score = 1.0
+                            else:
+                                cand_words = set(cand_norm.split())
+                                overlap = len(orig_words & cand_words)
+                                orig_ratio = overlap / max(1, len(orig_words))
+                                cand_ratio = overlap / max(1, len(cand_words))
+                                score = max(orig_ratio, cand_ratio)
+
+                            if score > best_score and score >= 0.35:
+                                best_score = score
+                                best_idx = p_idx
+
+                        if best_idx is not None:
+                            pt_matches[m_idx] = best_idx
+                            claimed_parsed_indices.add(best_idx)
+
+                    parsed_to_marked = {p_idx: marked_pts[m_idx] for m_idx, p_idx in pt_matches.items()}
+
+                    processed_items = []
+                    for p_idx, p_text in enumerate(parsed_texts):
+                        clean_text = str(p_text).strip()
+                        if not clean_text:
+                            continue
+                        if p_idx in parsed_to_marked:
+                            m_pt = parsed_to_marked[p_idx]
+                            orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                            processed_items.append((orig_content, m_pt, True))
+                        else:
+                            src = pts[min(p_idx, len(pts) - 1)]
+                            processed_items.append((clean_text, src, False))
+
+                    for m_idx, m_pt in enumerate(marked_pts):
+                        if m_idx not in pt_matches:
+                            orig_content = (m_pt.get("polished_text") or m_pt.get("text") or "").strip()
+                            if not orig_content:
+                                continue
+                            orig_pos = pts.index(m_pt) if m_pt in pts else len(pts)
+                            insert_pos = int((orig_pos / max(1, len(pts))) * (len(processed_items) + 1))
+                            insert_pos = max(0, min(len(processed_items), insert_pos))
+                            processed_items.insert(insert_pos, (orig_content, m_pt, True))
+
+                    new_pts = []
+                    for j, (p_text, src, is_marked) in enumerate(processed_items):
+                        if is_marked:
+                            new_pt = {
+                                "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
+                                "text": p_text,
+                                "polished_text": p_text,
+                                "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
+                                "speakers": src.get("speakers") or ([src.get("speaker")] if src.get("speaker") else []),
+                                "action_owner": src.get("action_owner"),
+                                "action_items": copy.deepcopy(src.get("action_items") or []),
+                                "timeline_start": src.get("timeline_start", 0.0),
+                                "timeline_end": src.get("timeline_end", 0.0),
+                                "references": copy.deepcopy(src.get("references") or []),
+                                "technical_terms": copy.deepcopy(src.get("technical_terms") or []),
+                                "dates": copy.deepcopy(src.get("dates") or []),
+                                "numbers": copy.deepcopy(src.get("numbers") or []),
+                                "is_very_important": True,
+                                "original_point_id": src.get("id"),
+                            }
+                        else:
+                            new_pt = {
+                                "id": f"{agenda.get('agenda_id', 'A')}-{version.upper()}-{j+1}",
+                                "text": p_text,
+                                "polished_text": p_text,
+                                "speaker": src.get("speaker") or (src.get("speakers") or [None])[0] or "Unknown",
+                                "speakers": src.get("speakers") or [],
+                                "action_owner": src.get("action_owner"),
+                                "action_items": src.get("action_items") or [],
+                                "timeline_start": src.get("timeline_start", 0.0),
+                                "timeline_end": src.get("timeline_end", 0.0),
+                                "references": src.get("references") or [],
+                                "technical_terms": [],
+                                "dates": [],
+                                "numbers": [],
+                                "is_very_important": False,
+                                "original_point_id": src.get("id"),
+                            }
+                        new_pts.append(new_pt)
+
+                    if new_pts:
+                        agenda["discussion_points"] = new_pts
+                        logger.info(
+                            f"[RomService] generate_rom_version_with_variant: agenda='{agenda_title}' "
+                            f"{len(pts)} pts -> {len(new_pts)} pts successfully generated"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        f"[RomService] generate_rom_version_with_variant: agenda='{agenda_title}' "
+                        f"error={exc} - keeping originals",
+                        exc_info=True,
+                    )
+        finally:
+            gc.collect()
+
+        return rewritten
+
     # -- AI Edit Points (Edit with AI feature) ---------------------------------
 
     def ai_edit_points(

@@ -284,6 +284,26 @@ async def get_variant(
     return variant
 
 
+@router.post("/variants/{variant_id}/rerun-test")
+async def rerun_test(
+    variant_id: str,
+    body: Optional[dict] = None,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Rerun test inference for a variant if its checkpoint adapter exists."""
+    user_id = _uid(current_user)
+    test_size = body.get("test_size") if body else None
+    try:
+        result = await ts.rerun_variant_test(variant_id, user_id, db, test_size=test_size)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[RomTraining] Rerun test failed for variant {variant_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to rerun test: {e}")
+
+
 @router.delete("/variants/{variant_id}")
 async def delete_variant(
     variant_id: str,

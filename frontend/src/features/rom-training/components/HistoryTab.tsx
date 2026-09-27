@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { History, Trash2, Loader, ChevronDown, ChevronUp, Check, AlertCircle, Brain } from 'lucide-react';
-import { listVariants, deleteVariant } from '../api/romTrainingApi';
+import { History, Trash2, Loader, ChevronDown, ChevronUp, Check, AlertCircle, Brain, RotateCcw } from 'lucide-react';
+import { listVariants, deleteVariant, rerunVariantTest } from '../api/romTrainingApi';
 import type { RomVariant, TestResult } from '../types/romTrainingTypes';
 
 export default function HistoryTab() {
@@ -8,6 +8,8 @@ export default function HistoryTab() {
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [retestingId, setRetestingId] = useState<string | null>(null);
+  const [retestMsg, setRetestMsg] = useState<{ id: string; msg: string; isError?: boolean } | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -18,6 +20,30 @@ export default function HistoryTab() {
   };
 
   useEffect(() => { load(); }, []);
+
+  const handleRerunTest = async (id: string) => {
+    setRetestingId(id);
+    setRetestMsg(null);
+    try {
+      const res = await rerunVariantTest(id);
+      setVariants(prev => prev.map(v => v.id === id ? {
+        ...v,
+        test_results: res.test_results,
+        accuracy: res.accuracy,
+        test_size: res.test_size,
+        status: 'done',
+        error: null,
+        has_checkpoint: true,
+      } : v));
+      setExpandedId(id);
+      setRetestMsg({ id, msg: `Test complete! ${res.accuracy || ''}` });
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || 'Failed to rerun test.';
+      setRetestMsg({ id, msg: detail, isError: true });
+    } finally {
+      setRetestingId(null);
+    }
+  };
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this variant and its trained adapter files?')) return;
@@ -100,6 +126,24 @@ export default function HistoryTab() {
                 {v.status === 'training' && <Loader size={10} className="spin" style={{ verticalAlign: 'middle', marginRight: 3 }} />}
                 {v.status.toUpperCase()}
               </span>
+              {v.has_checkpoint && (
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 4,
+                    padding: '0.3rem 0.65rem', borderRadius: 6, border: 'none',
+                    background: 'hsl(var(--accent) / .12)',
+                    color: 'hsl(var(--accent))', cursor: 'pointer',
+                    fontSize: '0.72rem', fontWeight: 600,
+                    opacity: retestingId === v.id ? 0.7 : 1,
+                  }}
+                  onClick={e => { e.stopPropagation(); handleRerunTest(v.id); }}
+                  disabled={retestingId === v.id}
+                  title="Rerun test evaluation using the saved checkpoint adapter"
+                >
+                  {retestingId === v.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
+                  {retestingId === v.id ? 'Testing…' : 'Rerun Test'}
+                </button>
+              )}
               <button
                 style={{
                   display: 'flex', alignItems: 'center', gap: 4,
@@ -109,7 +153,7 @@ export default function HistoryTab() {
                   fontSize: '0.72rem', fontWeight: 600,
                 }}
                 onClick={e => { e.stopPropagation(); handleDelete(v.id); }}
-                disabled={deleting === v.id}
+                disabled={deleting === v.id || retestingId === v.id}
               >
                 {deleting === v.id ? <Loader size={11} className="spin" /> : <Trash2 size={11} />}
                 Delete
@@ -133,6 +177,22 @@ export default function HistoryTab() {
                   <div style={{ fontSize: '0.78rem' }}>{v.completed_at?.slice(0, 16) || 'N/A'}</div>
                 </div>
               </div>
+
+              {retestMsg && retestMsg.id === v.id && (
+                <div style={{
+                  marginTop: '0.75rem', padding: '0.6rem 0.85rem', borderRadius: 8,
+                  background: retestMsg.isError ? 'hsl(var(--destructive) / .08)' : 'hsl(142 70% 45% / .08)',
+                  border: `1px solid ${retestMsg.isError ? 'hsl(var(--destructive) / .2)' : 'hsl(142 70% 45% / .2)'}`,
+                  fontSize: '0.78rem', color: retestMsg.isError ? 'hsl(var(--destructive))' : 'hsl(142 70% 35%)', fontWeight: 600,
+                }}>
+                  {retestMsg.isError ? (
+                    <AlertCircle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  ) : (
+                    <Check size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                  )}
+                  {retestMsg.msg}
+                </div>
+              )}
 
               {v.accuracy && (
                 <div style={{
@@ -176,26 +236,73 @@ export default function HistoryTab() {
                 </div>
               )}
 
+              {/* If checkpoint exists but no test results yet */}
+              {v.test_results.length === 0 && v.has_checkpoint && (
+                <div style={{
+                  marginTop: '0.75rem', padding: '0.75rem', borderRadius: 8,
+                  background: 'hsl(var(--muted) / .3)', border: '1px solid hsl(var(--border))',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span style={{ fontSize: '0.75rem', color: 'hsl(var(--muted-foreground))' }}>
+                    Checkpoint adapter is saved, but no test results are recorded yet.
+                  </span>
+                  <button
+                    style={{
+                      padding: '0.35rem 0.75rem', borderRadius: 6, border: 'none',
+                      background: 'hsl(var(--accent))', color: '#fff',
+                      fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}
+                    onClick={() => handleRerunTest(v.id)}
+                    disabled={retestingId === v.id}
+                  >
+                    {retestingId === v.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
+                    Run Test Inference
+                  </button>
+                </div>
+              )}
+
               {/* Test results preview */}
               {v.test_results.length > 0 && (
                 <div style={{ marginTop: '0.75rem' }}>
-                  <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'hsl(var(--muted-foreground))', marginBottom: 6 }}>
-                    TEST RESULTS ({v.test_results.length} samples)
+                  <div style={{
+                    fontSize: '0.7rem', fontWeight: 700, color: 'hsl(var(--muted-foreground))',
+                    marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  }}>
+                    <span>TEST RESULTS ({v.test_results.length} samples)</span>
+                    {v.has_checkpoint && (
+                      <button
+                        style={{
+                          border: 'none', background: 'transparent',
+                          color: 'hsl(var(--accent))', cursor: 'pointer',
+                          fontSize: '0.7rem', fontWeight: 600,
+                          display: 'flex', alignItems: 'center', gap: 4,
+                        }}
+                        onClick={() => handleRerunTest(v.id)}
+                        disabled={retestingId === v.id}
+                      >
+                        <RotateCcw size={10} /> Rerun evaluation
+                      </button>
+                    )}
                   </div>
-                  {v.test_results.slice(0, 2).map((r, i) => (
+                  {v.test_results.map((r, i) => (
                     <div key={i} style={{
-                      marginBottom: 8, padding: '0.5rem 0.75rem', borderRadius: 8,
+                      marginBottom: 8, padding: '0.6rem 0.85rem', borderRadius: 8,
                       border: '1px solid hsl(var(--border))', fontSize: '0.72rem',
                     }}>
-                      <div style={{ fontWeight: 700, marginBottom: 4 }}>{r.agenda_title || `Sample ${i + 1}`}</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>{r.agenda_title || `Sample ${i + 1}`}</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
                         <div>
-                          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(var(--muted-foreground))' }}>AFTER (Trained)</div>
-                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap' }}>{r.after.slice(0, 200)}{r.after.length > 200 ? '…' : ''}</div>
+                          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(0 0% 50%)' }}>BEFORE (Base)</div>
+                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.before ? (r.before.slice(0, 300) + (r.before.length > 300 ? '…' : '')) : 'N/A'}</div>
                         </div>
                         <div>
-                          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(280 80% 55%)' }}>MANUAL</div>
-                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap' }}>{r.manual.slice(0, 200)}{r.manual.length > 200 ? '…' : ''}</div>
+                          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(142 70% 35%)' }}>AFTER (Trained)</div>
+                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.after ? (r.after.slice(0, 300) + (r.after.length > 300 ? '…' : '')) : 'N/A'}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(280 80% 55%)' }}>MANUAL (Target)</div>
+                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.manual ? (r.manual.slice(0, 300) + (r.manual.length > 300 ? '…' : '')) : 'N/A'}</div>
                         </div>
                       </div>
                     </div>

@@ -54,6 +54,7 @@ export interface RomVariant {
   error: string | null;
   created_at: string;
   completed_at: string | null;
+  has_checkpoint?: boolean;
 }
 
 export interface TestResult {

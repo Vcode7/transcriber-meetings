@@ -151,18 +151,32 @@ def _run_training_thread(
             adapter_path=adapter_path,
         )
 
+        # Free training gradients & optimizer from VRAM before test inference
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         # Run test inference
         logger.info(f"[RomTraining] variant={variant_id} running test inference")
-        test_results = _run_test_inference(
-            variant_id=variant_id,
-            adapter_path=adapter_path,
-            base_model=base_model,
-            test_data=test_data,
-        )
-
-        accuracy = _compute_accuracy(test_results)
-        loop.run_until_complete(_update_status("done", test_results=test_results, accuracy=accuracy))
-        logger.info(f"[RomTraining] variant={variant_id} training complete. accuracy={accuracy}")
+        try:
+            test_results = _run_test_inference(
+                variant_id=variant_id,
+                adapter_path=adapter_path,
+                base_model=base_model,
+                test_data=test_data,
+            )
+            accuracy = _compute_accuracy(test_results)
+            loop.run_until_complete(_update_status("done", test_results=test_results, accuracy=accuracy))
+            logger.info(f"[RomTraining] variant={variant_id} training complete. accuracy={accuracy}")
+        except Exception as test_err:
+            logger.error(f"[RomTraining] variant={variant_id} test inference warning: {test_err}", exc_info=True)
+            # Training succeeded and adapter was saved; record partial warning instead of failing the variant
+            loop.run_until_complete(_update_status("done", error=f"Training succeeded and adapter saved, but test inference had an issue: {test_err}"))
 
     except Exception as e:
         logger.error(f"[RomTraining] variant={variant_id} training failed: {e}", exc_info=True)
@@ -219,15 +233,22 @@ def _build_training_examples(
         except Exception:
             input_prompt = f"Agenda: {agenda_title}\n\nPoints:\n{points_json}"
 
-        # Build target (manual MoM points as numbered list)
-        target_lines = []
+        # Build target points (JSON array strictly matching prompt output contract)
+        target_pts = []
         for pt in manual_mom_points:
             if isinstance(pt, str):
-                target_lines.append(f"- {pt}")
+                t = pt.strip()
+                if t:
+                    target_pts.append(t)
             elif isinstance(pt, dict):
-                target_lines.append(f"- {pt.get('text', str(pt))}")
-        target_text = "\n".join(target_lines)
+                t = (pt.get("polished_text") or pt.get("text") or "").strip()
+                if t:
+                    target_pts.append(t)
 
+        if not target_pts:
+            continue
+
+        target_text = json.dumps(target_pts, ensure_ascii=False, indent=2)
         examples.append({"input": input_prompt, "output": target_text})
 
     return examples
@@ -301,32 +322,53 @@ def _run_lora_training(
             trust_remote_code=True,
         )
 
-    # If upgrade training, load parent adapter first
+    # If upgrade training, load parent adapter directly in trainable mode
+    is_upgrade = False
     if training_type == "upgrade" and parent_variant_id:
         parent_adapter = _get_adapter_path(parent_variant_id)
         if os.path.exists(parent_adapter):
-            logger.info(f"[RomTraining] Loading parent adapter from {parent_adapter}")
-            model = PeftModel.from_pretrained(model, parent_adapter)
-            model = model.merge_and_unload()  # merge so we can add new adapter
+            logger.info(f"[RomTraining] Loading parent adapter from {parent_adapter} for upgrade fine-tuning")
+            model = PeftModel.from_pretrained(model, parent_adapter, is_trainable=True)
+            is_upgrade = True
 
-    # Configure LoRA
-    target_modules = [m.strip() for m in lora_config.get("target_modules", "q_proj,v_proj").split(",") if m.strip()]
-    peft_config = LoraConfig(
-        r=lora_config.get("r", 16),
-        lora_alpha=lora_config.get("lora_alpha", 32),
-        lora_dropout=lora_config.get("lora_dropout", 0.05),
-        target_modules=target_modules,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
+    # Configure LoRA if new training
+    if not is_upgrade:
+        target_modules = [m.strip() for m in lora_config.get("target_modules", "q_proj,v_proj").split(",") if m.strip()]
+        peft_config = LoraConfig(
+            r=lora_config.get("r", 16),
+            lora_alpha=lora_config.get("lora_alpha", 32),
+            lora_dropout=lora_config.get("lora_dropout", 0.05),
+            target_modules=target_modules,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+    else:
+        peft_config = None
 
-    # Build HF Dataset
+    # Build HF Dataset using model's chat template
     def format_example(ex):
-        text = f"<|user|>\n{ex['input']}<|end|>\n<|assistant|>\n{ex['output']}<|end|>"
+        messages = [
+            {"role": "user", "content": ex["input"]},
+            {"role": "assistant", "content": ex["output"]},
+        ]
+        try:
+            text = tokenizer.apply_chat_template(messages, tokenize=False)
+        except Exception:
+            text = f"<|im_start|>user\n{ex['input']}<|im_end|>\n<|im_start|>assistant\n{ex['output']}<|im_end|>"
         return {"text": text}
 
     raw_dataset = [format_example(ex) for ex in examples]
     hf_dataset = Dataset.from_list(raw_dataset)
+
+    # Dynamic batch size & gradient accumulation
+    num_samples = len(examples)
+    configured_batch = lora_config.get("per_device_train_batch_size", 2)
+    effective_batch = max(1, min(configured_batch, num_samples))
+    configured_accum = max(1, lora_config.get("gradient_accumulation_steps", 4))
+    if num_samples <= effective_batch:
+        grad_accum = 1
+    else:
+        grad_accum = max(1, min(configured_accum, num_samples // effective_batch))
 
     # Training arguments
     max_seq_len = lora_config.get("max_seq_length", 2048)
@@ -335,8 +377,8 @@ def _run_lora_training(
         training_args = SFTConfig(
             output_dir=adapter_path,
             num_train_epochs=lora_config.get("num_epochs", 3),
-            per_device_train_batch_size=lora_config.get("per_device_train_batch_size", 2),
-            gradient_accumulation_steps=lora_config.get("gradient_accumulation_steps", 4),
+            per_device_train_batch_size=effective_batch,
+            gradient_accumulation_steps=grad_accum,
             learning_rate=lora_config.get("learning_rate", 2e-4),
             logging_steps=1,
             save_steps=50,
@@ -352,19 +394,22 @@ def _run_lora_training(
             packing=False,
         )
 
-        trainer = SFTTrainer(
-            model=model,
-            train_dataset=hf_dataset,
-            peft_config=peft_config,
-            processing_class=tokenizer,
-            args=training_args,
-        )
+        trainer_kwargs = {
+            "model": model,
+            "train_dataset": hf_dataset,
+            "processing_class": tokenizer,
+            "args": training_args,
+        }
+        if peft_config is not None:
+            trainer_kwargs["peft_config"] = peft_config
+
+        trainer = SFTTrainer(**trainer_kwargs)
     else:
         training_args = TrainingArguments(
             output_dir=adapter_path,
             num_train_epochs=lora_config.get("num_epochs", 3),
-            per_device_train_batch_size=lora_config.get("per_device_train_batch_size", 2),
-            gradient_accumulation_steps=lora_config.get("gradient_accumulation_steps", 4),
+            per_device_train_batch_size=effective_batch,
+            gradient_accumulation_steps=grad_accum,
             learning_rate=lora_config.get("learning_rate", 2e-4),
             logging_steps=1,
             save_steps=50,
@@ -377,19 +422,32 @@ def _run_lora_training(
             lr_scheduler_type="cosine",
         )
 
-        trainer = SFTTrainer(
-            model=model,
-            train_dataset=hf_dataset,
-            peft_config=peft_config,
-            dataset_text_field="text",
-            max_seq_length=max_seq_len,
-            tokenizer=tokenizer,
-            args=training_args,
-            packing=False,
-        )
+        import inspect
+        sft_init_params = inspect.signature(SFTTrainer.__init__).parameters
+        trainer_kwargs = {
+            "model": model,
+            "train_dataset": hf_dataset,
+            "args": training_args,
+        }
+        if peft_config is not None:
+            trainer_kwargs["peft_config"] = peft_config
+        if "dataset_text_field" in sft_init_params:
+            trainer_kwargs["dataset_text_field"] = "text"
+        if "max_seq_length" in sft_init_params:
+            trainer_kwargs["max_seq_length"] = max_seq_len
+        if "processing_class" in sft_init_params:
+            trainer_kwargs["processing_class"] = tokenizer
+        elif "tokenizer" in sft_init_params:
+            trainer_kwargs["tokenizer"] = tokenizer
+
+        trainer = SFTTrainer(**trainer_kwargs)
 
     trainer.train()
-    trainer.save_model(adapter_path)
+    try:
+        trainer.save_model(adapter_path)
+    except Exception as e:
+        logger.warning(f"[RomTraining] trainer.save_model warning ({e}), falling back to model.save_pretrained()")
+        model.save_pretrained(adapter_path)
     tokenizer.save_pretrained(adapter_path)
     logger.info(f"[RomTraining] Adapter saved to {adapter_path}")
 
@@ -402,32 +460,37 @@ def _run_test_inference(
 ) -> List[Dict[str, Any]]:
     """
     For each test sample, run inference with:
-    - base model (before training)
-    - trained model (after training)
+    - base model (before training, via local HuggingFace base_model without adapter)
+    - trained model (after training, via local HuggingFace model with LoRA adapter)
     - return alongside the manual MoM as ground truth
     """
-    from services.ai_provider import get_provider
-    from services.rom_training.rom_training_inference import infer_short_rom_with_variant
+    from services.rom_training.rom_training_inference import (
+        infer_short_rom_with_variant,
+        infer_short_rom_base,
+    )
     from services.rom_training.rom_training_dataset_service import _extract_mom_regex
 
     examples = _build_training_examples(test_data)
-    provider = get_provider()
     results = []
 
     for item, example in zip(test_data, examples[:len(test_data)]):
         input_prompt = example["input"]
         manual_output = example["output"]
 
-        # Before: base model
+        # Before: base model (via PyTorch/Transformers directly, without adapter, zero Ollama calls)
         try:
-            if hasattr(provider, 'query'):
-                before_output = provider.query(input_prompt, max_tokens=2048, temperature=0.2)
-            else:
-                before_output = provider._infer(input_prompt, max_new_tokens=2048)
+            before_output = infer_short_rom_base(
+                prompt=input_prompt,
+                base_model=base_model,
+                variant_id=variant_id,
+                adapter_path=adapter_path,
+                max_tokens=2048,
+            )
         except Exception as e:
+            logger.error(f"[RomTraining] Error generating base model baseline: {e}")
             before_output = f"[Error: {e}]"
 
-        # After: trained variant
+        # After: trained variant (via PyTorch/Transformers with LoRA adapter)
         try:
             after_output = infer_short_rom_with_variant(
                 prompt=input_prompt,
@@ -435,8 +498,10 @@ def _run_test_inference(
                 adapter_path=adapter_path,
                 base_model=base_model,
                 max_tokens=2048,
+                use_adapter=True,
             )
         except Exception as e:
+            logger.error(f"[RomTraining] Error generating trained variant output: {e}")
             after_output = f"[Error: {e}]"
 
         results.append({
@@ -486,7 +551,21 @@ def _compute_accuracy(test_results: List[Dict[str, Any]]) -> str:
     )
 
 
-# ── Variant CRUD helpers ──────────────────────────────────────────────────────
+# ── Variant CRUD & Test helpers ──────────────────────────────────────────────
+
+def check_checkpoint_exists(adapter_path: str) -> bool:
+    """Check if the adapter directory exists and contains PEFT adapter files."""
+    if not adapter_path or not os.path.exists(adapter_path):
+        return False
+    # Check if adapter_config.json or weight files exist
+    has_config = os.path.exists(os.path.join(adapter_path, "adapter_config.json"))
+    has_weights = (
+        os.path.exists(os.path.join(adapter_path, "adapter_model.safetensors")) or
+        os.path.exists(os.path.join(adapter_path, "adapter_model.bin")) or
+        os.path.exists(os.path.join(adapter_path, "model.safetensors"))
+    )
+    return has_config or has_weights
+
 
 async def list_variants(user_id: str, db) -> List[Dict[str, Any]]:
     from sqlalchemy import text
@@ -503,16 +582,21 @@ async def list_variants(user_id: str, db) -> List[Dict[str, Any]]:
         {"uid": user_id},
     )
     rows = r.fetchall()
-    return [{
-        "id": row[0], "name": row[1], "description": row[2],
-        "base_model": row[3], "training_type": row[4], "parent_variant_id": row[5],
-        "adapter_path": row[6], "status": row[7],
-        "config": from_json(row[8], default={}),
-        "dataset_size": row[9], "test_size": row[10],
-        "test_results": from_json(row[11], default=[]),
-        "accuracy": row[12], "error": row[13],
-        "created_at": row[14], "completed_at": row[15],
-    } for row in rows]
+    variants = []
+    for row in rows:
+        adapter_path = row[6] or ""
+        variants.append({
+            "id": row[0], "name": row[1], "description": row[2],
+            "base_model": row[3], "training_type": row[4], "parent_variant_id": row[5],
+            "adapter_path": adapter_path, "status": row[7],
+            "config": from_json(row[8], default={}),
+            "dataset_size": row[9], "test_size": row[10],
+            "test_results": from_json(row[11], default=[]),
+            "accuracy": row[12], "error": row[13],
+            "created_at": row[14], "completed_at": row[15],
+            "has_checkpoint": check_checkpoint_exists(adapter_path),
+        })
+    return variants
 
 
 async def get_variant(variant_id: str, user_id: str, db) -> Optional[Dict[str, Any]]:
@@ -531,15 +615,105 @@ async def get_variant(variant_id: str, user_id: str, db) -> Optional[Dict[str, A
     row = r.fetchone()
     if not row:
         return None
+    adapter_path = row[6] or ""
     return {
         "id": row[0], "name": row[1], "description": row[2],
         "base_model": row[3], "training_type": row[4], "parent_variant_id": row[5],
-        "adapter_path": row[6], "status": row[7],
+        "adapter_path": adapter_path, "status": row[7],
         "config": from_json(row[8], default={}),
         "dataset_size": row[9], "test_size": row[10],
         "test_results": from_json(row[11], default=[]),
         "accuracy": row[12], "error": row[13],
         "created_at": row[14], "completed_at": row[15],
+        "has_checkpoint": check_checkpoint_exists(adapter_path),
+    }
+
+
+async def rerun_variant_test(
+    variant_id: str,
+    user_id: str,
+    db,
+    test_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Rerun test inference for an existing trained variant using saved checkpoint adapter.
+    Uses local HuggingFace base model via PyTorch without adapter for 'BEFORE',
+    and variant's adapter for 'AFTER'.
+    """
+    import asyncio
+    from sqlalchemy import text
+    from database import to_json
+    from services.rom_training import rom_training_dataset_service as ds
+
+    variant = await get_variant(variant_id, user_id, db)
+    if not variant:
+        raise ValueError(f"Variant '{variant_id}' not found.")
+
+    adapter_path = variant.get("adapter_path", "")
+    if not check_checkpoint_exists(adapter_path):
+        raise ValueError(f"Checkpoint adapter files not found at '{adapter_path}'. Cannot rerun test.")
+
+    all_data = await ds.list_training_data(user_id, db)
+    if not all_data:
+        raise ValueError("No training data pairs found in database to evaluate against.")
+
+    # Match previously evaluated samples if available, otherwise sample from DB
+    target_count = test_size or variant.get("test_size") or 5
+    target_count = max(1, min(target_count, len(all_data)))
+
+    prev_results = variant.get("test_results") or []
+    prev_keys = {(r.get("recording_title"), r.get("agenda_title")) for r in prev_results if r.get("agenda_title")}
+
+    matched_data = [d for d in all_data if (d.get("recording_title"), d.get("agenda_title")) in prev_keys]
+    if len(matched_data) >= target_count:
+        test_data = matched_data[:target_count]
+    else:
+        remaining = [d for d in all_data if d not in matched_data]
+        import random
+        random.shuffle(remaining)
+        test_data = (matched_data + remaining)[:target_count]
+
+    logger.info(f"[RomTraining] Rerunning test inference for variant {variant_id} with {len(test_data)} samples")
+
+    # Run in executor thread to prevent blocking FastAPI async loop
+    loop = asyncio.get_running_loop()
+    test_results = await loop.run_in_executor(
+        None,
+        lambda: _run_test_inference(
+            variant_id=variant_id,
+            adapter_path=adapter_path,
+            base_model=variant["base_model"],
+            test_data=test_data,
+        )
+    )
+
+    accuracy = _compute_accuracy(test_results)
+
+    # Update database record (mark as done, clear any previous test error)
+    await db.execute(
+        text("""
+            UPDATE rom_training_variants
+            SET test_results = :tr, accuracy = :acc, test_size = :ts, status = 'done', error = NULL
+            WHERE id = :id AND user_id = :uid
+        """),
+        {
+            "tr": to_json(test_results),
+            "acc": accuracy,
+            "ts": len(test_data),
+            "id": variant_id,
+            "uid": user_id,
+        },
+    )
+    await db.commit()
+    logger.info(f"[RomTraining] Rerun test complete for variant {variant_id}. Accuracy: {accuracy}")
+
+    return {
+        "variant_id": variant_id,
+        "test_results": test_results,
+        "accuracy": accuracy,
+        "test_size": len(test_data),
+        "has_checkpoint": True,
+        "status": "done",
     }
 
 
