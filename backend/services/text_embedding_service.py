@@ -21,19 +21,36 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
+from contextlib import contextmanager
 import numpy as np
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level singleton ────────────────────────────────────────────────────
+# ── Module-level singleton & lock ─────────────────────────────────────────────
 _embedder: Optional["TextEmbeddingService"] = None
+_embedder_lock = threading.Lock()
+
+# While set (e.g. during a ChromaDB reindex), the active embedding model may not change.
+_model_switch_lock_reason: Optional[str] = None
+_model_switch_guard = threading.Lock()
+
+
+class EmbeddingModelLockedError(RuntimeError):
+    """Raised when the active embedding model cannot change because an operation pins it."""
 
 
 class TextEmbeddingService:
     """
     Offline text embedding service backing vector retrieval for RAG.
+
+    By default the service follows the *active* embedding model
+    (``settings.EMBEDDING_MODEL`` — a base model or a trained variant): if the
+    active model changes, the next load/encode transparently reloads it, so
+    callers can never embed with a stale model. Pass ``model_name`` /
+    ``model_dir`` to pin an instance to one specific model instead.
 
     Public API
     ----------
@@ -41,22 +58,46 @@ class TextEmbeddingService:
     encode(text)                — embed a single string → np.ndarray (dim,)
     encode_batch(texts)         — embed a list of strings → np.ndarray (n, dim)
     embedding_dim()             — return the vector dimension (for FAISS index creation)
+    loaded_model_name           — name of the model currently in memory (or None)
     unload()                    — free model memory
     """
 
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None, model_dir: Optional[str] = None):
         self._tokenizer = None
         self._model = None
         self._dim: Optional[int] = None
         self._loaded = False
+        self._loading = False
         self._device: str = "cpu"
         self._use_8bit: bool = False
+        self._lock = threading.Lock()
+        self._model_name: Optional[str] = None
+        self._pinned_name = model_name
+        self._pinned_dir = model_dir
+
+    @property
+    def loaded_model_name(self) -> Optional[str]:
+        return self._model_name if self._loaded else None
+
+    def _target_model(self) -> Tuple[str, Path]:
+        """Return (model_name, model_dir) this instance should have loaded."""
+        from config import settings
+        if self._pinned_dir:
+            return self._pinned_name or Path(self._pinned_dir).name, Path(self._pinned_dir)
+        if self._pinned_name:
+            return self._pinned_name, Path(settings.embedding_model_dir(self._pinned_name))
+        return settings.EMBEDDING_MODEL, Path(settings.QWEN_EMBEDDING_MODEL_DIR)
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
     def load(self) -> None:
         """
         Load the embedding model from the local runtime directory.
+
+        Thread-safe: guarded by self._lock so concurrent callers will not
+        load the model multiple times or crash GPU memory allocation.
+        If a different model is in memory than the one this instance targets
+        (e.g. the user selected a trained variant), it is unloaded and replaced.
 
         Raises
         ------
@@ -66,25 +107,40 @@ class TextEmbeddingService:
         RuntimeError
             If the model files are present but cannot be loaded.
         """
-        if self._loaded:
+        target_name, _ = self._target_model()
+        if self._loaded and self._model_name == target_name:
             return
 
-        from config import settings
+        with self._lock:
+            target_name, model_dir = self._target_model()
+            if self._loaded and self._model_name == target_name:
+                return
+            if self._loaded:
+                logger.info(
+                    f"[TextEmbedding] Active embedding model changed "
+                    f"({self._model_name} -> {target_name}); reloading."
+                )
+                self._release_model()
+            self._load_locked(target_name, model_dir)
 
-        model_dir = Path(settings.QWEN_EMBEDDING_MODEL_DIR)
+    def _load_locked(self, model_name: str, model_dir: Path) -> None:
+        """Load ``model_dir`` into memory. Caller must hold self._lock."""
+        self._loading = True
         if not model_dir.exists() or not model_dir.is_dir():
+            self._loading = False
             raise FileNotFoundError(
                 f"[TextEmbedding] Embedding model directory not found: {model_dir}\n"
-                f"Expected model: {settings.EMBEDDING_MODEL}\n"
+                f"Expected model: {model_name}\n"
                 "Please place the model folder at the path above before starting the application.\n"
                 "The application will NOT download models from the internet."
             )
 
         model_files = list(model_dir.iterdir())
         if not model_files:
+            self._loading = False
             raise FileNotFoundError(
                 f"[TextEmbedding] Model directory is empty: {model_dir}\n"
-                f"Please populate it with the {settings.EMBEDDING_MODEL} model files."
+                f"Please populate it with the {model_name} model files."
             )
 
         # Ensure OCR engine is unloaded first so both models never co-exist in memory
@@ -94,7 +150,7 @@ class TextEmbeddingService:
         except Exception:
             pass
 
-        logger.info(f"[TextEmbedding] Loading {settings.EMBEDDING_MODEL} from {model_dir}...")
+        logger.info(f"[TextEmbedding] Loading {model_name} from {model_dir}...")
 
         import os
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -171,6 +227,7 @@ class TextEmbeddingService:
             else:
                 self._dim = self._get_dim()
 
+            self._model_name = model_name
             self._loaded = True
 
             gpu_mem_info = "N/A (CPU Mode)"
@@ -184,6 +241,7 @@ class TextEmbeddingService:
 
             logger.info(
                 f"[TextEmbedding] Model loaded successfully ✓\n"
+                f"  - Model: {model_name}\n"
                 f"  - Model Path: {model_dir}\n"
                 f"  - Device: {self._device.upper()}\n"
                 f"  - BitsAndBytes 8-bit Quantization: {'ENABLED' if self._use_8bit else 'DISABLED'}\n"
@@ -197,9 +255,12 @@ class TextEmbeddingService:
             self._loaded = False
             self._dim = None
             self._use_8bit = False
+            self._model_name = None
             raise RuntimeError(
                 f"[TextEmbedding] Failed to load embedding model from {model_dir}: {e}"
             ) from e
+        finally:
+            self._loading = False
 
     def _get_dim(self) -> int:
         """Run a tiny batch to determine the embedding dimension."""
@@ -207,8 +268,9 @@ class TextEmbeddingService:
         return sample.shape[1]
 
     def _ensure_loaded(self) -> None:
-        if not self._loaded:
-            self.load()
+        # load() is a cheap no-op when the targeted model is already in memory,
+        # and reloads when the active embedding model has changed.
+        self.load()
 
     # ── Encoding ──────────────────────────────────────────────────────────────
 
@@ -219,7 +281,14 @@ class TextEmbeddingService:
         """
         import torch
 
-        inputs = self._tokenizer(
+        # Hold local references so a concurrent unload() cannot pull the model
+        # out from under an in-flight forward pass.
+        tokenizer, model = self._tokenizer, self._model
+        if tokenizer is None or model is None:
+            self.load()
+            tokenizer, model = self._tokenizer, self._model
+
+        inputs = tokenizer(
             texts,
             padding=True,
             truncation=True,
@@ -228,11 +297,11 @@ class TextEmbeddingService:
         )
 
         if self._device == "cuda":
-            target_device = getattr(self._model, "device", torch.device("cuda"))
+            target_device = getattr(model, "device", torch.device("cuda"))
             inputs = {k: v.to(target_device) for k, v in inputs.items()}
 
         with torch.no_grad():
-            outputs = self._model(**inputs)
+            outputs = model(**inputs)
 
         # Mean pooling over non-padding tokens
         attention_mask = inputs["attention_mask"]
@@ -328,14 +397,21 @@ class TextEmbeddingService:
 
     def unload(self) -> None:
         """Free model from memory (GPU + CPU)."""
-        if not self._loaded:
-            return
-        logger.info("[TextEmbedding] Unloading embedding model...")
+        with self._lock:
+            if not self._loaded:
+                return
+            self._release_model()
+
+    def _release_model(self) -> None:
+        """Drop the in-memory model. Caller must hold self._lock."""
+        logger.info(f"[TextEmbedding] Unloading embedding model ({self._model_name})...")
         self._model = None
         self._tokenizer = None
         self._loaded = False
+        self._loading = False
         self._dim = None
         self._use_8bit = False
+        self._model_name = None
         gc.collect()
         try:
             import torch
@@ -363,18 +439,112 @@ class TextEmbeddingService:
 # ── Singleton accessor ────────────────────────────────────────────────────────
 
 def get_text_embedder() -> TextEmbeddingService:
-    """Return the shared TextEmbeddingService instance (lazy-loaded)."""
+    """Return the shared TextEmbeddingService instance (lazy-loaded, thread-safe)."""
     global _embedder
     if _embedder is None:
-        _embedder = TextEmbeddingService()
+        with _embedder_lock:
+            if _embedder is None:
+                _embedder = TextEmbeddingService()
     return _embedder
 
 
 def unload_text_embedder() -> None:
-    """Unload the embedding model to free memory."""
+    """Unload the embedding model to free memory (thread-safe)."""
     global _embedder
-    if _embedder is not None:
-        _embedder.unload()
+    with _embedder_lock:
+        if _embedder is not None:
+            _embedder.unload()
+
+
+# ── Active embedding model management ────────────────────────────────────────
+#
+# The embedding model is process-wide: one embedder singleton and shared ChromaDB
+# collections stamped with the model that produced their vectors. Every change of
+# the active model (Settings, variant selection, startup restore) goes through
+# set_active_embedding_model() so the runtime config, the loaded embedder and the
+# vector stores can never disagree.
+
+def get_active_embedding_model() -> str:
+    """Name of the embedding model (base model or trained variant) used for all embeddings."""
+    from config import settings
+    return settings.EMBEDDING_MODEL
+
+
+def validate_embedding_model_dir(model_dir: Union[str, Path]) -> Optional[str]:
+    """Return an error message if ``model_dir`` is not a loadable model directory, else None."""
+    path = Path(model_dir)
+    if not path.is_dir():
+        return f"Embedding model directory not found: {path}"
+    if not (path / "config.json").is_file():
+        return f"Embedding model directory has no config.json: {path}"
+    if not (any(path.glob("*.safetensors")) or any(path.glob("*.bin"))):
+        return f"Embedding model directory has no weight files (*.safetensors / *.bin): {path}"
+    return None
+
+
+def get_embedding_model_switch_lock() -> Optional[str]:
+    """Reason the active model is currently pinned (e.g. a running reindex), else None."""
+    return _model_switch_lock_reason
+
+
+@contextmanager
+def lock_active_embedding_model(reason: str):
+    """Pin the active embedding model for the duration of the block."""
+    global _model_switch_lock_reason
+    with _model_switch_guard:
+        if _model_switch_lock_reason is not None:
+            raise EmbeddingModelLockedError(_model_switch_lock_reason)
+        _model_switch_lock_reason = reason
+    try:
+        yield
+    finally:
+        with _model_switch_guard:
+            _model_switch_lock_reason = None
+
+
+def set_active_embedding_model(model_name: str, *, source: str = "") -> bool:
+    """
+    Make ``model_name`` the active embedding model for the whole application.
+
+    Validates the model directory, updates the runtime config (both setting names)
+    and unloads the cached embedder so the next encode loads the new model.
+    Returns True if the active model changed.
+
+    Raises
+    ------
+    ValueError                 — empty model name
+    FileNotFoundError          — model directory missing or incomplete
+    EmbeddingModelLockedError  — the model is pinned (e.g. ChromaDB reindex running)
+    """
+    from config import settings
+
+    name = (model_name or "").strip()
+    if not name:
+        raise ValueError("Embedding model name cannot be empty.")
+
+    with _model_switch_guard:
+        if name == settings.EMBEDDING_MODEL:
+            # Keep the backward-compatible alias in sync even when nothing else changes.
+            settings.QWEN_EMBEDDING_MODEL_NAME = name
+            return False
+        if _model_switch_lock_reason is not None:
+            raise EmbeddingModelLockedError(
+                f"Cannot change the embedding model while {_model_switch_lock_reason}."
+            )
+        error = validate_embedding_model_dir(settings.embedding_model_dir(name))
+        if error:
+            raise FileNotFoundError(error)
+
+        previous = settings.EMBEDDING_MODEL
+        settings.EMBEDDING_MODEL = name
+        settings.QWEN_EMBEDDING_MODEL_NAME = name
+
+    unload_text_embedder()
+    logger.info(
+        f"[TextEmbedding] Active embedding model: {previous} -> {name}"
+        + (f" (source: {source})" if source else "")
+    )
+    return True
 
 
 # ── Compatibility Module-Level Wrappers ──────────────────────────────────────

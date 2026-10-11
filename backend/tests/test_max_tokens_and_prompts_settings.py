@@ -120,7 +120,8 @@ def test_extract_actions_from_enhanced_points_uses_custom_max_tokens(mock_infer,
     mock_infer.assert_called_with(
         ANY,
         max_new_tokens=5000,
-        task_key="mom_extract_actions"
+        task_key="mom_extract_actions",
+        think=False,
     )
     assert len(res) == 1
     assert res[0]["task"] == "Do thing"
@@ -220,6 +221,9 @@ async def test_mom_extract_actions_prompt_registered_and_customizable():
     from database import get_db_context, connect_db
 
     await connect_db()
+    async with get_db_context() as db:
+        await reset_prompt(db, "mom_extract_actions")
+    _invalidate()
 
     meta = next((m for m in PROMPT_META if m["key"] == "mom_extract_actions"), None)
     assert meta is not None
@@ -256,7 +260,7 @@ async def test_mom_extract_actions_prompt_registered_and_customizable():
         provider = QwenProvider.__new__(QwenProvider)
         provider._get_active_settings = MagicMock(return_value={"max_tokens_mom_extract_actions": 4096, "rom_action_generation_chunk_size": 10})
         captured_prompts = []
-        def mock_infer_fn(prompt, max_new_tokens=4096, task_key="mom_extract_actions"):
+        def mock_infer_fn(prompt, max_new_tokens=4096, task_key="mom_extract_actions", **kwargs):
             captured_prompts.append(prompt)
             return '{"action_items": []}'
         provider._infer = MagicMock(side_effect=mock_infer_fn)
@@ -364,10 +368,11 @@ Third paragraph sentence seven. Third paragraph sentence eight. Third paragraph 
     assert sentences[6] == "Third paragraph sentence seven."
 
     # Test 2: Fallback in generate_mom_overview produces single paragraph with 5-7 sentences
-    overview = rom_srv.generate_mom_overview(
-        ["Discussion point 1", "Discussion point 2"],
-        {"filename": "Test Recording", "created_at": "2026-10-01", "speakers_detected": ["Alice", "Bob"]}
-    )
+    with patch("services.ai_provider.get_provider", side_effect=RuntimeError("Provider offline")):
+        overview = rom_srv.generate_mom_overview(
+            ["Discussion point 1", "Discussion point 2"],
+            {"filename": "Test Recording", "created_at": "2026-10-01", "speakers_detected": ["Alice", "Bob"]}
+        )
     intro = overview["introduction"]
     conclusion = overview["conclusion"]
 

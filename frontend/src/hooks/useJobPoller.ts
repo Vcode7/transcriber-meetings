@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import api from '../api/client'
 import type { ProcessingResult } from '../types/recording'
 
-type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'done' | 'error' | 'cancelled'
+type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'pending_transcript_review' | 'done' | 'error' | 'cancelled'
 
 interface PollResult {
   status: JobStatus

@@ -2,7 +2,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Form
@@ -197,6 +197,33 @@ async def upload_audio(
     user_id = current_user["id"]
     logger.info(f"[Audio] Upload request from user {user_id}, filename={file.filename}")
 
+    # ── Deduplication check ────────────────────────────────────────────────
+    # If the user submitted the exact same filename within the last 20 seconds
+    # and that recording is still active (pending/processing/transcript_ready),
+    # return the existing recording ID to prevent double-submissions/duplicate history entries.
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
+    existing_res = await db.execute(
+        text("""
+            SELECT id, status, progress
+            FROM recordings
+            WHERE user_id = :user_id
+              AND filename = :filename
+              AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
+              AND created_at >= :cutoff
+            ORDER BY created_at DESC
+            LIMIT 1
+        """),
+        {"user_id": user_id, "filename": file.filename, "cutoff": dt_to_str(cutoff)},
+    )
+    existing_row = existing_res.mappings().first()
+    if existing_row:
+        logger.info(f"[Audio] Deduplicating upload: reusing active recording {existing_row['id']} for {file.filename}")
+        return {
+            "recording_id": existing_row["id"],
+            "status": existing_row["status"],
+            "message": "Reusing existing active recording. Processing already in progress.",
+        }
+
     # Parse participant_voice_ids JSON string
     try:
         pv_ids: List[str] = _json.loads(participant_voice_ids or "[]")
@@ -224,15 +251,24 @@ async def upload_audio(
     logger.info(f"[Audio] Audio validated OK: {wav_path}")
 
     # ── Optional trim / middle-cut ────────────────────────────────────────
-    has_edit = (trim_start_sec is not None and trim_end_sec is not None) or (cut_start_sec is not None and cut_end_sec is not None)
+    raw_duration = get_duration(wav_path)
+    has_cut = cut_start_sec is not None and cut_end_sec is not None and cut_end_sec > cut_start_sec
+    has_trim = (
+        trim_start_sec is not None
+        and trim_end_sec is not None
+        and trim_end_sec > trim_start_sec
+        # If trim boundaries cover the entire file without middle-cut, bypass trimming
+        and not (trim_start_sec <= 0.05 and trim_end_sec >= raw_duration - 0.05 and not has_cut)
+    )
+    has_edit = has_trim or has_cut
     if has_edit:
         try:
             edited_path = process_audio_edit(
                 wav_path,
-                start_sec=trim_start_sec,
-                end_sec=trim_end_sec,
-                cut_start_sec=cut_start_sec,
-                cut_end_sec=cut_end_sec,
+                start_sec=trim_start_sec if has_trim else None,
+                end_sec=trim_end_sec if has_trim else None,
+                cut_start_sec=cut_start_sec if has_cut else None,
+                cut_end_sec=cut_end_sec if has_cut else None,
             )
             if edited_path != wav_path:
                 delete_file(wav_path)

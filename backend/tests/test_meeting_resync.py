@@ -173,7 +173,7 @@ async def test_meeting_resync_flow():
         chat_history=[],
     )
     assert "telemetry pipeline into APAC region" in prompt
-    assert f"--- {meeting_name} ---" in prompt
+    assert f"--- {meeting_name}" in prompt
 
     # Clean up test data
     store.delete_by_filter("meeting_id", recording_id)

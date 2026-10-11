@@ -45,7 +45,7 @@ upgrading.
 """
 import logging
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Set, Tuple
 from services.embedding import (
     extract_embedding, best_match_similarity, average_embeddings, EMBEDDING_DIM,
     vad_extract_speaker_embedding,
@@ -271,6 +271,10 @@ def identify_speakers(
         speaker_to_segs.setdefault(raw_id, []).append(seg)
 
     # ── Step 2: Build a mean ECAPA-TDNN embedding per diarization speaker ────────
+    # Diarization keeps short turns for word assignment; only turns of at least
+    # MIN_SEGMENT_DURATION are reliable enough to contribute to the speaker embedding.
+    from config import settings as _settings
+    min_embed_samples = sr * float(getattr(_settings, "MIN_SEGMENT_DURATION", 1.5))
     speaker_to_embedding: Dict[str, Optional[np.ndarray]] = {}
     for raw_id, segs in speaker_to_segs.items():
         seg_embeddings = []
@@ -280,8 +284,8 @@ def identify_speakers(
             s_idx = int(start * sr)
             e_idx = int(end * sr)
             seg_audio = audio[s_idx:e_idx]
-            if len(seg_audio) < sr * 0.5:
-                # Too short for even a basic embedding — skip cheaply before VAD
+            if len(seg_audio) < min_embed_samples:
+                # Too short for a reliable embedding — skip cheaply before VAD
                 continue
             emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=active_model)
             if emb is not None:
@@ -626,9 +630,13 @@ def refine_transcript_speakers_with_ecapa(
     else:
         min_threshold = getattr(settings, "speaker_refinement_min_threshold", 0.20) if settings else 0.20
 
+    # Very short segments (backchannels, "yes, I'll do it") give noisy embeddings:
+    # they never contribute to centroids and are never re-labelled.
+    min_seg_sec = float(getattr(settings, "speaker_refinement_min_seg_sec", 1.2)) if settings else 1.2
+
     logger.info(
         f"[Refine] Refinement parameters ({active_model}): margin={speaker_refinement_margin:.2f}, "
-        f"high_threshold={high_threshold:.2f}, min_threshold={min_threshold:.2f}"
+        f"high_threshold={high_threshold:.2f}, min_threshold={min_threshold:.2f}, min_seg_sec={min_seg_sec:.2f}"
     )
 
     # 2. Pre-compute profile centroids (Strict Model Isolation)
@@ -651,6 +659,7 @@ def refine_transcript_speakers_with_ecapa(
 
     # 4. Group all transcript segments by assigned speaker and compute conversation centroids
     speaker_to_embs: Dict[str, List[np.ndarray]] = {}
+    speaker_to_seg_indices: Dict[str, List[int]] = {}
     speaker_key_to_meta: Dict[str, Tuple[str, Optional[str]]] = {}
     segment_embeddings: Dict[int, np.ndarray] = {}
 
@@ -664,6 +673,8 @@ def refine_transcript_speakers_with_ecapa(
             continue
         start = seg["start"]
         end = seg["end"]
+        if (end - start) < min_seg_sec:
+            continue
         s_idx = int(start * sr)
         e_idx = int(end * sr)
         seg_audio = audio[s_idx:e_idx]
@@ -680,6 +691,7 @@ def refine_transcript_speakers_with_ecapa(
             raw_spk = seg.get("speaker")
 
             speaker_to_embs.setdefault(spk_key, []).append(segment_emb)
+            speaker_to_seg_indices.setdefault(spk_key, []).append(i)
             if spk_key not in speaker_key_to_meta:
                 speaker_key_to_meta[spk_key] = (spk_label, spk_profile_id, raw_spk)
 
@@ -746,12 +758,24 @@ def refine_transcript_speakers_with_ecapa(
                             found_original_sim = True
                     break
 
-        # Fallback to conversation centroid of the original speaker ONLY if original had an enrolled profile
-        # (For generic/unmeasured labels, original_label_sim remains 0.0 so confident enrolled matches can override)
+        # Fallback to the conversation centroid of the original speaker if it had an enrolled profile.
         if not found_original_sim and original_profile_id:
             if original_spk_key in conversation_centroids:
                 from services.embedding import cosine_similarity
                 original_label_sim = cosine_similarity(segment_emb, conversation_centroids[original_spk_key])
+                found_original_sim = True
+
+        # Generic labels are measured against the speaker's OTHER segments (leave-one-out), so a
+        # segment is only moved on real evidence: an absolute high-confidence match, or a clear
+        # margin over its own speaker. With no other segments there is no evidence (sim stays 0.0).
+        if not found_original_sim and not original_profile_id:
+            others = [
+                segment_embeddings[j] for j in speaker_to_seg_indices.get(original_spk_key, []) if j != i
+            ]
+            loo_centroid = _average_embeddings(others) if others else None
+            if loo_centroid is not None:
+                from services.embedding import cosine_similarity
+                original_label_sim = cosine_similarity(segment_emb, loo_centroid)
                 found_original_sim = True
 
         if not found_original_sim:
@@ -818,10 +842,12 @@ def refine_transcript_speakers_with_ecapa(
                 seg["speaker_label"] = best_profile_label
                 seg["speaker_profile_id"] = best_profile_id
                 seg["similarity"] = round(best_profile_sim, 4)
+                # Downstream (ROM Stage 1) treats refined segments as uncertain attributions.
+                seg["speaker_refined"] = True
 
                 # When restrict_to_meeting_speakers is enabled, preserve the meeting's speaker ID ↔ profile mapping
+                target_spk_id = None
                 if restrict_to_meeting_speakers:
-                    target_spk_id = None
                     if best_profile_id and str(best_profile_id) in profile_to_spk_id:
                         target_spk_id = profile_to_spk_id[str(best_profile_id)]
                     elif best_profile_label in label_to_spk_id:
@@ -834,11 +860,12 @@ def refine_transcript_speakers_with_ecapa(
                     if target_spk_id:
                         seg["speaker"] = target_spk_id
 
-                    for w in seg.get("words", []):
-                        if isinstance(w, dict):
-                            w["speaker_label"] = best_profile_label
-                            if target_spk_id and ("speaker" in w or seg.get("speaker")):
-                                w["speaker"] = target_spk_id
+                # Words always follow the segment's new label so segment and word labels never disagree.
+                for w in seg.get("words", []):
+                    if isinstance(w, dict):
+                        w["speaker_label"] = best_profile_label
+                        if target_spk_id and ("speaker" in w or seg.get("speaker")):
+                            w["speaker"] = target_spk_id
 
                 logger.info(
                     f"[Identify] Override Applied: Time: {start:.2f} - {end:.2f} | {original_label} -> {best_profile_label} | "

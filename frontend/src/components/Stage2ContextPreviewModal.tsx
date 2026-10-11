@@ -35,12 +35,11 @@ export interface Stage2ContextGroup {
   points_count: number
   timeline_start: number
   timeline_end: number
+  query_snippet?: string
   points: ContextGroupPoint[]
-  context: {
-    meeting_context: ContextChunk[]
-    global_context: ContextChunk[]
-    previous_meeting_context: PreviousMeetingChunk[]
-  }
+  meeting_context: ContextChunk[]
+  global_context: ContextChunk[]
+  previous_meeting_context: PreviousMeetingChunk[]
 }
 
 const getStage1OwnerText = (p: any): string | null => {

@@ -12,6 +12,8 @@ export interface OverlapRegion {
 }
 
 export interface TranscriptSegment {
+  seg_id?: string
+  speaker?: string
   speaker_label: string
   start: number
   end: number
@@ -101,6 +103,67 @@ export interface AIChatMeeting {
   name: string
   date: string
   has_stage2?: boolean
+  has_final_rom?: boolean
+  is_manual_mom?: boolean
+  file_type?: string
+  file_size?: number
+}
+
+export interface ManualMomItem {
+  id: string
+  filename: string
+  title: string
+  meeting_date: string
+  file_size: number
+  file_type: string
+  speakers_count: number
+  agendas_count: number
+  action_items_count: number
+  decisions_count: number
+  chunks_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ManualMomAgenda {
+  agenda_id?: string
+  title: string
+  discussion_points?: string[]
+  content?: string
+}
+
+export interface ManualMomActionItem {
+  task: string
+  owner?: string
+  due_date?: string
+  status?: string
+}
+
+export interface ManualMomChunk {
+  chunk_index: number
+  agenda_title?: string
+  speakers?: string[]
+  text: string
+}
+
+export interface ManualMomDetail {
+  id: string
+  filename: string
+  title: string
+  meeting_date: string
+  file_path: string
+  file_size: number
+  file_type: string
+  raw_text: string
+  summary: string
+  speakers: string[]
+  agendas: ManualMomAgenda[]
+  action_items: ManualMomActionItem[]
+  decisions: string[]
+  metadata_json: Record<string, any>
+  chunks: ManualMomChunk[]
+  created_at: string
+  updated_at: string
 }
 
 export interface AIChatMessage {
@@ -114,11 +177,29 @@ export interface AIChatMessage {
   created_at: string
 }
 
+export interface AIChatSession {
+  id: string
+  title: string
+  selected_meeting_id?: string
+  messages: AIChatMessage[]
+  currentSources?: AIChatMeeting[]
+  currentQueryType?: string
+  created_at: string
+  updated_at: string
+}
+
 export interface SyncableMeeting {
   id: string
   name: string
   date: string
   stage2_points_count: number
+  indexed_stage2_count?: number
+  stage2_sync_status?: 'synced' | 'partial' | 'not_indexed' | 'not_generated'
+  final_rom_points_count: number
+  indexed_final_rom_count?: number
+  final_rom_sync_status?: 'synced' | 'partial' | 'not_indexed' | 'not_generated'
+  has_final_rom: boolean
+  has_stage2: boolean
   indexed_points_count: number
   needs_sync: boolean
   sync_status: 'synced' | 'partial' | 'not_indexed'
@@ -132,6 +213,18 @@ export interface ResyncResult {
   already_indexed: number
   newly_indexed: number
   skipped_failed: number
+  final_rom_result?: {
+    total_found: number
+    already_indexed: number
+    newly_indexed: number
+    skipped_failed: number
+  }
+  stage2_result?: {
+    total_found: number
+    already_indexed: number
+    newly_indexed: number
+    skipped_failed: number
+  }
   message?: string
 }
 

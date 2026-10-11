@@ -555,6 +555,9 @@ def sanitize_and_merge_segments(
 
     # Step 5: Word-level clamping & synthetic word generation
     final_segments: List[Dict[str, Any]] = []
+    synth_seg_count = 0
+    synth_word_count = 0
+
     for seg in merged:
         seg_start = round(float(seg["start"]), 3)
         seg_end = round(float(seg["end"]), 3)
@@ -584,11 +587,15 @@ def sanitize_and_merge_segments(
                 if w_end <= w_start:
                     w_end = min(seg_end, w_start + 0.05)
 
+                raw_conf = w.get("probability") if w.get("probability") is not None else w.get("score")
+                if raw_conf is None:
+                    raw_conf = 1.0
+
                 cleaned_words.append({
                     "word": w_text,
                     "start": w_start,
                     "end": w_end,
-                    "probability": round(float(w.get("probability", w.get("score", 1.0))), 4),
+                    "probability": round(float(raw_conf), 4),
                     "speaker_label": w.get("speaker_label") or seg.get("speaker_label"),
                 })
                 last_w_end = w_end
@@ -597,6 +604,13 @@ def sanitize_and_merge_segments(
         if not cleaned_words:
             tokens = seg_text.split()
             if tokens:
+                synth_seg_count += 1
+                synth_word_count += len(tokens)
+                logger.warning(
+                    f"[TranscriptNormalizer] ⚠️ Fallback word confidence triggered: Segment [{seg_start:.2f}s - {seg_end:.2f}s] "
+                    f"has NO word alignment data! Synthesizing {len(tokens)} words with fallback probability=1.0. "
+                    f"Text: {repr(seg_text[:60])}"
+                )
                 total_dur = seg_end - seg_start
                 dur_per_word = max(0.01, total_dur / len(tokens))
                 for idx, tok in enumerate(tokens):
@@ -617,6 +631,14 @@ def sanitize_and_merge_segments(
         seg["text"] = seg_text
         seg["words"] = cleaned_words
         final_segments.append(seg)
+
+    if synth_seg_count > 0:
+        logger.warning(
+            f"[TranscriptNormalizer] ⚠️ WORD ALIGNMENT FALLBACK DETECTED: "
+            f"{synth_seg_count}/{len(final_segments)} segments ({synth_word_count} words) "
+            f"had missing word alignments and received synthetic probability=1.0! "
+            f"Likely cause: WhisperX forced alignment failed or was bypassed for these segments."
+        )
 
     # Final guarantee: monotonic non-overlapping check
     for i in range(len(final_segments) - 1):

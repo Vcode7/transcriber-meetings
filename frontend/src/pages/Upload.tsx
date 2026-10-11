@@ -23,7 +23,11 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [recordingId, setRecordingId] = useState<string | null>(null)
+  const isUploadingRef = useRef(false)
+  const [recordingId, setRecordingId] = useState<string | null>(() => {
+    const active = useJobsStore.getState().jobs.find((j) => j.source === 'upload' && isActiveJobStatus(j.status))
+    return active ? active.jobId : null
+  })
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [result, setResult] = useState<ProcessingResult | null>(null)
   const [error, setError] = useState('')
@@ -111,32 +115,36 @@ export default function UploadPage() {
   const jobData = useJobPoller(shouldPoll ? recordingId : null, { onTranscriptReady, onDone })
 
   useEffect(() => {
-    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'upload')
-    if (!priorJob) return
+    const allUploadJobs = useJobsStore.getState().jobs.filter((j) => j.source === 'upload')
+    const activeJob = allUploadJobs.find((j) => isActiveJobStatus(j.status))
+    if (activeJob) {
+      setRecordingId(activeJob.jobId)
+      if (activeJob.status === 'transcript_ready' && activeJob.result?.transcript) {
+        setResult(activeJob.result as ProcessingResult)
+        setIsGeneratingMom(true)
+      } else {
+        setProcessing('upload', (activeJob.stage as ProcessingStage) || 'queued', new Date(activeJob.startedAt).getTime())
+      }
+      return
+    }
 
-    setRecordingId(priorJob.jobId)
-
-    if (priorJob.result?.transcript) {
-      setResult(priorJob.result as ProcessingResult)
-      setIsGeneratingMom(priorJob.status === 'transcript_ready')
-      clearProcessing()
-    } else if (isActiveJobStatus(priorJob.status)) {
-      setIsGeneratingMom(priorJob.status === 'transcript_ready')
-      setProcessing('upload', priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
-    } else {
+    const priorDoneJob = allUploadJobs.find((j) => j.status === 'done' && j.result?.transcript)
+    if (priorDoneJob && !file && !recordingId) {
+      setRecordingId(priorDoneJob.jobId)
+      setResult(priorDoneJob.result as ProcessingResult)
       setIsGeneratingMom(false)
       clearProcessing()
     }
-  }, [setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setProcessing, clearProcessing, file, recordingId])
 
   useEffect(() => {
     if (!currentJob) {
-      if (recordingId) {
+      if (recordingId && !uploading && !isUploadingRef.current) {
         clearProcessing()
       }
       return
     }
-    console.log('[Upload] currentJob effect:', currentJob.status, 'has result:', !!currentJob.result?.transcript, 'local result:', !!result)
+    console.log('[Upload] currentJob effect:', currentJob.status, 'stage:', currentJob.stage, 'has result:', !!currentJob.result?.transcript, 'local result:', !!result)
     if (currentJob.status === 'cancelled') {
       setFile(null)
       setRecordingId(null)
@@ -163,9 +171,9 @@ export default function UploadPage() {
     } else if (currentJob.status === 'pending_transcript_review') {
       clearProcessing()
     } else {
-      setProcessing('upload', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
+      setProcessing('upload', (currentJob.stage as ProcessingStage) || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentJob?.status, currentJob?.stage, currentJob?.result, result, recordingId, uploading, setProcessing, clearProcessing])
 
   useEffect(() => {
     if (jobData?.progress) {
@@ -178,9 +186,12 @@ export default function UploadPage() {
 
   useEffect(() => {
     return () => {
-      clearProcessing()
+      const hasActive = useJobsStore.getState().jobs.some((j) => j.source === 'upload' && isActiveJobStatus(j.status))
+      if (!hasActive && !isUploadingRef.current) {
+        clearProcessing()
+      }
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [clearProcessing])
 
   const handleFile = (f: File) => {
     setFile(f)
@@ -231,7 +242,8 @@ export default function UploadPage() {
     cutStartSec?: number,
     cutEndSec?: number
   ) => {
-    if (!file) return
+    if (!file || isUploadingRef.current || uploading) return
+    isUploadingRef.current = true
     setUploading(true); setError('')
     setProcessing('upload', 'uploading')
     try {
@@ -264,6 +276,7 @@ export default function UploadPage() {
       clearProcessing()
     } finally {
       setUploading(false)
+      isUploadingRef.current = false
     }
   }
 
@@ -298,7 +311,10 @@ export default function UploadPage() {
     }
   }, [recordingId, isGeneratingInsights])
 
-  const isProcessingActive = useProcessingStore((s) => s.isProcessing && s.source === 'upload')
+  const isProcessingActive =
+    (useProcessingStore((s) => s.isProcessing && s.source === 'upload')) ||
+    uploading ||
+    (currentJob ? isActiveJobStatus(currentJob.status) : false)
   const fmtSize = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`
 
   const chatW = chatOpen ? `${chatWidth}px` : '48px'
@@ -312,7 +328,12 @@ export default function UploadPage() {
       <div className="center-panel" style={{ position: 'relative' }}>
 
         {isProcessingActive && (
-          <ProcessingOverlay stage={stage} startedAt={startedAt} source={source} onCancel={handleCancel} />
+          <ProcessingOverlay
+            stage={stage || (currentJob?.stage as ProcessingStage) || (uploading ? 'uploading' : 'queued')}
+            startedAt={startedAt || (currentJob?.startedAt ? new Date(currentJob.startedAt).getTime() : Date.now())}
+            source={source || 'upload'}
+            onCancel={handleCancel}
+          />
         )}
 
         <div className="panel-header">
@@ -328,9 +349,9 @@ export default function UploadPage() {
               : <CloudUpload size={16} style={{ color: 'hsl(var(--accent))' }} />}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <h1>{result ? 'Transcript' : 'Upload Audio'}</h1>
+            <h1>{result ? 'Transcript' : isProcessingActive ? 'Processing Audio' : 'Upload Audio'}</h1>
             <p style={{ fontSize: '.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', fontWeight: 400, marginTop: '1px' }}>
-              {result && file ? file.name : 'WAV · MP3 · MP4 · M4A · OGG · WEBM'}
+              {file?.name || currentJob?.filename || (result ? 'Audio recording' : 'WAV · MP3 · MP4 · M4A · OGG · WEBM')}
             </p>
           </div>
           {result && (
@@ -483,6 +504,7 @@ export default function UploadPage() {
                       </div>
                       <button
                         onClick={() => handleUpload()}
+                        disabled={uploading || isProcessingActive}
                         style={{
                           alignSelf: 'flex-start',
                           padding: '0.55rem 1.1rem',
@@ -492,10 +514,11 @@ export default function UploadPage() {
                           fontWeight: 600,
                           fontSize: '0.85rem',
                           border: 'none',
-                          cursor: 'pointer',
+                          cursor: (uploading || isProcessingActive) ? 'not-allowed' : 'pointer',
+                          opacity: (uploading || isProcessingActive) ? 0.7 : 1,
                         }}
                       >
-                        Process Full Audio
+                        {uploading || isProcessingActive ? 'Processing...' : 'Process Full Audio'}
                       </button>
                     </div>
                   }
@@ -503,6 +526,7 @@ export default function UploadPage() {
                   <AudioTrimmer
                     file={file}
                     fileName={file.name}
+                    isProcessing={uploading || isProcessingActive}
                     onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
                     onSkip={() => handleUpload()}
                   />

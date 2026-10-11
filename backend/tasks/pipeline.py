@@ -17,7 +17,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy import text
 import hashlib
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
@@ -122,7 +122,7 @@ def unload_all_models():
     except Exception as e:
         logger.warning(f"[Pipeline] Failed to unload text embedder: {e}")
 
-    # 7. Unload Video OCR pipeline (RapidOCR / ONNX Runtime)
+    # 7. Unload Video OCR pipeline (PP-OCRv6 / ONNX Runtime)
     try:
         from services.video_processing_service import unload_video_ocr_pipeline
         unload_video_ocr_pipeline()
@@ -351,6 +351,36 @@ async def _emit_analytics(metrics: Dict[str, Any]) -> None:
         await record_pipeline_analytics(metrics)
     except Exception as exc:
         logger.warning(f"[Pipeline] Analytics emit failed (non-fatal): {exc}")
+
+
+def _generic_speaker_labels(diar_segs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fallback when speaker identification fails: one "Speaker N" label per raw
+    diarization speaker (numbered by first appearance) — never one per segment."""
+    label_by_raw: Dict[Any, str] = {}
+    labelled = []
+    for seg in diar_segs:
+        raw_id = seg.get("speaker")
+        if raw_id not in label_by_raw:
+            label_by_raw[raw_id] = f"Speaker {len(label_by_raw) + 1}"
+        labelled.append({
+            **seg,
+            "speaker_label": label_by_raw[raw_id],
+            "speaker_profile_id": None,
+            "similarity": 0.0,
+        })
+    return labelled
+
+
+def _speaker_confidence(seg: Dict[str, Any]) -> Optional[float]:
+    """Fraction of a final segment's words whose word-level speaker matches the
+    segment speaker. Words folded in from a different speaker lower it; ROM Stage 1
+    marks turns below 0.6 as uncertain attributions."""
+    label = seg.get("speaker_label") or seg.get("speaker")
+    words = [w for w in seg.get("words") or [] if isinstance(w, dict) and w.get("speaker_label")]
+    if not label or not words:
+        return None
+    agreeing = sum(1 for w in words if w.get("speaker_label") == label)
+    return round(agreeing / len(words), 3)
 
 
 def _convert_diar_to_whisperx_format(
@@ -711,6 +741,17 @@ async def _run_pipeline_impl(
                 "min_word_confidence": _min_conf,
                 "alignment_used": _alignment_used,
             })
+            if not _alignment_used:
+                logger.warning(
+                    f"[Pipeline] {recording_id} — ⚠️ FORCED ALIGNMENT FAILED OR WAS NOT USED! "
+                    f"Aligned segments are identical to raw segments ({len(transcript_segs)} segments). "
+                    f"Word confidence scores will fall back to default values."
+                )
+            else:
+                logger.info(
+                    f"[Pipeline] {recording_id} — Forced alignment verified ✓: "
+                    f"{len(transcript_segs)} segments, {_word_cnt} words, avg_conf={_avg_conf}, min_conf={_min_conf}"
+                )
             logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
 
             # Sanitize and merge
@@ -776,6 +817,17 @@ async def _run_pipeline_impl(
                 "min_word_confidence": _min_conf,
                 "alignment_used": _alignment_used,
             })
+            if not _alignment_used:
+                logger.warning(
+                    f"[Pipeline] {recording_id} — ⚠️ FORCED ALIGNMENT FAILED OR WAS NOT USED! "
+                    f"Aligned segments are identical to raw segments ({len(transcript_segs)} segments). "
+                    f"Word confidence scores will fall back to default values."
+                )
+            else:
+                logger.info(
+                    f"[Pipeline] {recording_id} — Forced alignment verified ✓: "
+                    f"{len(transcript_segs)} segments, {_word_cnt} words, avg_conf={_avg_conf}, min_conf={_min_conf}"
+                )
             logger.info(f"[Pipeline] {recording_id} — Transcription OK: {len(transcript_segs)} segments, lang={language}")
 
             # Unload transcription model immediately to free GPU memory
@@ -928,14 +980,7 @@ async def _run_pipeline_impl(
             logger.error(f"[Pipeline] {recording_id} — Speaker identification FAILED: {e}", exc_info=True)
             # Non-fatal: build generic identified segs from diar_segs
             logger.warning(f"[Pipeline] {recording_id} — Falling back to generic speaker labels")
-            identified_segs = []
-            for i, seg in enumerate(diar_segs):
-                identified_segs.append({
-                    **seg,
-                    "speaker_label": f"Speaker {i+1}",
-                    "speaker_profile_id": None,
-                    "similarity": 0.0,
-                })
+            identified_segs = _generic_speaker_labels(diar_segs)
         _analytics["speaker_id_sec"] = round(time.monotonic() - _t0_speaker_id, 3)
         # Compute speaker ID quality metrics
         _sims = [s.get("similarity", 0.0) for s in identified_segs if not s.get("is_overlap")]
@@ -1006,7 +1051,7 @@ async def _run_pipeline_impl(
         final_segments = []
         for seg in speaker_segments:
             words = seg.get("words", [])
-            final_segments.append({
+            final_seg = {
                 "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
                 "speaker_profile_id": seg.get("speaker_profile_id"),
                 "speaker": seg.get("speaker"),
@@ -1016,7 +1061,11 @@ async def _run_pipeline_impl(
                 "words": words,
                 "is_overlap": seg.get("is_overlap", False),
                 "overlap_regions": seg.get("overlap_regions", []),
-            })
+                "speaker_confidence": _speaker_confidence(seg),
+            }
+            if seg.get("speaker_refined"):
+                final_seg["speaker_refined"] = True
+            final_segments.append(final_seg)
 
         speakers_detected = []
         for s in final_segments:
@@ -1421,6 +1470,9 @@ def _post_process_whisperx_segments(
             id_to_profile[raw_id] = seg.get("speaker_profile_id")
 
     out = []
+    total_words_count = 0
+    fallback_conf_words_count = 0
+
     for seg_idx, seg in enumerate(wx_result.get("segments", [])):
         seg_start = seg["start"]
         seg_end = seg["end"]
@@ -1444,13 +1496,17 @@ def _post_process_whisperx_segments(
 
         enriched_words = []
         for w in seg.get("words", []):
+            total_words_count += 1
             w_raw = w.get("speaker", raw_id)
             # Prefer "probability" (set by our transcription normalizer),
             # fall back to "score" (native WhisperX field),
             # then default to 1.0 only when neither is present.
             word_conf = w.get("probability")
             if word_conf is None:
-                word_conf = w.get("score", 1.0)
+                word_conf = w.get("score")
+                if word_conf is None:
+                    fallback_conf_words_count += 1
+                    word_conf = 1.0
             w_speaker_lbl = id_to_label.get(w_raw) or (w_raw if w_raw else None) or label
             enriched_words.append({
                 "word": w.get("word", "").strip(),
@@ -1491,6 +1547,14 @@ def _post_process_whisperx_segments(
             "overlap_regions": merged_regions,
             "speaker": raw_id or label,
         })
+
+    if fallback_conf_words_count > 0:
+        logger.warning(
+            f"[Pipeline] ⚠️ WORD CONFIDENCE FALLBACK in post-processing: "
+            f"{fallback_conf_words_count}/{total_words_count} words lacked both 'probability' and 'score', "
+            f"defaulted to 1.0! Root cause: Forced alignment was missing or incomplete."
+        )
+
     return out
 
 
@@ -2331,10 +2395,7 @@ async def _run_finalize_pipeline_impl(
             )
         except Exception as e:
             logger.error(f"[FinalPipeline] {recording_id} — Speaker ID FAILED: {e}", exc_info=True)
-            identified_segs = [
-                {**seg, "speaker_label": f"Speaker {i+1}", "speaker_profile_id": None, "similarity": 0.0}
-                for i, seg in enumerate(diar_segs)
-            ]
+            identified_segs = _generic_speaker_labels(diar_segs)
     else:
         identified_segs = []
     _analytics_fin["speaker_id_sec"] = round(time.monotonic() - _t0_sid, 3)
@@ -2407,7 +2468,7 @@ async def _run_finalize_pipeline_impl(
     # ── Step 8: Build final segments ─────────────────────────────────────
     final_segments = []
     for seg in speaker_segments:
-        final_segments.append({
+        final_seg = {
             "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
             "speaker_profile_id": seg.get("speaker_profile_id"),
             "speaker": seg.get("speaker"),
@@ -2417,7 +2478,11 @@ async def _run_finalize_pipeline_impl(
             "words": seg.get("words", []),
             "is_overlap": seg.get("is_overlap", False),
             "overlap_regions": seg.get("overlap_regions", []),
-        })
+            "speaker_confidence": _speaker_confidence(seg),
+        }
+        if seg.get("speaker_refined"):
+            final_seg["speaker_refined"] = True
+        final_segments.append(final_seg)
 
     speakers_detected = list({
         s["speaker_label"]

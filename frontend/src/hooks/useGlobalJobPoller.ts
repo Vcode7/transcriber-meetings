@@ -54,6 +54,11 @@ export function useGlobalJobPoller() {
       // Update store with latest status/stage
       updateJob(job.jobId, { status: newStatus, stage: newStage })
 
+      const procState = useProcessingStore.getState()
+      if (procState.isProcessing && procState.source === job.source && newStage) {
+        procState.updateStage(newStage as any)
+      }
+
       if (newStatus === 'transcript_ready' && !transcriptFiredRef.current.has(job.jobId)) {
         transcriptFiredRef.current.add(job.jobId)
         updateJob(job.jobId, { result: data.result })
@@ -182,7 +187,10 @@ export function useGlobalJobPoller() {
 
       // If backend reports no active jobs (in pending/processing state), clear processing store
       const hasActiveBackendJob = backendJobs.some((j: any) => j.status === 'pending' || j.status === 'processing')
-      if (!hasActiveBackendJob) {
+      const currentProc = useProcessingStore.getState()
+      const hasActiveLocalJob = useJobsStore.getState().jobs.some((j) => j.status === 'pending' || j.status === 'processing' || j.status === 'transcript_ready')
+      const isCurrentlyUploading = currentProc.isProcessing && currentProc.stage === 'uploading'
+      if (!hasActiveBackendJob && !hasActiveLocalJob && !isCurrentlyUploading) {
         useProcessingStore.getState().clearProcessing()
       }
 

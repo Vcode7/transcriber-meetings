@@ -734,7 +734,7 @@ class _TechnicalTerminologyExtractor:
     _KNOWN_TECH_SEEDS = frozenset({
         "pytorch", "onnx", "onnxruntime", "fastapi", "uvicorn", "chromadb", "faiss",
         "python", "react", "typescript", "vite", "cuda", "gpu", "cpu", "vram", "ram",
-        "whisper", "pyannote", "qwen", "bge", "bert", "llm", "rag", "ocr", "rapidocr",
+        "whisper", "pyannote", "qwen", "bge", "bert", "llm", "rag", "ocr", "ppocr", "rapidocr",
         "spacy", "nltk", "docker", "kubernetes", "grpc", "rest", "http", "https", "json",
         "yaml", "sql", "sqlite", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
         "do-178c", "do-254", "mil-std-810g", "iso-9001", "as9100", "ieee-802.11", "ada",

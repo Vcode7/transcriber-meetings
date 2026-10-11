@@ -192,8 +192,18 @@ def _resolve_align_model_dir() -> tuple[str, bool]:
             align_model_dir = str(constructed_cache)
             model_cache_only = True
             logger.info(f"[Transcription] Using local align model (HF layout): {align_model_dir}")
+        else:
+            logger.warning(
+                f"[Transcription] ⚠️ ModelLoader could NOT find local 'align_engine' directory! "
+                f"local_align_path={local_align_path}, MODELS_DIR={getattr(settings, 'MODELS_DIR', None)}. "
+                f"Falling back to HF cache at {align_model_dir} (offline_mode={model_cache_only})."
+            )
     except Exception as am_err:
-        logger.warning(f"[Transcription] Could not resolve local align model ({am_err}), using HF cache.")
+        logger.warning(
+            f"[Transcription] ⚠️ Failed preparing local align model cache layout: {am_err}. "
+            f"Falling back to HF cache at {align_model_dir} (offline_mode={model_cache_only}).",
+            exc_info=True,
+        )
 
     return align_model_dir, model_cache_only
 
@@ -348,8 +358,8 @@ def _align_segments_chunked(
 
         except Exception as chunk_err:
             logger.warning(
-                f"[Transcription] Chunked alignment: region [{region_start:.2f}s–{region_end:.2f}s] "
-                f"failed ({chunk_err}) — using unaligned segments for this region"
+                f"[Transcription] ⚠️ Chunked alignment failed for region [{region_start:.2f}s–{region_end:.2f}s] "
+                f"({type(chunk_err).__name__}: {chunk_err}) — using unaligned segments for this region (words will lack alignment scores)."
             )
             # Fall back to unaligned (global time) segments for this region
             all_aligned_segments.extend(region_segs)
@@ -1021,7 +1031,15 @@ def transcribe(
         )
         logger.info(f"[Transcription] Forced alignment complete ✓ ({len(aligned_result.get('segments', []))} segments)")
     except Exception as align_err:
-        logger.warning(f"[Transcription] Alignment failed ({align_err}). Falling back to raw segments.")
+        logger.error(
+            f"[Transcription] ❌ FORCED ALIGNMENT FAILED ({type(align_err).__name__}: {align_err})! "
+            f"Falling back to raw segments WITHOUT word-level confidence.\n"
+            f"  - Model directory: {align_model_dir}\n"
+            f"  - Device: {device}, Language: {detected_lang}\n"
+            f"  - Debugging check: Verify if 'align_engine' model exists in runtime/models, "
+            f"if ffmpeg is installed in Windows PATH, or if offline mode blocked HuggingFace.",
+            exc_info=True,
+        )
         aligned_result = {"segments": raw_segments}
     finally:
         if _preprocessed_path and _preprocessed_path != file_path:
@@ -1034,20 +1052,36 @@ def transcribe(
     # ── Step 6: Normalize Output Schema & Log Stage Statistics ────────────
     segments: List[Dict[str, Any]] = []
     raw_parts: List[str] = []
+    aligned_words_count = 0
+    missing_words_segs_count = 0
+    fallback_words_count = 0
 
     for seg in aligned_result.get("segments", []):
         seg_start = _safe_float(seg.get("start"), 0.0)
         seg_end = _safe_float(seg.get("end"), seg_start + 0.1)
 
+        raw_seg_words = seg.get("words", [])
+        if not raw_seg_words:
+            missing_words_segs_count += 1
+
         words: List[Dict[str, Any]] = []
-        for w in seg.get("words", []):
+        for w in raw_seg_words:
             w_start = _safe_float(w.get("start"), seg_start)
             w_end = _safe_float(w.get("end"), seg_end)
+            w_score = w.get("score")
+            w_prob = w.get("probability")
+            if w_score is None and w_prob is None:
+                fallback_words_count += 1
+                word_conf = 1.0
+            else:
+                word_conf = w_score if w_score is not None else w_prob
+                aligned_words_count += 1
+
             words.append({
                 "word": w.get("word", "").strip(),
                 "start": w_start,
                 "end": w_end,
-                "probability": round(float(w.get("score", w.get("probability", 1.0))), 4),
+                "probability": round(float(word_conf), 4),
             })
 
         text = seg.get("text", "").strip()
@@ -1062,6 +1096,18 @@ def transcribe(
             "avg_logprob": round(float(seg.get("avg_logprob", 0.0)), 4),
         })
         raw_parts.append(text)
+
+    if missing_words_segs_count > 0 or fallback_words_count > 0:
+        logger.warning(
+            f"[Transcription] ⚠️ WORD CONFIDENCE FALLBACK DETECTED: "
+            f"{missing_words_segs_count}/{len(aligned_result.get('segments', []))} segments had NO word data from alignment, "
+            f"and {fallback_words_count} words lacked score/probability and defaulted to 1.0. "
+            f"(Aligned words with genuine scores: {aligned_words_count})"
+        )
+    else:
+        logger.info(
+            f"[Transcription] ✓ Word confidence verified: {aligned_words_count} words aligned with genuine scores across {len(segments)} segments."
+        )
 
     from services.transcript_normalizer import sanitize_and_merge_segments
     segments = sanitize_and_merge_segments(segments)

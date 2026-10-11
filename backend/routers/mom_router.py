@@ -914,7 +914,11 @@ async def download_mom_docx(
             r_cells = tbl.add_row().cells
             r_cells[0].text = str(idx)
             r_cells[1].text = act.get("task") or act.get("item") or act.get("description") or "-"
-            r_cells[2].text = act.get("owner") or "Unassigned"
+            owner = act.get("owner")
+            # "(?)" marks owners whose speaker attribution could not be verified (ROM pipeline).
+            if owner and act.get("owner_confidence") == "low":
+                owner = f"{owner} (?)"
+            r_cells[2].text = owner or "Unassigned"
             r_cells[3].text = act.get("deadline") or "ASAP"
 
     if mom.get("conclusion"):

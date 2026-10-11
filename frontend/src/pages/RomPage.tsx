@@ -8,13 +8,21 @@ import {
   RotateCcw, RotateCw, WandSparkles, FileUp, Search, Replace, History,
   Merge, Scissors, Check, CornerDownRight, GitMerge,
   BookOpen, AlertTriangle, CheckCircle, MessageSquare, ListChecks, Zap,
-  Star, Send, MessageCircle
+  Star, Send, MessageCircle, FlaskConical, Eye, SquareCheck, Square, Copy, CalendarDays
 } from 'lucide-react'
+import PptInsightsView from '../features/ppt-testing/PptInsightsView'
+import { SlideChips, StatusBadge as PptStatusBadge } from '../features/ppt-testing/PptBadges'
+import type { PptAnalysis, PptFocus, PptProgress, UnmatchedInsight } from '../features/ppt-testing/types'
 import api from '../api/client'
 import { toast } from 'sonner'
 import { getApiErrorDetail } from '../lib/errors'
+import { renderMarkdown } from '../lib/markdown'
 import { AgendaTimelineControls, AgendaTimelineRange } from '../components/AgendaTimelineControls'
 import { Stage2ContextPreviewModal, Stage2ContextGroup } from '../components/Stage2ContextPreviewModal'
+import { AgendaActionPointsSection, PointTypeBadge } from '../components/AgendaActionPoints'
+import { agendaShowsActionPoints, collectAgendaActionPoints } from '../lib/actionPoints'
+import type { AgendaActionPoint, ActionPointAudit } from '../lib/actionPoints'
+import { DiscussionAnalysis, DiscussionAnalysisPanel, SuggestedAgenda } from '../components/DiscussionAnalysisPanel'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -103,18 +111,20 @@ const getActionOwnerText = (pt: any): string | null => {
   }
 
   if (!owner) return null
+  // "(?)" marks owners whose speaker attribution could not be verified against the transcript.
+  const verifyMarker = pt.owner_confidence === 'low' ? ' (?)' : ''
   if (Array.isArray(owner)) {
     const valid = owner
       .map(o => formatItemText(o))
       .filter(s => s && s.toLowerCase() !== 'null' && s.toLowerCase() !== 'none' && s.toLowerCase() !== 'n/a' && s.toLowerCase() !== 'undefined' && s.toLowerCase() !== 'unassigned')
     const unique = Array.from(new Set(valid))
-    return unique.length > 0 ? unique.join(', ') : null
+    return unique.length > 0 ? unique.join(', ') + verifyMarker : null
   }
   const str = formatItemText(owner)
   if (!str || str.toLowerCase() === 'null' || str.toLowerCase() === 'none' || str.toLowerCase() === 'n/a' || str.toLowerCase() === 'undefined' || str.toLowerCase() === 'unassigned') {
     return null
   }
-  return str
+  return str + verifyMarker
 }
 
 
@@ -225,6 +235,12 @@ interface AgendaItem {
 interface FinalRomAgenda {
   agenda_id: string
   title: string
+  skipped?: boolean
+  // Per-agenda "Include Action Points"; action points generated from all of the agenda's points
+  include_action_points?: boolean
+  action_points_mode?: 'agenda'
+  action_points?: AgendaActionPoint[]
+  action_point_audit?: ActionPointAudit
   discussion_points: Array<{
     id: string
     text: string
@@ -234,12 +250,15 @@ interface FinalRomAgenda {
     timeline_end: number
     references: string[]
     action_items: string[]
+    point_type?: string
+    point_types?: string[]
   }>
 }
 
 interface AgendaDocEntry {
   doc_name: string
   points: string[]
+  presenter?: string | null
 }
 
 interface SpeakerMapping {
@@ -256,6 +275,7 @@ interface RomData {
     completed_at: string | null
     video_ocr_blocks_used?: number
     source_type?: string
+    windows?: Array<{ window_end?: number }>
   } | null
   stage2: {
     status: string
@@ -275,6 +295,10 @@ interface RomData {
     agenda_timeline?: Record<string, AgendaTimelineRange>
     enable_agenda_order?: boolean
     enable_agenda_timeline?: boolean
+    skipped_agendas?: Record<string, { note?: string }>
+    discussion_analysis?: DiscussionAnalysis | null
+    suggested_agendas?: SuggestedAgenda[]
+    enhanced_mom?: any
     completed_at: string | null
   } | null
   final_rom: {
@@ -282,6 +306,7 @@ interface RomData {
     speaker_mappings?: Record<string, string>
     last_edited_at?: string | null
     include_agenda_doc_points?: boolean
+    include_action_points?: boolean
     date?: string
     time?: string
     members_present?: string[]
@@ -959,7 +984,33 @@ export default function RomPage() {
   const [romData, setRomData] = useState<RomData | null>(null)
 
   // Active tab
-  const [activeTab, setActiveTab] = useState<'stage1' | 'stage2' | 'stage3' | 'final'>('stage1')
+  const [activeTab, setActiveTab] = useState<'stage1' | 'stage2' | 'stage3' | 'final' | 'ppt_testing'>('stage1')
+
+  // PPT Testing state
+  const [pptTestingSubTab, setPptTestingSubTab] = useState<'long_points' | 'ppt_points' | 'final_points'>('long_points')
+  const [pptUploadingFile, setPptUploadingFile] = useState(false)
+  const [pptGeneratingPoints, setPptGeneratingPoints] = useState(false)
+  const [pptComparing, setPptComparing] = useState(false)
+  const [pptGeneratingFinal, setPptGeneratingFinal] = useState(false)
+  const [pptExporting, setPptExporting] = useState(false)
+  const [editingPptPointId, setEditingPptPointId] = useState<string | null>(null)
+  const [editingPptPointDraft, setEditingPptPointDraft] = useState<string>('')
+  const [savingPptPoint, setSavingPptPoint] = useState(false)
+  const [pptMeetingDate, setPptMeetingDate] = useState<string>('')
+  const [pptFocus, setPptFocus] = useState<PptFocus>('standard')
+  const [pptProgress, setPptProgress] = useState<PptProgress | null>(null)
+  const [pptExportingBrief, setPptExportingBrief] = useState(false)
+  const pptFileInputRef = useRef<HTMLInputElement>(null)
+
+  // Default the meeting date to the saved PPT meeting date, else the recording date
+  useEffect(() => {
+    if (pptMeetingDate) return
+    const savedPpt = (romData as unknown as { ppt_testing?: { meeting_date?: string; focus?: PptFocus } } | null)?.ppt_testing
+    const fromRecording = recording?.created_at ? recording.created_at.slice(0, 10) : ''
+    const value = savedPpt?.meeting_date || fromRecording
+    if (value) setPptMeetingDate(value)
+    if (savedPpt?.focus) setPptFocus(savedPpt.focus)
+  }, [romData, recording, pptMeetingDate])
 
 
   // Stage 1 controls
@@ -1039,6 +1090,7 @@ export default function RomPage() {
   const [aiEditSelectedIds, setAiEditSelectedIds] = useState<Set<string>>(new Set())
   const [aiEditPrompt, setAiEditPrompt] = useState('')
   const [aiEditLoading, setAiEditLoading] = useState(false)
+  const [isConcluding, setIsConcluding] = useState(false)
   const [showAiChatPanel, setShowAiChatPanel] = useState(false)
   const [aiChatMessages, setAiChatMessages] = useState<Array<{
     role: 'user' | 'ai'
@@ -1048,6 +1100,22 @@ export default function RomPage() {
   }>>([])
   const [aiChatInput, setAiChatInput] = useState('')
   const [aiChatLoading, setAiChatLoading] = useState(false)
+  const [copiedMsgIdx, setCopiedMsgIdx] = useState<number | null>(null)
+  const aiChatEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (showAiChatPanel && aiChatEndRef.current) {
+      aiChatEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [aiChatMessages, aiChatLoading, showAiChatPanel])
+
+  const handleCopyMessage = (text: string, idx: number) => {
+    if (!text) return
+    navigator.clipboard.writeText(text)
+    setCopiedMsgIdx(idx)
+    toast.success('Copied to clipboard')
+    setTimeout(() => setCopiedMsgIdx(null), 2000)
+  }
 
   // Mark as Very Important state
   const [importantPoints, setImportantPoints] = useState<Array<{
@@ -1109,13 +1177,20 @@ export default function RomPage() {
   // Stage 3 – Skip agenda tracking: { [agendaId]: { skipped: boolean, note: string } }
   const [skippedAgendas, setSkippedAgendas] = useState<Record<string, { skipped: boolean; note: string }>>({})
 
-  // Final ROM – Include Action Points toggle
+  // Final ROM – Include Action Points toggle (header: all agendas; per agenda: agendaActionBusy)
   const [includeActionPointsInRom, setIncludeActionPointsInRom] = useState(false)
   const [togglingActionPoints, setTogglingActionPoints] = useState(false)
+  const [agendaActionBusy, setAgendaActionBusy] = useState<Record<string, boolean>>({})
+
+  // Stage 3 – discussion analysis before agenda creation, and adding its suggested agendas
+  const [analyzeDiscussion, setAnalyzeDiscussion] = useState(true)
+  const [addingSuggestionId, setAddingSuggestionId] = useState<string | null>(null)
 
   // Reasoning Mode state (Short ROM & Action Point from Enhanced Point)
   const [reasoningModeShortRom, setReasoningModeShortRom] = useState(false)
   const [reasoningModeActionPoints, setReasoningModeActionPoints] = useState(false)
+  const [shortRomModelMode, setShortRomModelMode] = useState<'base' | 'trained'>('base')
+  const [shortRomVariantId, setShortRomVariantId] = useState<string | null>(null)
 
   useEffect(() => {
     api.get('/settings').then(res => {
@@ -1125,6 +1200,12 @@ export default function RomPage() {
         }
         if (typeof res.data.reasoning_mode_action_points === 'boolean') {
           setReasoningModeActionPoints(res.data.reasoning_mode_action_points)
+        }
+        if (res.data.rom_short_model_mode) {
+          setShortRomModelMode(res.data.rom_short_model_mode)
+        }
+        if (res.data.rom_short_model_variant_id) {
+          setShortRomVariantId(res.data.rom_short_model_variant_id)
         }
       }
     }).catch(() => {})
@@ -1346,7 +1427,7 @@ export default function RomPage() {
           const s3Agendas = [...(prev.stage3?.agendas || []), res.data.agenda]
           return {
             ...prev,
-            stage3: { ...(prev.stage3 || {}), agendas: s3Agendas }
+            stage3: { ...(prev.stage3 || {}), agendas: s3Agendas } as RomData['stage3']
           }
         })
       }
@@ -1359,6 +1440,25 @@ export default function RomPage() {
       toast.error(getApiErrorDetail(e) || 'Failed to add agenda')
     } finally {
       setCreatingAgenda(false)
+    }
+  }
+
+  // Add a topic suggested by the Stage 3 discussion analysis as a new agenda
+  const handleAddSuggestedAgenda = async (suggestion: SuggestedAgenda) => {
+    if (!id) return
+    setAddingSuggestionId(suggestion.suggestion_id)
+    try {
+      const res = await api.post(`/rom/${id}/stage3/agenda`, {
+        title: suggestion.title,
+        description: suggestion.description,
+        suggestion_id: suggestion.suggestion_id,
+      })
+      if (res.data?.rom_data) setRomData(res.data.rom_data)
+      toast.success(`Agenda added: ${suggestion.title}. Re-map the Final ROM to assign its points.`)
+    } catch (e) {
+      toast.error(getApiErrorDetail(e, 'Failed to add suggested agenda'))
+    } finally {
+      setAddingSuggestionId(null)
     }
   }
 
@@ -1575,6 +1675,7 @@ export default function RomPage() {
         force_reextract: forceReextract,
         previous_mom_texts: previousMomDocs.length > 0 ? previousMomDocs.map(d => d.text.slice(0, prevMomCharLimit)) : null,
         previous_mom_char_limit: prevMomCharLimit,
+        analyze_discussion: analyzeDiscussion,
       })
       const fullData = res.data.rom_data || { ...(romData || {} as RomData), stage3: res.data.stage3 }
       setRomData(fullData)
@@ -1582,7 +1683,13 @@ export default function RomPage() {
       setStage3FinalStatus('idle') // reset final since agendas changed
       setActiveTab('stage3')
       const agendaCount = fullData.stage3?.agendas?.length ?? 0
-      toast.success(`Agendas created: ${agendaCount} agenda item(s)`)
+      const suggestionCount = fullData.stage3?.suggested_agendas?.length ?? 0
+      const derived = fullData.stage3?.discussion_analysis?.mode === 'derived_agendas'
+      toast.success(
+        `Agendas created: ${agendaCount} agenda item(s)` +
+        (derived ? ' built from the discussion' : '') +
+        (suggestionCount > 0 ? ` · ${suggestionCount} suggested agenda(s) to review` : '')
+      )
       return true
     } catch (e) {
       setStage3AgendaStatus('error')
@@ -1847,7 +1954,7 @@ export default function RomPage() {
       const romRes = await api.get(`/rom/${id}`)
       const rawData = romRes.data
       const data = (rawData?.rom_data || rawData) as RomData
-      if (data && (data.stage1 || data.stage2 || data.stage3 || data.final_rom)) {
+      if (data && (data.stage1 || data.stage2 || data.stage3 || data.final_rom || (data as any).ppt_testing)) {
         setRomData(data)
         if (data.stage1?.status === 'done') setStage1Status('done')
         if (data.stage2?.status === 'done') setStage2Status('done')
@@ -2324,9 +2431,8 @@ export default function RomPage() {
 
   const downloadDocx = async (stage: string) => {
     try {
-      const queryParam = stage === 'final'
-        ? `?version=${romVersion}&include_action_points=${includeActionPointsInRom}`
-        : ''
+      // Final ROM: each agenda's own "Include Action Points" option decides what the DOCX shows
+      const queryParam = stage === 'final' ? `?version=${romVersion}` : ''
       const res = await api.get(`/rom/${id}/${stage}/download/docx${queryParam}`, { responseType: 'blob' })
       const url = URL.createObjectURL(new Blob([res.data]))
       const a = document.createElement('a')
@@ -2387,11 +2493,38 @@ export default function RomPage() {
       } else if (res.data?.final_rom) {
         setRomData(prev => prev ? { ...prev, final_rom: res.data.final_rom } : prev)
       }
-      toast.success(enabled ? 'Action points enabled in Final ROM' : 'Action points disabled in Final ROM')
+      toast.success(enabled ? 'Action points included for all agendas' : 'Action points hidden for all agendas')
     } catch (e) {
       toast.error(getApiErrorDetail(e) || 'Failed to update Action Points setting')
     } finally {
       setTogglingActionPoints(false)
+    }
+  }
+
+  // Final ROM – Include Action Points for one agenda (generates from all of its discussion points)
+  const handleToggleAgendaActionPoints = async (agendaId: string, include: boolean, regenerate: boolean = false) => {
+    if (!id) return
+    setAgendaActionBusy(prev => ({ ...prev, [agendaId]: true }))
+    try {
+      const res = await api.post(`/rom/${id}/final/agendas/${agendaId}/action-points`, {
+        include,
+        regenerate,
+        reasoning_mode: reasoningModeActionPoints,
+      })
+      if (res.data?.rom_data) setRomData(res.data.rom_data)
+      const audit = res.data?.action_point_audit as ActionPointAudit | undefined
+      if (!include) {
+        toast.success(`Action points hidden for ${agendaId}`)
+      } else if (audit) {
+        const removed = audit.rejected?.length || 0
+        toast.success(`${agendaId}: ${audit.kept} action point(s)` + (removed ? ` · ${removed} vague, unsupported or duplicate removed` : ''))
+      } else {
+        toast.success(`Action points shown for ${agendaId}`)
+      }
+    } catch (e) {
+      toast.error(getApiErrorDetail(e, 'Failed to update action points for this agenda'))
+    } finally {
+      setAgendaActionBusy(prev => ({ ...prev, [agendaId]: false }))
     }
   }
 
@@ -2428,7 +2561,11 @@ export default function RomPage() {
         }))
         setRomVersion(targetVersion)
         const versionLabel = targetVersion === 'short' ? 'Short' : 'Medium'
-        toast.success(`${versionLabel} ROM generated and saved successfully!`)
+        if (targetVersion === 'short' && res.data?.used_variant) {
+          toast.success(`Short ROM generated using Trained Variant (${res.data?.variant_id?.slice(0, 8) || 'LoRA'})!`)
+        } else {
+          toast.success(`${versionLabel} ROM generated and saved successfully!`)
+        }
       } else {
         throw new Error('Server returned empty or invalid ROM points')
       }
@@ -2545,17 +2682,13 @@ export default function RomPage() {
 
   // ── AI Edit, AI Chat, & Mark Important Handlers ────────────────────────────
 
-  // Toggle selection of a point for Edit with AI (max 3 points)
+  // Toggle selection of a point for Edit with AI
   const handleToggleAiEditPoint = (pointId: string) => {
     setAiEditSelectedIds(prev => {
       const next = new Set(prev)
       if (next.has(pointId)) {
         next.delete(pointId)
       } else {
-        if (next.size >= 3) {
-          toast.error('You can select at most 3 points for AI Edit')
-          return prev
-        }
         next.add(pointId)
       }
       return next
@@ -2707,18 +2840,130 @@ export default function RomPage() {
     }
   }
 
-  // Handle right-click context menu in Final ROM (Long view)
+  // Combine selected points into one concise conclusion of 2-3 sentences
+  const handleConcludePoints = async () => {
+    if (!id || aiEditSelectedIds.size < 2) {
+      toast.error('Please select at least 2 points to conclude')
+      return
+    }
+    const activeRom = romVersion === 'long'
+      ? (romData?.final_rom_versions?.long || originalFinalRom || romData?.final_rom)
+      : romData?.final_rom_versions?.[romVersion]
+    if (!activeRom?.agendas) return
+
+    // Find all selected points in ROM order and their agenda context
+    const selectedPoints: any[] = []
+    let detectedAgendaContext = ''
+    for (const ag of activeRom.agendas) {
+      for (const pt of (ag.discussion_points || [])) {
+        if (aiEditSelectedIds.has(pt.id)) {
+          selectedPoints.push({
+            ...pt,
+            agenda_id: ag.agenda_id,
+            agenda_title: ag.title,
+          })
+          if (!detectedAgendaContext) {
+            detectedAgendaContext = `${ag.agenda_id}: ${ag.title}`
+          }
+        }
+      }
+    }
+
+    if (selectedPoints.length < 2) {
+      toast.error('Could not locate all selected points in current ROM')
+      return
+    }
+
+    setIsConcluding(true)
+    setFinalRomContextMenu(null)
+
+    const userMsg = {
+      role: 'user' as const,
+      content: `[Conclude ${selectedPoints.length} points into 1–3 sentence summary]`,
+      timestamp: new Date()
+    }
+    setAiChatMessages(prev => [...prev, userMsg])
+    setShowAiChatPanel(true)
+
+    try {
+      const res = await api.post(`/rom/${id}/final/conclude-points`, {
+        point_ids: Array.from(aiEditSelectedIds),
+        point_details: selectedPoints,
+        agenda_context: detectedAgendaContext,
+      })
+
+      const concludedPoint = res.data?.concluded_point
+      const replacedId = res.data?.replaced_point_id
+      const removedIds = new Set(res.data?.removed_point_ids || [])
+      const explanation = res.data?.explanation || 'Combined selected points into one concise conclusion of 1–3 sentences.'
+
+      if (concludedPoint && replacedId) {
+        const newRom = JSON.parse(JSON.stringify(activeRom))
+        for (const ag of newRom.agendas || []) {
+          const newPts: any[] = []
+          for (const pt of (ag.discussion_points || [])) {
+            if (pt.id === replacedId) {
+              newPts.push(concludedPoint)
+            } else if (!removedIds.has(pt.id)) {
+              newPts.push(pt)
+            }
+          }
+          ag.discussion_points = newPts
+        }
+
+        setRomData(prev => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            final_rom: romVersion === 'long' ? newRom : (prev.final_rom || newRom),
+            final_rom_versions: {
+              ...(prev.final_rom_versions || {}),
+              [romVersion]: newRom
+            }
+          }
+        })
+
+        // Add AI response to chat
+        const aiMsg = {
+          role: 'ai' as const,
+          content: `### Concluded Summary (1–3 sentences)\n\n${concludedPoint.text}\n\n*${explanation}*`,
+          timestamp: new Date()
+        }
+        setAiChatMessages(prev => [...prev, aiMsg])
+
+        // Clear selection
+        setAiEditSelectedIds(new Set())
+        toast.success('Points concluded into one concise point! Click "Save Changes" to persist.')
+      } else {
+        throw new Error('No concluded point returned by server')
+      }
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Failed to conclude points')
+      setAiChatMessages(prev => [
+        ...prev,
+        {
+          role: 'ai',
+          content: `Failed to conclude points: ${getApiErrorDetail(e) || 'Unknown error occurred'}`,
+          timestamp: new Date()
+        }
+      ])
+    } finally {
+      setIsConcluding(false)
+    }
+  }
+
+  // Handle right-click context menu in Final ROM
   const handleFinalRomContextMenu = (e: React.MouseEvent, pointId: string, agendaId: string, fullPointText?: string) => {
-    const selection = window.getSelection()
-    const selectedText = selection?.toString()?.trim() || fullPointText?.trim() || ''
-    if (!selectedText) return
     e.preventDefault()
+    e.stopPropagation()
+    const selection = window.getSelection()
+    const selectedText = selection?.toString()?.trim() || ''
     setFinalRomContextMenu({
       x: e.clientX,
       y: e.clientY,
       pointId,
       agendaId,
-      selectedText,
+      selectedText: selectedText || fullPointText?.trim() || '',
     })
   }
 
@@ -2785,6 +3030,185 @@ export default function RomPage() {
   const stage2Count = romData?.stage2?.polished_points?.length || 0
   const stage3Count = romData?.stage3?.agendas?.length || 0
   const finalCount = romData?.final_rom?.agendas?.length || 0
+  const pptTestingCount = (romData as any)?.ppt_testing?.final_points?.length || 0
+
+  // ── PPT Testing Handlers ─────────────────────────────────────────────────
+  const reloadRomDataOnly = async () => {
+    try {
+      const romRes = await api.get(`/rom/${id}`)
+      const rawData = romRes.data
+      const data = (rawData?.rom_data || rawData) as RomData
+      if (data) setRomData(data)
+    } catch { /* ignore */ }
+  }
+
+  const handlePptFileUpload = async (files: FileList | null) => {
+    if (!files?.length || !id) return
+    setPptUploadingFile(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', files[0])
+      const res = await api.post(`/rom/${id}/ppt-testing/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      toast.success(`Uploaded & extracted ${res.data.extracted_chars?.toLocaleString() || 0} chars from "${res.data.filename}"`)
+      await reloadRomDataOnly()
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to upload/extract document')
+    } finally {
+      setPptUploadingFile(false)
+      if (pptFileInputRef.current) pptFileInputRef.current.value = ''
+    }
+  }
+
+  /** Poll backend progress while a long PPT task runs; returns a stop function. */
+  const startPptProgressPolling = () => {
+    let active = true
+    const tick = async () => {
+      if (!active || !id) return
+      try {
+        const res = await api.get(`/rom/${id}/ppt-testing/progress`)
+        if (active) setPptProgress(res.data?.running ? res.data : null)
+      } catch { /* ignore transient polling errors */ }
+      if (active) window.setTimeout(tick, 1500)
+    }
+    window.setTimeout(tick, 800)
+    return () => { active = false; setPptProgress(null) }
+  }
+
+  const handlePptGeneratePoints = async () => {
+    if (!id) return
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(pptMeetingDate)) {
+      toast.error('Select the meeting date first')
+      return
+    }
+    setPptGeneratingPoints(true)
+    const stopPolling = startPptProgressPolling()
+    try {
+      const res = await api.post(`/rom/${id}/ppt-testing/generate-points`, { meeting_date: pptMeetingDate, focus: pptFocus })
+      const d = res.data || {}
+      toast.success(`${d.insight_count ?? 0} insights from ${d.slides_analyzed ?? 0} of ${d.slides_total ?? 0} slides`)
+      await reloadRomDataOnly()
+      setPptTestingSubTab('ppt_points')
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to generate PPT points')
+    } finally {
+      stopPolling()
+      setPptGeneratingPoints(false)
+    }
+  }
+
+  const handlePptExportBrief = async () => {
+    if (!id) return
+    setPptExportingBrief(true)
+    try {
+      const res = await api.get(`/rom/${id}/ppt-testing/export-insights-docx`, { responseType: 'blob' })
+      const url = URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `ppt_brief_${id}.docx`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to export the brief')
+    } finally {
+      setPptExportingBrief(false)
+    }
+  }
+
+  const handlePptCompare = async () => {
+    if (!id) return
+    setPptComparing(true)
+    const stopPolling = startPptProgressPolling()
+    try {
+      const res = await api.post(`/rom/${id}/ppt-testing/compare`)
+      const groups = res.data?.groups_count ?? 0
+      toast.success(`Matching complete: ${groups} long point${groups === 1 ? '' : 's'} matched to slide insights`)
+      await reloadRomDataOnly()
+      setPptTestingSubTab('final_points')
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to compare points')
+    } finally {
+      stopPolling()
+      setPptComparing(false)
+    }
+  }
+
+  const handlePptGenerateFinal = async () => {
+    if (!id) return
+    setPptGeneratingFinal(true)
+    try {
+      await api.post(`/rom/${id}/ppt-testing/generate-final`)
+      toast.success('Final combined points generated')
+      await reloadRomDataOnly()
+      setPptTestingSubTab('final_points')
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to generate final points')
+    } finally {
+      setPptGeneratingFinal(false)
+    }
+  }
+
+  const handlePptTogglePoint = async (pointId: string, enabled: boolean) => {
+    if (!id) return
+    try {
+      const res = await api.put(`/rom/${id}/ppt-testing/toggle-points`, {
+        toggles: { [pointId]: enabled }
+      })
+      setRomData(prev => {
+        if (!prev) return prev
+        return { ...prev, ppt_testing: { ...(prev as any).ppt_testing, final_points: res.data.final_points } } as any
+      })
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to update point')
+    }
+  }
+
+  const handleSavePptPoint = async (pointId: string) => {
+    if (!id || !editingPptPointDraft.trim()) return
+    setSavingPptPoint(true)
+    try {
+      const res = await api.put(`/rom/${id}/ppt-testing/update-point`, {
+        point_id: pointId,
+        text: editingPptPointDraft.trim()
+      })
+      setRomData(prev => {
+        if (!prev) return prev
+        return { ...prev, ppt_testing: { ...(prev as any).ppt_testing, final_points: res.data.final_points } } as any
+      })
+      setEditingPptPointId(null)
+      toast.success('Point updated successfully')
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Failed to update point')
+    } finally {
+      setSavingPptPoint(false)
+    }
+  }
+
+  const handlePptExportDocx = async () => {
+    if (!id) return
+    const pptTesting = (romData as any)?.ppt_testing
+    const finalPoints = pptTesting?.final_points || []
+    const selectedIds = finalPoints.filter((p: any) => p.enabled !== false).map((p: any) => p.id)
+    if (!selectedIds.length) { toast.error('No points selected for export'); return }
+    setPptExporting(true)
+    try {
+      const res = await api.post(`/rom/${id}/ppt-testing/export-docx`, { selected_point_ids: selectedIds }, { responseType: 'blob' })
+      const url = URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `ppt_testing_final_${id}.docx`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast.success('DOCX exported successfully')
+    } catch (err) {
+      toast.error(getApiErrorDetail(err) || 'Export failed')
+    } finally {
+      setPptExporting(false)
+    }
+  }
 
   return (
     <div className="page-scroll-root" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
@@ -3302,6 +3726,22 @@ export default function RomPage() {
               />
             </div>
 
+            {/* Discussion analysis toggle */}
+            <label
+              title="Groups, de-duplicates and classifies the discussion (decisions, action items, questions, risks) and writes validated topics. Without an agenda file the topics become the agendas; otherwise topics matching no agenda are suggested."
+              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.7rem', color: 'hsl(var(--ink))', padding: '.2rem 0', userSelect: 'none' }}
+            >
+              <input
+                type="checkbox"
+                checked={analyzeDiscussion}
+                onChange={e => setAnalyzeDiscussion(e.target.checked)}
+                style={{ accentColor: 'hsl(205,85%,45%)', width: 12, height: 12, cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: analyzeDiscussion ? 700 : 500, color: analyzeDiscussion ? 'hsl(205,85%,40%)' : 'hsl(var(--pencil))' }}>
+                Analyze discussion to build / validate agendas
+              </span>
+            </label>
+
             {/* Regenerate / Bypass Cache toggle */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.7rem', color: 'hsl(var(--ink))', padding: '.2rem 0', userSelect: 'none' }}>
               <input
@@ -3404,7 +3844,9 @@ export default function RomPage() {
                 onChange={e => setIncludeActionPointsInRom(e.target.checked)}
                 style={{ accentColor: 'hsl(30,90%,55%)', width: 12, height: 12 }}
               />
-              <span style={{ fontWeight: 600 }}>Include Action Points</span>
+              <span style={{ fontWeight: 600 }} title="Generates action points for every agenda. When unchecked, agendas you selected individually in the Final ROM keep their action points.">
+                Include Action Points (all agendas)
+              </span>
             </label>
 
             {includeActionPointsInRom && (
@@ -3500,6 +3942,7 @@ export default function RomPage() {
               { id: 'stage2', label: 'Stage 2 (Enhanced)', count: stage2Count, color: 'hsl(205,90%,55%)' },
               { id: 'stage3', label: 'Stage 3 (Mapped)', count: stage3Count, color: 'hsl(140,70%,50%)' },
               { id: 'final', label: 'Final ROM', count: finalCount, color: 'hsl(30,90%,55%)' },
+              { id: 'ppt_testing', label: 'PPT Testing', count: pptTestingCount, color: 'hsl(260,70%,60%)' },
             ].map(tab => {
               const isActive = activeTab === tab.id
               const hasWarning =
@@ -3561,7 +4004,7 @@ export default function RomPage() {
                         : <>Click <strong>Generate Points</strong> on the left panel to execute sliding window transcript extraction.</>}
                     </div>
                     {stage1Status !== 'processing' && (
-                      <button onClick={runStage1} disabled={stage1Status === 'processing'} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
+                      <button onClick={runStage1} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
                         <Sparkles size={14} /> Run Stage 1 Extraction
                       </button>
                     )}
@@ -3864,7 +4307,7 @@ export default function RomPage() {
                         </div>
                       </div>
                       <button
-                        onClick={() => runGenerateStage2(true)}
+                        onClick={() => runStage2()}
                         disabled={stage2Status === 'processing'}
                         style={{
                           padding: '.4rem .9rem', borderRadius: 7, border: 'none',
@@ -4393,6 +4836,16 @@ export default function RomPage() {
                     </div>
                   )}
 
+                  {/* ── Discussion analysis: topics, matches with evidence, suggested agendas ── */}
+                  {romData.stage3.discussion_analysis && (
+                    <DiscussionAnalysisPanel
+                      analysis={romData.stage3.discussion_analysis}
+                      suggestions={romData.stage3.suggested_agendas || []}
+                      addingSuggestionId={addingSuggestionId}
+                      onAddSuggestion={handleAddSuggestedAgenda}
+                    />
+                  )}
+
                   {/* ── Stage 3 Interactive Agenda Discussion Sequence & Approximate Timeline ── */}
                   <AgendaTimelineControls
                     agendas={romData.stage3.agendas}
@@ -4747,6 +5200,12 @@ export default function RomPage() {
               ? !!(activeVersionRom?.agendas?.length)
               : !!(baseVersionRom?.agendas?.some((a: any) => a.discussion_points?.length))
 
+            // Header checkbox reflects the per-agenda "Include Action Points" selection (all / some / none)
+            const apActiveAgendas = (activeVersionRom?.agendas || []).filter((a: any) => !a.skipped)
+            const apIncludedCount = apActiveAgendas.filter((a: any) => agendaShowsActionPoints(a, includeActionPointsInRom)).length
+            const apAllIncluded = apActiveAgendas.length > 0 && apIncludedCount === apActiveAgendas.length
+            const apPartlyIncluded = apIncludedCount > 0 && !apAllIncluded
+
             if (!romData?.final_rom?.agendas || romData.final_rom.agendas.length === 0) {
               return (
                 <div style={{ textAlign: 'center', padding: '4rem 1.5rem', color: 'hsl(var(--pencil))' }}>
@@ -4798,32 +5257,37 @@ export default function RomPage() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'hsl(var(--muted)/.3)', padding: '.65rem 1rem', borderRadius: 9, border: '1px solid hsl(var(--border)/.4)', flexWrap: 'wrap', gap: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                     <SectionHeader icon={<Sparkles size={14} />} label="Final Record of Meeting" count={activeVersionRom?.agendas?.length || finalCount} color="hsl(30,90%,55%)" />
-                    {/* Include Action Points Toggle in Final ROM */}
-                    <label style={{
-                      display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-                      fontSize: '.74rem', fontWeight: 600,
-                      color: includeActionPointsInRom ? 'hsl(30,90%,40%)' : 'hsl(var(--ink))',
-                      background: includeActionPointsInRom ? 'hsl(30,90%,55%/.12)' : 'hsl(var(--card))',
-                      border: `1.5px solid ${includeActionPointsInRom ? 'hsl(30,90%,55%/.45)' : 'hsl(var(--border)/.6)'}`,
-                      padding: '.28rem .65rem', borderRadius: 7, transition: 'all .15s ease',
-                      userSelect: 'none'
-                    }}>
+                    {/* Include Action Points for all agendas (each agenda also has its own option) */}
+                    <label
+                      title={apPartlyIncluded
+                        ? `Action points included for ${apIncludedCount} of ${apActiveAgendas.length} agendas. Click to include all.`
+                        : 'Include action points for every agenda. Each agenda also has its own option.'}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                        fontSize: '.74rem', fontWeight: 600,
+                        color: apIncludedCount > 0 ? 'hsl(30,90%,40%)' : 'hsl(var(--ink))',
+                        background: apIncludedCount > 0 ? 'hsl(30,90%,55%/.12)' : 'hsl(var(--card))',
+                        border: `1.5px solid ${apIncludedCount > 0 ? 'hsl(30,90%,55%/.45)' : 'hsl(var(--border)/.6)'}`,
+                        padding: '.28rem .65rem', borderRadius: 7, transition: 'all .15s ease',
+                        userSelect: 'none'
+                      }}
+                    >
                       <input
                         type="checkbox"
-                        checked={includeActionPointsInRom}
+                        checked={apAllIncluded}
+                        ref={el => { if (el) el.indeterminate = apPartlyIncluded }}
                         disabled={togglingActionPoints}
-                        onChange={e => handleToggleActionPoints(e.target.checked)}
+                        onChange={() => handleToggleActionPoints(!apAllIncluded)}
                         style={{ accentColor: 'hsl(30,90%,55%)', width: 13, height: 13 }}
                       />
                       {togglingActionPoints ? (
                         <Loader size={12} className="spin" style={{ color: 'hsl(30,90%,50%)' }} />
                       ) : (
-                        <Zap size={12} style={{ color: includeActionPointsInRom ? 'hsl(30,90%,50%)' : 'hsl(var(--pencil))' }} />
+                        <Zap size={12} style={{ color: apIncludedCount > 0 ? 'hsl(30,90%,50%)' : 'hsl(var(--pencil))' }} />
                       )}
-                      <span>Include Action Points</span>
+                      <span>Include Action Points{apPartlyIncluded ? ` (${apIncludedCount}/${apActiveAgendas.length})` : ''}</span>
                     </label>
-                    {/* Action Points Reasoning Mode Toggle */}
-                    {includeActionPointsInRom && (
+                    {/* Action Points Reasoning Mode Toggle (applies to all action point generation) */}
                       <label style={{
                         display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
                         fontSize: '.72rem', fontWeight: 600,
@@ -4842,7 +5306,6 @@ export default function RomPage() {
                         <Brain size={12} style={{ color: 'hsl(205,85%,55%)' }} />
                         <span>Reasoning Mode</span>
                       </label>
-                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
@@ -5029,6 +5492,24 @@ export default function RomPage() {
                         <span>Reasoning Mode</span>
                       </label>
                     )}
+                    {romVersion === 'short' && isCurrentVersionGenerated && (
+                      <span
+                        title={shortRomModelMode === 'trained'
+                          ? `Short ROM model: Trained LoRA Variant (${shortRomVariantId ? shortRomVariantId.slice(0, 8) : 'LoRA'}). Configured in Settings.`
+                          : 'Short ROM model: Base model (general Ollama model). Configured in Settings.'}
+                        style={{
+                          fontSize: '.72rem', fontWeight: 700,
+                          padding: '.25rem .55rem', borderRadius: 6,
+                          background: shortRomModelMode === 'trained' ? 'hsl(280,75%,60%/.14)' : 'hsl(var(--muted)/.4)',
+                          border: `1px solid ${shortRomModelMode === 'trained' ? 'hsl(280,75%,60%/.4)' : 'hsl(var(--border)/.5)'}`,
+                          color: shortRomModelMode === 'trained' ? 'hsl(280,75%,50%)' : 'hsl(var(--pencil))',
+                          display: 'inline-flex', alignItems: 'center', gap: 4, userSelect: 'none'
+                        }}
+                      >
+                        {shortRomModelMode === 'trained' ? <Zap size={11} style={{ color: 'hsl(280,75%,60%)' }} /> : <span>⚡</span>}
+                        {shortRomModelMode === 'trained' ? 'Trained Variant' : 'Base Model'}
+                      </span>
+                    )}
                     <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>
                       {romVersion === 'long' && 'Stage 2 points with full discussion details'}
                       {romVersion === 'short' && 'Agenda-wise condensed: action points & decisions only'}
@@ -5169,6 +5650,24 @@ export default function RomPage() {
                         <Brain size={15} style={{ color: 'hsl(280,75%,60%)' }} />
                         <span>Reasoning Mode (2 LLM Calls)</span>
                       </label>
+                    )}
+                    {romVersion === 'short' && (
+                      <span
+                        title={shortRomModelMode === 'trained'
+                          ? `Short ROM model: Trained LoRA Variant (${shortRomVariantId ? shortRomVariantId.slice(0, 8) : 'LoRA'}). Configured in Settings.`
+                          : 'Short ROM model: Base model (general Ollama model). Configured in Settings.'}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 5,
+                          padding: '.35rem .75rem', borderRadius: 7,
+                          background: shortRomModelMode === 'trained' ? 'hsl(280,75%,60%/.14)' : 'hsl(var(--muted)/.35)',
+                          border: `1.5px solid ${shortRomModelMode === 'trained' ? 'hsl(280,75%,60%/.4)' : 'hsl(var(--border)/.5)'}`,
+                          color: shortRomModelMode === 'trained' ? 'hsl(280,75%,50%)' : 'hsl(var(--pencil))',
+                          fontSize: '.75rem', fontWeight: 700, userSelect: 'none'
+                        }}
+                      >
+                        {shortRomModelMode === 'trained' ? <Zap size={13} style={{ color: 'hsl(280,75%,60%)' }} /> : <span>⚡</span>}
+                        {shortRomModelMode === 'trained' ? 'Trained LoRA Model' : 'Base Model'}
+                      </span>
                     )}
                     <button
                       onClick={() => runGenerateRomVersion(romVersion as 'short' | 'medium')}
@@ -5473,35 +5972,18 @@ export default function RomPage() {
                         {activeVersionRom.agendas.map((agenda: any, aIdx: number) => {
                         const pts = agenda.discussion_points || []
                         const isSkipped = agenda.skipped === true
+                        const agendaKey = agenda.agenda_id || `A${aIdx + 1}`
 
-                        // Collect all action points belonging to this agenda
-                        const agendaActionPoints: any[] = []
-                        const seenActionKeys = new Set<string>()
-
-                        if (Array.isArray(agenda.action_points)) {
-                          for (const ap of agenda.action_points) {
-                            const task = ap.task || ap.item || ap.description || ''
-                            const key = task.trim().toLowerCase()
-                            if (key && !seenActionKeys.has(key)) {
-                              seenActionKeys.add(key)
-                              agendaActionPoints.push(ap)
-                            }
-                          }
-                        }
-
-                        for (const pt of pts) {
-                          const apList = (pt.action_points && pt.action_points.length > 0)
-                            ? pt.action_points
-                            : (pt.action_items && pt.action_items.length > 0 ? pt.action_items : [])
-                          for (const ap of apList) {
-                            const task = ap.task || ap.item || ap.description || ''
-                            const key = task.trim().toLowerCase()
-                            if (key && !seenActionKeys.has(key)) {
-                              seenActionKeys.add(key)
-                              agendaActionPoints.push(ap)
-                            }
-                          }
-                        }
+                        // Action points of this agenda, shown when the agenda includes them
+                        const showsActionPoints = agendaShowsActionPoints(agenda, includeActionPointsInRom)
+                        const agendaActionPoints = showsActionPoints ? collectAgendaActionPoints(agenda) : []
+                        const agendaActionMode = agenda.action_points_mode === 'agenda'
+                        const agendaActionBusyNow = agendaActionBusy[agendaKey] || false
+                        const pointNumbers: Record<string, number> = {}
+                        pts.forEach((p: any, i: number) => {
+                          if (p.id) pointNumbers[p.id] = i + 1
+                          if (p.original_point_id && !(p.original_point_id in pointNumbers)) pointNumbers[p.original_point_id] = i + 1
+                        })
 
                         return (
                           <div key={agenda.agenda_id || aIdx} style={{ borderRadius: 10, border: `1.5px solid ${isSkipped ? 'hsl(38,90%,50%/.4)' : 'hsl(var(--border)/.4)'}`, background: isSkipped ? 'hsl(38,90%,50%/.04)' : 'hsl(var(--card))', overflow: 'hidden' }}>
@@ -5517,6 +5999,42 @@ export default function RomPage() {
                                   </div>
                                 )}
                               </div>
+                              {!isSkipped && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                                  <label
+                                    title="Generate action points from all of this agenda's discussion points"
+                                    style={{
+                                      display: 'flex', alignItems: 'center', gap: 4, cursor: agendaActionBusyNow ? 'wait' : 'pointer',
+                                      fontSize: '.68rem', fontWeight: 600, userSelect: 'none',
+                                      color: showsActionPoints ? 'hsl(30,90%,38%)' : 'hsl(var(--pencil))',
+                                      background: showsActionPoints ? 'hsl(30,90%,55%/.12)' : 'transparent',
+                                      border: `1px solid ${showsActionPoints ? 'hsl(30,90%,55%/.4)' : 'hsl(var(--border)/.5)'}`,
+                                      padding: '2px 7px', borderRadius: 6,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={showsActionPoints}
+                                      disabled={agendaActionBusyNow || togglingActionPoints}
+                                      onChange={e => handleToggleAgendaActionPoints(agendaKey, e.target.checked)}
+                                      style={{ accentColor: 'hsl(30,90%,55%)', width: 11, height: 11 }}
+                                    />
+                                    {agendaActionBusyNow ? <Loader size={10} className="spin" /> : <Zap size={10} />}
+                                    Include Action Points
+                                  </label>
+                                  {showsActionPoints && agendaActionMode && (
+                                    <button
+                                      type="button"
+                                      title="Regenerate this agenda's action points"
+                                      disabled={agendaActionBusyNow || togglingActionPoints}
+                                      onClick={() => handleToggleAgendaActionPoints(agendaKey, true, true)}
+                                      style={{ background: 'none', border: '1px solid hsl(var(--border)/.5)', borderRadius: 6, padding: '2px 4px', cursor: 'pointer', color: 'hsl(var(--pencil))', display: 'flex' }}
+                                    >
+                                      <RefreshCw size={10} className={agendaActionBusyNow ? 'spin' : ''} />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
                               {isSkipped ? (
                                 <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(38,90%,45%)', background: 'hsl(38,90%,50%/.15)', padding: '2px 8px', borderRadius: 8, border: '1px solid hsl(38,90%,50%/.35)', display: 'flex', alignItems: 'center', gap: 4 }}>
                                   ⏩ Skipped
@@ -5563,7 +6081,11 @@ export default function RomPage() {
 
                                     return (
                                       <div key={pt.id || `${agenda.agenda_id || aIdx}-pt-${pIdx}`}>
-                                        <div style={{
+                                        <div
+                                          onContextMenu={(e) => {
+                                            handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`, ptText)
+                                          }}
+                                          style={{
                                           borderRadius: 8,
                                           border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : isDocPoint ? 'hsl(280,75%,60%/.3)' : isVeryImportantPoint ? 'hsl(45,100%,50%/.55)' : 'hsl(var(--border)/.3)'}`,
                                           background: isSelectedForAi ? 'hsl(280,75%,60%/.07)' : isDocPoint ? 'hsl(280,75%,60%/.05)' : isVeryImportantPoint ? 'hsl(45,100%,50%/.04)' : 'hsl(var(--paper)/.4)',
@@ -5575,7 +6097,7 @@ export default function RomPage() {
                                             <button
                                               type="button"
                                               onClick={() => handleToggleAiEditPoint(pt.id)}
-                                              title={isSelectedForAi ? 'Deselect for AI Edit' : 'Select for AI Edit (1–3 points)'}
+                                              title={isSelectedForAi ? 'Deselect for AI Edit' : 'Select for AI Edit'}
                                               style={{
                                                 background: isSelectedForAi ? 'hsl(280,75%,60%)' : 'transparent',
                                                 border: `1.5px solid ${isSelectedForAi ? 'hsl(280,75%,60%)' : 'hsl(var(--border)/.8)'}`,
@@ -5637,16 +6159,14 @@ export default function RomPage() {
                                               ) : (
                                                 <div
                                                   onContextMenu={(e) => {
-                                                    if (romVersion === 'long') {
-                                                      handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`, ptText)
-                                                    }
+                                                    handleFinalRomContextMenu(e, pt.id, agenda.agenda_id || `A${aIdx + 1}`, ptText)
                                                   }}
-                                                  title={romVersion === 'long' ? 'Tip: Select text and right-click to Mark as Very Important' : undefined}
+                                                  title={romVersion === 'long' ? 'Tip: Select text and right-click to Mark as Very Important or Conclude Points' : 'Tip: Right-click to Conclude Points or Select for AI Edit'}
                                                   style={{
                                                     color: 'hsl(var(--ink))',
                                                     lineHeight: 1.45,
                                                     fontSize: '.83rem',
-                                                    cursor: romVersion === 'long' ? 'text' : 'inherit',
+                                                    cursor: 'text',
                                                     userSelect: 'text'
                                                   }}
                                                 >
@@ -5669,6 +6189,7 @@ export default function RomPage() {
                                                   {displayPerson}
                                                 </span>
                                                 {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
+                                                <PointTypeBadge type={pt.point_type} types={pt.point_types} />
                                                 {isVeryImportantPoint && (
                                                   <span
                                                     title={ptImportantMarks.length > 0 ? `Marked as Very Important: ${ptImportantMarks.map(m => `"${m.text}"`).join(', ')}` : 'Marked as Very Important'}
@@ -5726,45 +6247,15 @@ export default function RomPage() {
                                   })
                                 )}
 
-                                {/* Action Points Section – Listed underneath all agenda discussion points */}
-                                {includeActionPointsInRom && agendaActionPoints.length > 0 && (
-                                  <div style={{ marginTop: '.85rem', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                    <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', paddingTop: '.6rem', borderTop: '1px solid hsl(var(--border)/.4)', marginBottom: 2 }}>
-                                      Action Points
-                                    </div>
-                                    {agendaActionPoints.map((ap: any, apIdx: number) => {
-                                      const apTask = ap.task || ap.item || ap.description || ''
-                                      const apAssignee = ap.assignee || ap.owner || ''
-                                      const apDeadline = ap.deadline || ''
-                                      return (
-                                        <div
-                                          key={`agenda-ap-${agenda.agenda_id || aIdx}-${apIdx}`}
-                                          style={{
-                                            borderRadius: 8,
-                                            border: '1px solid hsl(var(--border)/.3)',
-                                            background: 'hsl(var(--paper)/.4)',
-                                            padding: '.6rem .8rem',
-                                            display: 'flex',
-                                            gap: 8,
-                                            alignItems: 'flex-start'
-                                          }}
-                                        >
-                                          <span style={{ color: 'hsl(var(--pencil))', fontSize: '1rem', lineHeight: '1.2rem', flexShrink: 0, marginTop: 1, userSelect: 'none' }}>•</span>
-                                          <div style={{ flex: 1 }}>
-                                            <div style={{ color: 'hsl(var(--ink))', lineHeight: 1.45, fontSize: '.83rem' }}>{apTask}</div>
-                                            {(apAssignee || (apDeadline && String(apDeadline).toLowerCase() !== 'asap' && String(apDeadline).toLowerCase() !== 'none')) && (
-                                              <div style={{ marginTop: 4, display: 'flex', gap: 8, fontSize: '.7rem', color: 'hsl(var(--pencil))' }}>
-                                                {apAssignee && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><UserCheck size={10} /> {apAssignee}</span>}
-                                                {apDeadline && String(apDeadline).toLowerCase() !== 'asap' && String(apDeadline).toLowerCase() !== 'none' && (
-                                                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={10} /> {apDeadline}</span>
-                                                )}
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      )
-                                    })}
-                                  </div>
+                                {/* Action Points – generated from all of this agenda's discussion points */}
+                                {showsActionPoints && (
+                                  <AgendaActionPointsSection
+                                    agendaId={agendaKey}
+                                    agendaMode={agendaActionMode}
+                                    actionPoints={agendaActionPoints}
+                                    audit={agenda.action_point_audit}
+                                    pointNumbers={pointNumbers}
+                                  />
                                 )}
                               </div>
                             )}
@@ -5777,18 +6268,18 @@ export default function RomPage() {
                       {showAiChatPanel && (
                         <div style={{
                           flex: '0 0 35%',
-                          minWidth: 320,
-                          maxWidth: 440,
+                          minWidth: 340,
+                          maxWidth: 460,
                           position: 'sticky',
                           top: '1rem',
-                          height: 'calc(100vh - 150px)',
-                          maxHeight: '820px',
+                          height: 'calc(100vh - 120px)',
+                          maxHeight: '850px',
                           display: 'flex',
                           flexDirection: 'column',
                           background: 'hsl(var(--card))',
-                          borderRadius: 12,
+                          borderRadius: 14,
                           border: '1.5px solid hsl(280,75%,60%/.35)',
-                          boxShadow: '0 8px 30px rgba(120,40,180,0.1), 0 2px 8px rgba(0,0,0,0.04)',
+                          boxShadow: '0 12px 36px rgba(120,40,180,0.12), 0 2px 10px rgba(0,0,0,0.04)',
                           overflow: 'hidden',
                           zIndex: 20
                         }}>
@@ -5799,23 +6290,25 @@ export default function RomPage() {
                             borderBottom: '1px solid hsl(var(--border)/.5)',
                             display: 'flex',
                             alignItems: 'center',
-                            justifyContent: 'space-between'
+                            justifyContent: 'space-between',
+                            flexShrink: 0
                           }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                               <div style={{
-                                width: 28,
-                                height: 28,
-                                borderRadius: 8,
+                                width: 30,
+                                height: 30,
+                                borderRadius: 9,
                                 background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                color: 'white'
+                                color: 'white',
+                                boxShadow: '0 2px 8px rgba(168, 85, 247, 0.35)'
                               }}>
-                                <Sparkles size={15} />
+                                <Sparkles size={16} />
                               </div>
                               <div>
-                                <div style={{ fontSize: '.84rem', fontWeight: 800, color: 'hsl(var(--ink))', lineHeight: 1.2 }}>
+                                <div style={{ fontSize: '.85rem', fontWeight: 800, color: 'hsl(var(--ink))', lineHeight: 1.2 }}>
                                   Final ROM Assistant
                                 </div>
                                 <div style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', marginTop: 1 }}>
@@ -5823,35 +6316,64 @@ export default function RomPage() {
                                 </div>
                               </div>
                             </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                               {aiChatMessages.length > 0 && (
                                 <button
                                   onClick={() => setAiChatMessages([])}
                                   title="Clear chat history"
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '4px', borderRadius: 4 }}
+                                  style={{
+                                    background: 'hsl(var(--muted)/.4)',
+                                    border: '1px solid hsl(var(--border)/.4)',
+                                    cursor: 'pointer',
+                                    color: 'hsl(var(--pencil))',
+                                    padding: '4px 8px',
+                                    borderRadius: 6,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 4,
+                                    fontSize: '.7rem',
+                                    fontWeight: 600,
+                                    transition: 'all 0.15s ease'
+                                  }}
                                 >
-                                  <RotateCcw size={13} />
+                                  <RotateCcw size={12} />
+                                  <span>Clear</span>
                                 </button>
                               )}
                               <button
                                 onClick={() => setShowAiChatPanel(false)}
                                 title="Close AI Assistant"
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '4px', borderRadius: 4 }}
+                                style={{
+                                  background: 'none',
+                                  border: 'none',
+                                  cursor: 'pointer',
+                                  color: 'hsl(var(--pencil))',
+                                  padding: '5px',
+                                  borderRadius: 6,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}
                               >
-                                <X size={15} />
+                                <X size={16} />
                               </button>
                             </div>
                           </div>
 
-                          {/* Chat Messages */}
-                          <div style={{
-                            flex: 1,
-                            overflowY: 'auto',
-                            padding: '.85rem 1rem',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '.75rem'
-                          }}>
+                          {/* Chat Messages (Independently scrollable) */}
+                          <div
+                            className="final-rom-chat-messages-scroll"
+                            style={{
+                              flex: '1 1 0%',
+                              minHeight: 0,
+                              overflowY: 'auto',
+                              padding: '1rem',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '.85rem',
+                              background: 'hsl(var(--background)/.3)'
+                            }}
+                          >
                             {aiChatMessages.length === 0 ? (
                               <div style={{
                                 margin: 'auto 0',
@@ -5863,15 +6385,33 @@ export default function RomPage() {
                                 alignItems: 'center',
                                 gap: 10
                               }}>
-                                <div style={{ width: 44, height: 44, borderRadius: 22, background: 'hsl(280,75%,60%/.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'hsl(280,75%,60%)' }}>
+                                <div style={{
+                                  width: 44,
+                                  height: 44,
+                                  borderRadius: 22,
+                                  background: 'hsl(280,75%,60%/.12)',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  color: 'hsl(280,75%,60%)'
+                                }}>
                                   <MessageCircle size={22} />
                                 </div>
                                 <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>
                                   How to Edit with AI
                                 </div>
-                                <div style={{ fontSize: '.76rem', lineHeight: 1.5, textAlign: 'left', background: 'hsl(var(--muted)/.25)', padding: '.75rem .9rem', borderRadius: 8, border: '1px solid hsl(var(--border)/.4)' }}>
-                                  <div style={{ marginBottom: 4 }}>1. Select <strong>1 to 3 discussion points</strong> using the checkboxes on the left.</div>
-                                  <div style={{ marginBottom: 4 }}>2. Type your instructions in the bottom bar and press <strong>Enter</strong>.</div>
+                                <div style={{
+                                  fontSize: '.76rem',
+                                  lineHeight: 1.5,
+                                  textAlign: 'left',
+                                  background: 'hsl(var(--card))',
+                                  padding: '.75rem .9rem',
+                                  borderRadius: 8,
+                                  border: '1px solid hsl(var(--border)/.5)',
+                                  boxShadow: '0 2px 6px rgba(0,0,0,0.03)'
+                                }}>
+                                  <div style={{ marginBottom: 5 }}>1. Select <strong>1 to 3 discussion points</strong> using the checkboxes on the left.</div>
+                                  <div style={{ marginBottom: 5 }}>2. Type instructions in the bottom bar or click <strong>Conclude Points</strong>.</div>
                                   <div>3. The AI updates the points directly and explains all changes right here.</div>
                                 </div>
                                 <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))' }}>
@@ -5881,14 +6421,60 @@ export default function RomPage() {
                             ) : (
                               aiChatMessages.map((msg, idx) => {
                                 const isUser = msg.role === 'user'
+                                const timeStr = msg.timestamp
+                                  ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                  : ''
+
+                                if (isUser) {
+                                  return (
+                                    <div
+                                      key={idx}
+                                      style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'flex-end',
+                                        gap: 3
+                                      }}
+                                    >
+                                      <div style={{
+                                        fontSize: '.66rem',
+                                        color: 'hsl(var(--pencil))',
+                                        padding: '0 4px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: 4
+                                      }}>
+                                        <span style={{ fontWeight: 600 }}>You</span>
+                                        {timeStr && <span>• {timeStr}</span>}
+                                      </div>
+                                      <div style={{
+                                        maxWidth: '92%',
+                                        padding: '.7rem .9rem',
+                                        borderRadius: '12px 12px 2px 12px',
+                                        background: 'hsl(280,75%,60%/.13)',
+                                        border: '1px solid hsl(280,75%,60%/.3)',
+                                        color: 'hsl(var(--ink))',
+                                        fontSize: '.82rem',
+                                        lineHeight: 1.48,
+                                        whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-word',
+                                        boxShadow: '0 2px 6px rgba(120,40,180,0.04)'
+                                      }}>
+                                        {msg.content}
+                                      </div>
+                                    </div>
+                                  )
+                                }
+
                                 return (
                                   <div
                                     key={idx}
                                     style={{
                                       display: 'flex',
                                       flexDirection: 'column',
-                                      alignItems: isUser ? 'flex-end' : 'flex-start',
-                                      gap: 3
+                                      alignItems: 'flex-start',
+                                      gap: 3,
+                                      width: '100%'
                                     }}
                                   >
                                     <div style={{
@@ -5897,28 +6483,67 @@ export default function RomPage() {
                                       padding: '0 4px',
                                       display: 'flex',
                                       alignItems: 'center',
-                                      gap: 4
+                                      justifyContent: 'space-between',
+                                      width: '100%'
                                     }}>
-                                      {isUser ? 'You' : <><Sparkles size={10} style={{ color: 'hsl(280,75%,60%)' }} /> Assistant</>}
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                                        <span style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 3,
+                                          padding: '1px 5px',
+                                          borderRadius: 4,
+                                          background: 'hsl(280,75%,60%/.12)',
+                                          color: 'hsl(280,75%,50%)',
+                                          fontWeight: 700,
+                                          fontSize: '.65rem'
+                                        }}>
+                                          <Sparkles size={9} /> Assistant
+                                        </span>
+                                        {timeStr && <span>• {timeStr}</span>}
+                                      </div>
+                                      <button
+                                        onClick={() => handleCopyMessage(msg.content, idx)}
+                                        title="Copy response"
+                                        style={{
+                                          background: 'none',
+                                          border: 'none',
+                                          cursor: 'pointer',
+                                          color: copiedMsgIdx === idx ? 'hsl(142,70%,45%)' : 'hsl(var(--pencil))',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: 3,
+                                          fontSize: '.66rem',
+                                          padding: '1px 4px',
+                                          borderRadius: 4
+                                        }}
+                                      >
+                                        {copiedMsgIdx === idx ? <Check size={11} /> : <Copy size={11} />}
+                                        <span>{copiedMsgIdx === idx ? 'Copied' : 'Copy'}</span>
+                                      </button>
                                     </div>
                                     <div style={{
-                                      maxWidth: '92%',
-                                      padding: '.65rem .85rem',
-                                      borderRadius: isUser ? '10px 10px 2px 10px' : '10px 10px 10px 2px',
-                                      background: isUser ? 'hsl(280,75%,60%/.14)' : 'hsl(var(--paper))',
-                                      border: `1px solid ${isUser ? 'hsl(280,75%,60%/.3)' : 'hsl(var(--border)/.6)'}`,
+                                      width: '100%',
+                                      maxWidth: '96%',
+                                      padding: '.8rem .95rem',
+                                      borderRadius: '12px 12px 12px 2px',
+                                      background: 'hsl(var(--card))',
+                                      border: '1px solid hsl(var(--border)/.65)',
                                       color: 'hsl(var(--ink))',
                                       fontSize: '.82rem',
-                                      lineHeight: 1.45,
-                                      whiteSpace: 'pre-wrap',
+                                      lineHeight: 1.55,
+                                      boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
                                       wordBreak: 'break-word'
                                     }}>
-                                      {msg.content}
+                                      <div
+                                        className="final-rom-chat-markdown"
+                                        dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+                                      />
 
                                       {/* If message includes updated points */}
                                       {msg.pointUpdates && msg.pointUpdates.length > 0 && (
                                         <div style={{
-                                          marginTop: 8,
+                                          marginTop: 10,
                                           paddingTop: 8,
                                           borderTop: '1px solid hsl(var(--border)/.4)',
                                           display: 'flex',
@@ -5932,12 +6557,12 @@ export default function RomPage() {
                                             <div
                                               key={puIdx}
                                               style={{
-                                                padding: '4px 8px',
+                                                padding: '5px 8px',
                                                 borderRadius: 6,
                                                 background: 'hsl(280,75%,60%/.06)',
                                                 border: '1px solid hsl(280,75%,60%/.2)',
                                                 fontSize: '.76rem',
-                                                lineHeight: 1.35
+                                                lineHeight: 1.4
                                               }}
                                             >
                                               <span style={{ fontWeight: 700, color: 'hsl(280,75%,55%)' }}>
@@ -5954,66 +6579,95 @@ export default function RomPage() {
                               })
                             )}
                             {aiChatLoading && (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '.6rem .8rem', borderRadius: 8, background: 'hsl(var(--paper))', border: '1px solid hsl(var(--border)/.5)', alignSelf: 'flex-start' }}>
+                              <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 7,
+                                padding: '.65rem .85rem',
+                                borderRadius: 8,
+                                background: 'hsl(var(--card))',
+                                border: '1px solid hsl(var(--border)/.5)',
+                                alignSelf: 'flex-start',
+                                boxShadow: '0 2px 6px rgba(0,0,0,0.03)'
+                              }}>
                                 <Loader size={13} className="spin" style={{ color: 'hsl(280,75%,60%)' }} />
                                 <span style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))' }}>AI is thinking...</span>
                               </div>
                             )}
+                            <div ref={aiChatEndRef} style={{ height: 1 }} />
                           </div>
 
-                          {/* Chat Footer Input */}
+                          {/* Chat Footer Input (Fixed at bottom) */}
                           <div style={{
-                            padding: '.65rem .8rem',
-                            borderTop: '1px solid hsl(var(--border)/.5)',
-                            background: 'hsl(var(--muted)/.2)',
+                            padding: '.75rem .9rem',
+                            borderTop: '1px solid hsl(var(--border)/.55)',
+                            background: 'hsl(var(--card))',
                             display: 'flex',
-                            gap: 6,
-                            alignItems: 'flex-end'
+                            flexDirection: 'column',
+                            gap: 5,
+                            flexShrink: 0
                           }}>
-                            <textarea
-                              value={aiChatInput}
-                              onChange={e => setAiChatInput(e.target.value)}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter' && !e.shiftKey && !aiChatLoading && aiChatInput.trim()) {
-                                  e.preventDefault()
-                                  handleAiChatSend()
-                                }
-                              }}
-                              placeholder="Ask a question about the ROM..."
-                              rows={2}
-                              disabled={aiChatLoading}
-                              style={{
-                                flex: 1,
-                                resize: 'none',
-                                borderRadius: 8,
-                                border: '1px solid hsl(var(--border))',
-                                padding: '6px 8px',
-                                fontSize: '.8rem',
-                                fontFamily: 'Inter',
-                                background: 'hsl(var(--paper))',
-                                color: 'hsl(var(--ink))',
-                                outline: 'none'
-                              }}
-                            />
-                            <button
-                              onClick={handleAiChatSend}
-                              disabled={aiChatLoading || !aiChatInput.trim()}
-                              style={{
-                                padding: '.55rem .75rem',
-                                borderRadius: 8,
-                                background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
-                                color: 'white',
-                                border: 'none',
-                                cursor: (aiChatLoading || !aiChatInput.trim()) ? 'not-allowed' : 'pointer',
-                                opacity: (aiChatLoading || !aiChatInput.trim()) ? 0.5 : 1,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                flexShrink: 0
-                              }}
-                            >
-                              <Send size={13} />
-                            </button>
+                            <div style={{ display: 'flex', gap: 7, alignItems: 'flex-end' }}>
+                              <textarea
+                                value={aiChatInput}
+                                onChange={e => setAiChatInput(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter' && !e.shiftKey && !aiChatLoading && aiChatInput.trim()) {
+                                    e.preventDefault()
+                                    handleAiChatSend()
+                                  }
+                                }}
+                                placeholder="Ask a question about the ROM..."
+                                rows={2}
+                                disabled={aiChatLoading}
+                                style={{
+                                  flex: 1,
+                                  resize: 'none',
+                                  borderRadius: 8,
+                                  border: '1px solid hsl(var(--border))',
+                                  padding: '7px 9px',
+                                  fontSize: '.81rem',
+                                  fontFamily: 'Inter',
+                                  background: 'hsl(var(--paper))',
+                                  color: 'hsl(var(--ink))',
+                                  outline: 'none',
+                                  lineHeight: 1.45
+                                }}
+                              />
+                              <button
+                                onClick={handleAiChatSend}
+                                disabled={aiChatLoading || !aiChatInput.trim()}
+                                title="Send message (Enter)"
+                                style={{
+                                  width: 36,
+                                  height: 36,
+                                  borderRadius: 8,
+                                  background: 'linear-gradient(135deg, hsl(280,75%,60%), hsl(300,75%,50%))',
+                                  color: 'white',
+                                  border: 'none',
+                                  cursor: (aiChatLoading || !aiChatInput.trim()) ? 'not-allowed' : 'pointer',
+                                  opacity: (aiChatLoading || !aiChatInput.trim()) ? 0.45 : 1,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  flexShrink: 0,
+                                  boxShadow: (aiChatLoading || !aiChatInput.trim()) ? 'none' : '0 2px 8px rgba(168, 85, 247, 0.35)',
+                                  transition: 'all 0.15s ease'
+                                }}
+                              >
+                                {aiChatLoading ? <Loader size={13} className="spin" /> : <Send size={13} />}
+                              </button>
+                            </div>
+                            <div style={{
+                              fontSize: '.65rem',
+                              color: 'hsl(var(--pencil))',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              padding: '0 2px'
+                            }}>
+                              <span>Enter to send</span>
+                              <span>Shift + Enter for new line</span>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -6082,7 +6736,7 @@ export default function RomPage() {
 
                         <button
                           onClick={handleAiEditSubmit}
-                          disabled={aiEditLoading || !aiEditPrompt.trim()}
+                          disabled={aiEditLoading || isConcluding || !aiEditPrompt.trim()}
                           style={{
                             padding: '.5rem 1.1rem',
                             borderRadius: 8,
@@ -6094,8 +6748,8 @@ export default function RomPage() {
                             display: 'flex',
                             alignItems: 'center',
                             gap: 6,
-                            cursor: (aiEditLoading || !aiEditPrompt.trim()) ? 'not-allowed' : 'pointer',
-                            opacity: (aiEditLoading || !aiEditPrompt.trim()) ? 0.6 : 1,
+                            cursor: (aiEditLoading || isConcluding || !aiEditPrompt.trim()) ? 'not-allowed' : 'pointer',
+                            opacity: (aiEditLoading || isConcluding || !aiEditPrompt.trim()) ? 0.6 : 1,
                             flexShrink: 0,
                             fontFamily: 'Inter'
                           }}
@@ -6103,6 +6757,34 @@ export default function RomPage() {
                           {aiEditLoading ? <Loader size={14} className="spin" /> : <Send size={13} />}
                           {aiEditLoading ? 'Editing...' : 'Edit with AI'}
                         </button>
+
+                        {aiEditSelectedIds.size >= 2 && (
+                          <button
+                            type="button"
+                            onClick={handleConcludePoints}
+                            disabled={isConcluding || aiEditLoading}
+                            title="Combine selected points into one concise conclusion of 2–3 sentences"
+                            style={{
+                              padding: '.5rem 1.1rem',
+                              borderRadius: 8,
+                              background: 'hsl(280,75%,60%/.15)',
+                              color: 'hsl(280,75%,55%)',
+                              border: '1.5px solid hsl(280,75%,60%)',
+                              fontWeight: 700,
+                              fontSize: '.8rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              cursor: (isConcluding || aiEditLoading) ? 'not-allowed' : 'pointer',
+                              opacity: (isConcluding || aiEditLoading) ? 0.6 : 1,
+                              flexShrink: 0,
+                              fontFamily: 'Inter'
+                            }}
+                          >
+                            {isConcluding ? <Loader size={14} className="spin" /> : <Sparkles size={13} />}
+                            {isConcluding ? 'Concluding...' : 'Conclude Points'}
+                          </button>
+                        )}
 
                         <button
                           onClick={() => {
@@ -6131,6 +6813,452 @@ export default function RomPage() {
             )
           })()}
 
+
+          {/* ── PPT TESTING TAB ── */}
+          {activeTab === 'ppt_testing' && (() => {
+            const pptTesting = (romData as any)?.ppt_testing || {}
+            const uploadedFile = pptTesting.uploaded_file || null
+            const summarizationPoints: string[] = pptTesting.summarization_points || []
+            const insightPoints: string[] = pptTesting.insight_points || []
+            const comparisonGroups: any[] = pptTesting.comparison_groups || []
+            const finalPoints: any[] = pptTesting.final_points || []
+            const stage2LongPoints = romData?.stage2?.polished_points || []
+            const pptAnalysis: PptAnalysis | null = pptTesting.analysis?.insights ? pptTesting.analysis : null
+            const unmatchedInsights: UnmatchedInsight[] = pptTesting.unmatched_priority_insights || []
+            const slideCount: number = uploadedFile?.slides?.length || 0
+            const hasPptPoints = Boolean(pptAnalysis) || summarizationPoints.length > 0 || insightPoints.length > 0
+            const progressText = pptProgress?.running
+              ? `${pptProgress.message || 'Working'}${pptProgress.total ? ` (${pptProgress.current}/${pptProgress.total})` : ''}`
+              : ''
+
+            const pptSubTabs = [
+              { id: 'long_points' as const, label: 'Long Points', count: stage2LongPoints.length, color: 'hsl(205,90%,55%)' },
+              { id: 'ppt_points' as const, label: pptAnalysis ? 'Slide Insights' : 'PPT Points', count: pptAnalysis ? pptAnalysis.insights.length : summarizationPoints.length + insightPoints.length, color: 'hsl(280,70%,60%)' },
+              { id: 'final_points' as const, label: 'Final Points', count: finalPoints.length, color: 'hsl(160,70%,45%)' },
+            ]
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', height: '100%' }}>
+
+                {/* ── Upload & Pipeline Controls ── */}
+                <div style={{ background: 'hsl(260,50%,50%/.06)', border: '1.5px solid hsl(260,50%,50%/.2)', borderRadius: 10, padding: '1rem 1.25rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '.75rem', flexWrap: 'wrap' }}>
+                    <FlaskConical size={16} style={{ color: 'hsl(260,70%,60%)' }} />
+                    <span style={{ fontWeight: 700, fontSize: '.88rem', color: 'hsl(var(--ink))' }}>PPT Testing Pipeline</span>
+                    <span style={{ fontSize: '.68rem', fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'hsl(260,70%,60%/.12)', color: 'hsl(260,70%,60%)', border: '1px solid hsl(260,70%,60%/.25)' }}>
+                      Slide-wise analysis • Meeting-date focus • Verified matching
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    {/* Upload button */}
+                    <input ref={pptFileInputRef} type="file" accept=".ppt,.pptx,.pdf,.doc,.docx" style={{ display: 'none' }} onChange={(e) => handlePptFileUpload(e.target.files)} />
+                    <button
+                      onClick={() => pptFileInputRef.current?.click()}
+                      disabled={pptUploadingFile}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6, padding: '.45rem .9rem', borderRadius: 8,
+                        border: '1.5px solid hsl(260,70%,60%/.5)', background: 'hsl(260,70%,60%/.1)',
+                        color: 'hsl(260,70%,60%)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', fontFamily: 'Inter'
+                      }}
+                    >
+                      {pptUploadingFile ? <Loader size={13} className="spin" /> : <Upload size={13} />}
+                      {uploadedFile ? 'Replace Document' : 'Upload Document'}
+                    </button>
+
+                    {uploadedFile && (
+                      <span style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FileText size={12} /> {uploadedFile.filename}
+                        <span style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', opacity: 0.7 }}>
+                          ({slideCount > 0 ? `${slideCount} ${uploadedFile.slides?.[0]?.kind === 'page' ? 'pages' : uploadedFile.slides?.[0]?.kind === 'section' ? 'sections' : 'slides'} · ` : ''}{(uploadedFile.extracted_text?.length || 0).toLocaleString()} chars)
+                        </span>
+                      </span>
+                    )}
+
+                    {/* Meeting date + relevance window drive which slide content is prioritised */}
+                    {uploadedFile && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '.74rem', color: 'hsl(var(--ink))', fontWeight: 600 }}>
+                        <CalendarDays size={13} style={{ color: 'hsl(260,70%,60%)' }} />
+                        Meeting date
+                        <input
+                          type="date"
+                          value={pptMeetingDate}
+                          onChange={e => setPptMeetingDate(e.target.value)}
+                          disabled={pptGeneratingPoints}
+                          aria-label="Meeting date"
+                          style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--ink))', fontSize: '.76rem', fontFamily: 'Inter' }}
+                        />
+                      </label>
+                    )}
+                    {uploadedFile && (
+                      <select
+                        value={pptFocus}
+                        onChange={e => setPptFocus(e.target.value as PptFocus)}
+                        disabled={pptGeneratingPoints}
+                        aria-label="Relevance window"
+                        title="How far before and after the meeting date slide content counts as relevant"
+                        style={{ padding: '5px 6px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', color: 'hsl(var(--ink))', fontSize: '.74rem', fontFamily: 'Inter' }}
+                      >
+                        <option value="narrow">Narrow focus (−2 / +4 months)</option>
+                        <option value="standard">Standard focus (−4 / +6 months)</option>
+                        <option value="wide">Wide focus (−9 / +12 months)</option>
+                      </select>
+                    )}
+
+                    {/* Step 1: Generate Points */}
+                    {uploadedFile && (
+                      <button
+                        onClick={handlePptGeneratePoints}
+                        disabled={pptGeneratingPoints || pptComparing || !pptMeetingDate}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6, padding: '.45rem .9rem', borderRadius: 8,
+                          border: '1.5px solid hsl(280,70%,55%/.5)', background: 'hsl(280,70%,55%/.1)',
+                          color: 'hsl(280,70%,55%)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', fontFamily: 'Inter'
+                        }}
+                      >
+                        {pptGeneratingPoints ? <Loader size={13} className="spin" /> : <Sparkles size={13} />}
+                        {hasPptPoints ? 'Regenerate Insights' : 'Generate Insights'}
+                      </button>
+                    )}
+
+                    {/* Step 2: Compare */}
+                    {hasPptPoints && stage2LongPoints.length > 0 && (
+                      <button
+                        onClick={handlePptCompare}
+                        disabled={pptComparing || pptGeneratingPoints}
+                        title="Match Stage 2 long points to slide insights (semantic retrieval + verified matches)"
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6, padding: '.45rem .9rem', borderRadius: 8,
+                          border: '1.5px solid hsl(205,80%,50%/.5)', background: 'hsl(205,80%,50%/.1)',
+                          color: 'hsl(205,80%,50%)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', fontFamily: 'Inter'
+                        }}
+                      >
+                        {pptComparing ? <Loader size={13} className="spin" /> : <GitMerge size={13} />}
+                        {finalPoints.length > 0 ? 'Re-run Comparison' : 'Compare Points'}
+                      </button>
+                    )}
+
+                    {/* Step 3: Generate Final */}
+                    {comparisonGroups.length > 0 && (
+                      <button
+                        onClick={handlePptGenerateFinal}
+                        disabled={pptGeneratingFinal}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 6, padding: '.45rem .9rem', borderRadius: 8,
+                          border: '1.5px solid hsl(160,70%,42%/.5)', background: 'hsl(160,70%,42%/.1)',
+                          color: 'hsl(160,70%,42%)', fontSize: '.78rem', fontWeight: 700, cursor: 'pointer', fontFamily: 'Inter'
+                        }}
+                      >
+                        {pptGeneratingFinal ? <Loader size={13} className="spin" /> : <Merge size={13} />}
+                        {finalPoints.length > 0 ? 'Regenerate Final' : 'Generate Final Points'}
+                      </button>
+                    )}
+                  </div>
+                  {(pptGeneratingPoints || pptComparing) && (
+                    <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: '.6rem', fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>
+                      <Loader size={12} className="spin" />
+                      {progressText || (pptGeneratingPoints ? 'Analysing slides…' : 'Matching points…')}
+                      <span style={{ opacity: 0.75 }}>· each slide is analysed individually, this can take several minutes</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Sub-Tab Bar ── */}
+                <div style={{ display: 'flex', borderBottom: '1px solid hsl(var(--border)/.35)', gap: 0, flexShrink: 0 }}>
+                  {pptSubTabs.map(st => {
+                    const isActive = pptTestingSubTab === st.id
+                    return (
+                      <button
+                        key={st.id}
+                        onClick={() => setPptTestingSubTab(st.id)}
+                        style={{
+                          padding: '.6rem 1rem', fontSize: '.78rem', fontWeight: isActive ? 700 : 500,
+                          color: isActive ? st.color : 'hsl(var(--pencil))',
+                          borderBottom: `2px solid ${isActive ? st.color : 'transparent'}`,
+                          background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+                          transition: 'all .15s', fontFamily: 'Inter', border: 'none'
+                        }}
+                      >
+                        {st.label}
+                        {st.count > 0 && (
+                          <span style={{
+                            fontSize: '.64rem', fontWeight: 700, padding: '1px 6px', borderRadius: 999,
+                            background: isActive ? `${st.color}22` : 'hsl(var(--muted))',
+                            color: isActive ? st.color : 'hsl(var(--pencil))',
+                            border: `1px solid ${isActive ? `${st.color}44` : 'hsl(var(--border)/.5)'}`
+                          }}>{st.count}</span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {/* ── Sub-Tab Content ── */}
+                <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+
+                  {/* ═══ LONG POINTS SUB-TAB ═══ */}
+                  {pptTestingSubTab === 'long_points' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {stage2LongPoints.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                          <Brain size={36} style={{ margin: '0 auto .75rem', opacity: 0.35, color: 'hsl(205,90%,55%)' }} />
+                          <div style={{ fontSize: '.95rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.3rem' }}>No Stage 2 Long Points</div>
+                          <div style={{ fontSize: '.82rem', maxWidth: 380, margin: '0 auto', lineHeight: 1.45 }}>Run Stage 2 on the left panel first to generate enhanced discussion points.</div>
+                        </div>
+                      ) : (
+                        stage2LongPoints.map((pt: any, idx: number) => (
+                          <div key={pt.id || idx} style={{
+                            padding: '.75rem 1rem', borderRadius: 8,
+                            border: '1px solid hsl(205,90%,55%/.15)', background: 'hsl(205,90%,55%/.04)',
+                            display: 'flex', gap: 10, alignItems: 'flex-start'
+                          }}>
+                            <span style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(205,90%,55%)', minWidth: 24, textAlign: 'center', marginTop: 2 }}>{idx + 1}</span>
+                            <p style={{ margin: 0, fontSize: '.84rem', lineHeight: 1.55, color: 'hsl(var(--ink))' }}>
+                              {pt.polished_text || formatItemText(pt.discussion_point) || ''}
+                            </p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+
+                  {/* ═══ PPT POINTS SUB-TAB ═══ */}
+                  {pptTestingSubTab === 'ppt_points' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                      {!uploadedFile ? (
+                        <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                          <Upload size={36} style={{ margin: '0 auto .75rem', opacity: 0.35, color: 'hsl(260,70%,60%)' }} />
+                          <div style={{ fontSize: '.95rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.3rem' }}>No Document Uploaded</div>
+                          <div style={{ fontSize: '.82rem', maxWidth: 380, margin: '0 auto', lineHeight: 1.45 }}>Upload a PPT/PPTX, PDF, or DOC/DOCX file above to get started.</div>
+                        </div>
+                      ) : pptAnalysis ? (
+                        <PptInsightsView analysis={pptAnalysis} onExport={handlePptExportBrief} exporting={pptExportingBrief} />
+                      ) : summarizationPoints.length === 0 && insightPoints.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                          <Sparkles size={36} style={{ margin: '0 auto .75rem', opacity: 0.35, color: 'hsl(280,70%,60%)' }} />
+                          <div style={{ fontSize: '.95rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.3rem' }}>Insights Not Generated Yet</div>
+                          <div style={{ fontSize: '.82rem', maxWidth: 420, margin: '0 auto', lineHeight: 1.45 }}>Pick the meeting date and click "Generate Insights". Each slide is analysed up to the conclusion, focusing on work active around that date.</div>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Summarization Points */}
+                          {summarizationPoints.length > 0 && (
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: '.6rem' }}>
+                                <BookOpen size={14} style={{ color: 'hsl(280,70%,60%)' }} />
+                                <span style={{ fontWeight: 700, fontSize: '.82rem', color: 'hsl(280,70%,60%)' }}>Summarization Points</span>
+                                <span style={{ fontSize: '.68rem', fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: 'hsl(280,70%,60%/.12)', color: 'hsl(280,70%,60%)', border: '1px solid hsl(280,70%,60%/.3)' }}>{summarizationPoints.length}</span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {summarizationPoints.map((pt: string, idx: number) => (
+                                  <div key={`sum-${idx}`} style={{
+                                    padding: '.6rem .85rem', borderRadius: 7,
+                                    border: '1px solid hsl(280,60%,60%/.15)', background: 'hsl(280,60%,60%/.04)',
+                                    display: 'flex', gap: 8, alignItems: 'flex-start'
+                                  }}>
+                                    <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(280,60%,60%)', minWidth: 20, textAlign: 'center', marginTop: 2 }}>S{idx + 1}</span>
+                                    <p style={{ margin: 0, fontSize: '.82rem', lineHeight: 1.5, color: 'hsl(var(--ink))' }}>{pt}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Insight Points */}
+                          {insightPoints.length > 0 && (
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: '.6rem' }}>
+                                <Zap size={14} style={{ color: 'hsl(35,90%,50%)' }} />
+                                <span style={{ fontWeight: 700, fontSize: '.82rem', color: 'hsl(35,90%,50%)' }}>Insight Points</span>
+                                <span style={{ fontSize: '.68rem', fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: 'hsl(35,90%,50%/.12)', color: 'hsl(35,90%,50%)', border: '1px solid hsl(35,90%,50%/.3)' }}>{insightPoints.length}</span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {insightPoints.map((pt: string, idx: number) => (
+                                  <div key={`ins-${idx}`} style={{
+                                    padding: '.6rem .85rem', borderRadius: 7,
+                                    border: '1px solid hsl(35,85%,50%/.15)', background: 'hsl(35,85%,50%/.04)',
+                                    display: 'flex', gap: 8, alignItems: 'flex-start'
+                                  }}>
+                                    <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(35,85%,50%)', minWidth: 20, textAlign: 'center', marginTop: 2 }}>I{idx + 1}</span>
+                                    <p style={{ margin: 0, fontSize: '.82rem', lineHeight: 1.5, color: 'hsl(var(--ink))' }}>{pt}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ═══ FINAL POINTS SUB-TAB ═══ */}
+                  {pptTestingSubTab === 'final_points' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                      {finalPoints.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '3rem 1.5rem', color: 'hsl(var(--pencil))' }}>
+                          <Merge size={36} style={{ margin: '0 auto .75rem', opacity: 0.35, color: 'hsl(160,70%,45%)' }} />
+                          <div style={{ fontSize: '.95rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: '.3rem' }}>No Final Points Generated</div>
+                          <div style={{ fontSize: '.82rem', maxWidth: 420, margin: '0 auto', lineHeight: 1.45 }}>
+                            {comparisonGroups.length > 0
+                              ? 'Click "Generate Final Points" above to regenerate combined points.'
+                              : hasPptPoints
+                                ? 'Click "Compare Points" above to match Stage 2 Long Points to the slide insights.'
+                                : 'Upload a document and generate PPT points first, then compare with Stage 2 points.'}
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Export bar */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', padding: '.5rem .75rem', background: 'hsl(160,60%,45%/.06)', border: '1px solid hsl(160,60%,45%/.2)', borderRadius: 8 }}>
+                            <span style={{ fontSize: '.78rem', fontWeight: 600, color: 'hsl(var(--ink))' }}>
+                              {finalPoints.filter((p: any) => p.enabled !== false).length} of {finalPoints.length} points selected
+                            </span>
+                            <button
+                              onClick={handlePptExportDocx}
+                              disabled={pptExporting || finalPoints.filter((p: any) => p.enabled !== false).length === 0}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 6, padding: '.4rem .85rem', borderRadius: 8,
+                                border: '1.5px solid hsl(160,70%,42%/.5)', background: 'hsl(160,70%,42%/.12)',
+                                color: 'hsl(160,70%,38%)', fontSize: '.76rem', fontWeight: 700, cursor: 'pointer', fontFamily: 'Inter'
+                              }}
+                            >
+                              {pptExporting ? <Loader size={12} className="spin" /> : <Download size={12} />}
+                              Export as DOCX
+                            </button>
+                          </div>
+
+                          {/* Final points list */}
+                          {finalPoints.map((pt: any, idx: number) => {
+                            const isEnabled = pt.enabled !== false
+                            return (
+                              <div key={pt.id || idx} style={{
+                                padding: '.85rem 1rem', borderRadius: 9,
+                                border: `1.5px solid ${isEnabled ? 'hsl(160,60%,45%/.25)' : 'hsl(var(--border)/.3)'}`,
+                                background: isEnabled ? 'hsl(160,60%,45%/.04)' : 'hsl(var(--muted)/.3)',
+                                opacity: isEnabled ? 1 : 0.55,
+                                transition: 'all .2s'
+                              }}>
+                                {/* Header with checkbox */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '.5rem' }}>
+                                  <button
+                                    onClick={() => handlePptTogglePoint(pt.id, !isEnabled)}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', color: isEnabled ? 'hsl(160,70%,42%)' : 'hsl(var(--pencil))' }}
+                                    title={isEnabled ? 'Deselect point' : 'Select point'}
+                                  >
+                                    {isEnabled ? <SquareCheck size={18} /> : <Square size={18} />}
+                                  </button>
+                                  <span style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(160,70%,42%)', minWidth: 22 }}>#{idx + 1}</span>
+                                  {pt.is_presentation_summary ? (
+                                    <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(280,85%,65%)', background: 'hsl(280,85%,65%/.12)', border: '1px solid hsl(280,85%,65%/.3)', padding: '2px 8px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                      <FileText size={11} /> Presentation Summary (Direct — Not Matched to Long Points)
+                                    </span>
+                                  ) : (
+                                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 }}>
+                                      <SlideChips slides={pt.slides || []} />
+                                      {(pt.projects || []).length > 0 && (
+                                        <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{pt.projects.join(', ')}</span>
+                                      )}
+                                      {pt.status && pt.status !== 'unknown' && <PptStatusBadge status={pt.status} />}
+                                      <span style={{ fontSize: '.68rem', fontWeight: 600, color: 'hsl(var(--pencil))', fontStyle: 'italic' }}>{pt.relationship || ''}</span>
+                                    </span>
+                                  )}
+                                  <button
+                                    onClick={() => { setEditingPptPointId(pt.id); setEditingPptPointDraft(pt.text) }}
+                                    title="Edit point"
+                                    style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex', alignItems: 'center', color: 'hsl(var(--pencil))' }}
+                                  >
+                                    <Pencil size={12} />
+                                  </button>
+                                </div>
+
+                                {/* Final combined point (or editable textarea) */}
+                                {editingPptPointId === pt.id ? (
+                                  <div style={{ margin: '0 0 .6rem 0' }}>
+                                    <textarea
+                                      value={editingPptPointDraft}
+                                      onChange={e => setEditingPptPointDraft(e.target.value)}
+                                      rows={3}
+                                      style={{
+                                        width: '100%',
+                                        padding: '8px 10px',
+                                        fontSize: '.85rem',
+                                        lineHeight: 1.5,
+                                        borderRadius: 6,
+                                        border: '1.5px solid hsl(160,70%,45%)',
+                                        background: 'hsl(var(--card))',
+                                        color: 'hsl(var(--ink))',
+                                        fontFamily: 'Inter',
+                                        resize: 'vertical'
+                                      }}
+                                    />
+                                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 6 }}>
+                                      <button
+                                        onClick={() => setEditingPptPointId(null)}
+                                        disabled={savingPptPoint}
+                                        style={{ padding: '3px 10px', fontSize: '.74rem', borderRadius: 5, border: '1px solid hsl(var(--border))', background: 'transparent', cursor: 'pointer', color: 'hsl(var(--pencil))' }}
+                                      >
+                                        Cancel
+                                      </button>
+                                      <button
+                                        onClick={() => handleSavePptPoint(pt.id)}
+                                        disabled={savingPptPoint || !editingPptPointDraft.trim()}
+                                        style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 12px', fontSize: '.74rem', fontWeight: 600, borderRadius: 5, border: 'none', background: 'hsl(160,70%,42%)', color: '#fff', cursor: 'pointer' }}
+                                      >
+                                        {savingPptPoint ? <Loader size={11} className="spin" /> : <Save size={11} />}
+                                        Save
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <p style={{ margin: '0 0 .6rem 0', fontSize: '.86rem', lineHeight: 1.55, color: 'hsl(var(--ink))', fontWeight: 600 }}>
+                                    {pt.text}
+                                  </p>
+                                )}
+
+                                {/* Source comparison */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                                  {pt.stage2_source && (
+                                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                                      <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(205,90%,55%)', whiteSpace: 'nowrap', marginTop: 1, background: 'hsl(205,90%,55%/.1)', padding: '1px 5px', borderRadius: 4 }}>S2</span>
+                                      <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.45 }}>{pt.stage2_source}</span>
+                                    </div>
+                                  )}
+                                  {pt.ppt_source && (
+                                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                                      <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(280,60%,60%)', whiteSpace: 'nowrap', marginTop: 1, background: 'hsl(280,60%,60%/.1)', padding: '1px 5px', borderRadius: 4 }}>PPT</span>
+                                      <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.45, whiteSpace: 'pre-line' }}>{pt.ppt_source}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+
+                          {/* Important slide insights that no long point covered */}
+                          {unmatchedInsights.length > 0 && (
+                            <div style={{ padding: '.8rem 1rem', borderRadius: 9, border: '1.5px dashed hsl(25 85% 50% / .4)', background: 'hsl(25 85% 50% / .04)' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: '.5rem', fontSize: '.8rem', fontWeight: 700, color: 'hsl(25 85% 40%)' }}>
+                                <AlertTriangle size={14} /> On the slides but not discussed in the meeting ({unmatchedInsights.length})
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                                {unmatchedInsights.map(u => (
+                                  <div key={u.id} style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: '.78rem', color: 'hsl(var(--ink))', lineHeight: 1.45 }}>
+                                    <PptStatusBadge status={u.status} />
+                                    <span>{u.text}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            )
+          })()}
 
 
         </div>
@@ -6169,31 +7297,71 @@ export default function RomPage() {
         </>
       )}
 
-      {/* ── Final ROM Context Menu (Mark as Very Important) ── */}
+      {/* ── Final ROM Context Menu (Conclude Points & Mark Important) ── */}
       {finalRomContextMenu && (
         <>
           <div
             style={{ position: 'fixed', inset: 0, zIndex: 199 }}
             onClick={() => setFinalRomContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setFinalRomContextMenu(null)
+            }}
           />
           <div
             className="stage2-context-menu"
             style={{
-              left: Math.min(finalRomContextMenu.x, window.innerWidth - 220),
-              top: Math.min(finalRomContextMenu.y, window.innerHeight - 80),
+              left: Math.min(finalRomContextMenu.x, window.innerWidth - 240),
+              top: Math.min(finalRomContextMenu.y, window.innerHeight - 150),
               zIndex: 200,
-              minWidth: 200,
+              minWidth: 230,
               padding: '6px',
               borderRadius: 8,
               background: 'hsl(var(--card))',
               border: '1px solid hsl(var(--border))',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
-              position: 'fixed'
+              boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+              position: 'fixed',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2
             }}
           >
+            {/* Conclude Points option */}
             <button
               className="stage2-context-menu-item"
-              onClick={handleMarkAsImportant}
+              onClick={handleConcludePoints}
+              disabled={isConcluding || aiEditSelectedIds.size < 2}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '7px 10px',
+                background: aiEditSelectedIds.size >= 2 ? 'hsl(280,75%,60%/.1)' : 'none',
+                border: 'none',
+                cursor: (isConcluding || aiEditSelectedIds.size < 2) ? 'not-allowed' : 'pointer',
+                borderRadius: 6,
+                fontSize: '.8rem',
+                fontWeight: 600,
+                color: aiEditSelectedIds.size >= 2 ? 'hsl(280,75%,55%)' : 'hsl(var(--pencil))',
+                opacity: aiEditSelectedIds.size >= 2 ? 1 : 0.55,
+                textAlign: 'left'
+              }}
+              title={aiEditSelectedIds.size < 2 ? 'Select 2 or more points to combine into a conclusion' : 'Combine selected points into one concise conclusion of 2–3 sentences'}
+            >
+              {isConcluding ? <Loader size={14} className="spin" /> : <Sparkles size={14} />}
+              {aiEditSelectedIds.size >= 2
+                ? `Conclude Points (${aiEditSelectedIds.size} selected)`
+                : 'Conclude Points (select 2+)'}
+            </button>
+
+            {/* Toggle selection for AI edit */}
+            <button
+              className="stage2-context-menu-item"
+              onClick={() => {
+                handleToggleAiEditPoint(finalRomContextMenu.pointId)
+                setFinalRomContextMenu(null)
+              }}
               style={{
                 width: '100%',
                 display: 'flex',
@@ -6205,14 +7373,49 @@ export default function RomPage() {
                 cursor: 'pointer',
                 borderRadius: 6,
                 fontSize: '.8rem',
-                fontWeight: 600,
-                color: 'hsl(38,95%,40%)',
+                fontWeight: 500,
+                color: 'hsl(var(--ink))',
                 textAlign: 'left'
               }}
             >
-              <Star size={14} fill="currentColor" />
-              Mark as Very Important
+              {aiEditSelectedIds.has(finalRomContextMenu.pointId) ? (
+                <>
+                  <X size={14} style={{ color: 'hsl(0,70%,50%)' }} />
+                  Deselect from AI Edit
+                </>
+              ) : (
+                <>
+                  <Check size={14} style={{ color: 'hsl(280,75%,60%)' }} />
+                  Select for AI Edit
+                </>
+              )}
             </button>
+
+            {/* Mark as Very Important option (long version) */}
+            {romVersion === 'long' && (
+              <button
+                className="stage2-context-menu-item"
+                onClick={handleMarkAsImportant}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '7px 10px',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  borderRadius: 6,
+                  fontSize: '.8rem',
+                  fontWeight: 600,
+                  color: 'hsl(38,95%,40%)',
+                  textAlign: 'left'
+                }}
+              >
+                <Star size={14} fill="currentColor" />
+                Mark as Very Important
+              </button>
+            )}
           </div>
         </>
       )}

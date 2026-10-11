@@ -8,7 +8,10 @@ Design
 - Metadata is stored natively in ChromaDB (no JSON sidecar needed)
 - The embedding model is injected at call time (not stored), keeping the store
   model-agnostic and allowing future model swaps without data loss
-- Embedding model name is tracked in collection metadata to detect mismatches
+- Embedding model name is tracked in collection metadata to detect mismatches.
+  A collection whose vectors were produced by a different model than the active
+  one is never queried or extended as-is and never deleted: it is re-embedded
+  with the active model first (see services/embedding_reindex.py).
 
 Storage layout
 --------------
@@ -23,13 +26,15 @@ Collections:
 Thread safety
 -------------
 ChromaDB PersistentClient handles its own thread safety.
-Read operations are safe to call concurrently.
-Write operations are serialized internally by ChromaDB.
+Operations on one collection are additionally serialized by a per-collection
+lock so a re-embed (lazy migration or Settings reindex) can swap the collection
+without racing concurrent reads/writes.
 """
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +45,25 @@ logger = logging.getLogger(__name__)
 # ── Module-level ChromaDB client singleton ────────────────────────────────────
 _chroma_client = None
 _chroma_client_path: Optional[str] = None
+
+# ── Per-collection locks ──────────────────────────────────────────────────────
+_collection_locks: Dict[str, threading.RLock] = {}
+_collection_locks_guard = threading.Lock()
+
+
+def collection_lock(collection_name: str) -> threading.RLock:
+    """Re-entrant lock serializing operations on one ChromaDB collection."""
+    with _collection_locks_guard:
+        lock = _collection_locks.get(collection_name)
+        if lock is None:
+            lock = threading.RLock()
+            _collection_locks[collection_name] = lock
+        return lock
+
+
+def _active_model_name() -> str:
+    from config import settings
+    return settings.EMBEDDING_MODEL
 
 
 def _get_chroma_client():
@@ -66,6 +90,11 @@ def _get_chroma_client():
     return _chroma_client
 
 
+def get_chroma_client():
+    """Public accessor for the shared ChromaDB client."""
+    return _get_chroma_client()
+
+
 class VectorStore:
     """
     ChromaDB-backed vector store with native metadata support.
@@ -81,6 +110,45 @@ class VectorStore:
         self._dim = dim
         self._collection = None
         self._loaded = False
+        # Model / dimension the stored vectors were produced with (from collection metadata).
+        self._stored_model: Optional[str] = None
+        self._stored_dim: int = 0
+
+    # ── Model consistency ─────────────────────────────────────────────────────
+
+    def is_stale(self) -> bool:
+        """True if the stored vectors were produced by a different model than the active one."""
+        if self._stored_model and self._stored_model != _active_model_name():
+            return True
+        return bool(self._stored_dim and self._dim > 0 and self._stored_dim != self._dim)
+
+    def _ensure_live(self) -> None:
+        """Make sure the collection handle is loaded (no model check — metadata-only ops)."""
+        if not self._loaded or self._collection is None:
+            self._loaded = False
+            self.load_or_create()
+
+    def _ensure_current(self) -> None:
+        """
+        Make sure the collection is loaded AND its vectors match the active embedding
+        model. A stale collection is re-embedded in place before any vector operation,
+        so a query/insert never mixes vectors from two different models.
+        """
+        with collection_lock(self._collection_name):
+            self._ensure_live()
+            if not self.is_stale():
+                return
+            from services.embedding_reindex import reembed_collection
+
+            logger.warning(
+                f"[VectorStore] Collection '{self._collection_name}' was embedded with "
+                f"'{self._stored_model}' (dim={self._stored_dim}) but the active model is "
+                f"'{_active_model_name()}'. Re-embedding it before use."
+            )
+            reembed_collection(self._collection_name)
+            self._loaded = False
+            self._collection = None
+            self.load_or_create()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -102,9 +170,12 @@ class VectorStore:
             return
 
         client = _get_chroma_client()
-
-        from config import settings
-        current_model_name = settings.QWEN_EMBEDDING_MODEL_NAME
+        current_model_name = _active_model_name()
+        new_metadata = {
+            "hnsw:space": "cosine",
+            "embedding_model": current_model_name,
+            "embedding_dim": self._dim,
+        }
 
         try:
             # Check if collection already exists
@@ -114,38 +185,22 @@ class VectorStore:
                     name=self._collection_name,
                 )
 
-                # Check for model mismatch
+                # Record which model produced the stored vectors. A mismatch is NOT
+                # resolved by deleting data: vector operations re-embed the collection
+                # with the active model first (see _ensure_current).
                 coll_meta = self._collection.metadata or {}
-                stored_model = coll_meta.get("embedding_model")
-                stored_dim = coll_meta.get("embedding_dim")
+                self._stored_model = coll_meta.get("embedding_model") or None
+                try:
+                    self._stored_dim = int(coll_meta.get("embedding_dim") or 0)
+                except (TypeError, ValueError):
+                    self._stored_dim = 0
 
-                if stored_model and stored_model != current_model_name:
+                if self.is_stale():
                     logger.warning(
                         f"[VectorStore] Embedding model mismatch in '{self._collection_name}': "
-                        f"stored={stored_model}, current={current_model_name}. Recreating collection."
-                    )
-                    client.delete_collection(name=self._collection_name)
-                    self._collection = client.get_or_create_collection(
-                        name=self._collection_name,
-                        metadata={
-                            "hnsw:space": "cosine",
-                            "embedding_model": current_model_name,
-                            "embedding_dim": self._dim,
-                        },
-                    )
-                elif stored_dim and self._dim > 0 and int(stored_dim) != self._dim:
-                    logger.warning(
-                        f"[VectorStore] Dimension mismatch in '{self._collection_name}': "
-                        f"stored={stored_dim}, current={self._dim}. Recreating collection."
-                    )
-                    client.delete_collection(name=self._collection_name)
-                    self._collection = client.get_or_create_collection(
-                        name=self._collection_name,
-                        metadata={
-                            "hnsw:space": "cosine",
-                            "embedding_model": current_model_name,
-                            "embedding_dim": self._dim,
-                        },
+                        f"stored={self._stored_model} (dim={self._stored_dim}), "
+                        f"active={current_model_name} (dim={self._dim}). "
+                        "Collection will be re-embedded before its next vector operation."
                     )
                 else:
                     logger.info(
@@ -155,34 +210,32 @@ class VectorStore:
             else:
                 self._collection = client.get_or_create_collection(
                     name=self._collection_name,
-                    metadata={
-                        "hnsw:space": "cosine",
-                        "embedding_model": current_model_name,
-                        "embedding_dim": self._dim,
-                    },
+                    metadata=new_metadata,
                 )
+                self._stored_model = current_model_name
+                self._stored_dim = self._dim
                 logger.info(
                     f"[VectorStore] Created new collection '{self._collection_name}' "
                     f"(dim={self._dim}, model={current_model_name})"
                 )
 
         except Exception as e:
+            # Never delete an existing collection here: a transient read error must not
+            # wipe indexed data. get_or_create returns the existing collection if present.
             logger.error(
-                f"[VectorStore] Error loading/creating collection '{self._collection_name}': {e}. "
-                "Attempting fresh creation."
+                f"[VectorStore] Error loading collection '{self._collection_name}': {e}. "
+                "Retrying with get_or_create."
             )
-            try:
-                client.delete_collection(name=self._collection_name)
-            except Exception:
-                pass
             self._collection = client.get_or_create_collection(
                 name=self._collection_name,
-                metadata={
-                    "hnsw:space": "cosine",
-                    "embedding_model": current_model_name,
-                    "embedding_dim": self._dim,
-                },
+                metadata=new_metadata,
             )
+            coll_meta = self._collection.metadata or {}
+            self._stored_model = coll_meta.get("embedding_model") or None
+            try:
+                self._stored_dim = int(coll_meta.get("embedding_dim") or 0)
+            except (TypeError, ValueError):
+                self._stored_dim = 0
 
         self._loaded = True
 
@@ -192,37 +245,40 @@ class VectorStore:
 
     def clear(self) -> None:
         """Delete all vectors and metadata from this collection."""
-        if not self._loaded:
-            self.load_or_create()
+        with collection_lock(self._collection_name):
+            self._ensure_live()
 
-        try:
-            client = _get_chroma_client()
-            from config import settings
-            current_model_name = settings.QWEN_EMBEDDING_MODEL_NAME
+            try:
+                client = _get_chroma_client()
+                current_model_name = _active_model_name()
 
-            # Delete and recreate the collection to clear all data
-            meta = {"hnsw:space": "cosine", "embedding_model": current_model_name}
-            if self._dim > 0:
-                meta["embedding_dim"] = self._dim
-            client.delete_collection(name=self._collection_name)
-            self._collection = client.get_or_create_collection(
-                name=self._collection_name,
-                metadata=meta,
-            )
-            logger.info(f"[VectorStore] Cleared all vectors in collection '{self._collection_name}'")
-        except Exception as e:
-            logger.error(f"[VectorStore] Failed to clear collection '{self._collection_name}': {e}")
+                # Delete and recreate the collection to clear all data (also resolves
+                # any model mismatch, since the new collection is stamped with the active model)
+                meta = {"hnsw:space": "cosine", "embedding_model": current_model_name}
+                if self._dim > 0:
+                    meta["embedding_dim"] = self._dim
+                client.delete_collection(name=self._collection_name)
+                self._collection = client.get_or_create_collection(
+                    name=self._collection_name,
+                    metadata=meta,
+                )
+                self._stored_model = current_model_name
+                self._stored_dim = self._dim
+                logger.info(f"[VectorStore] Cleared all vectors in collection '{self._collection_name}'")
+            except Exception as e:
+                logger.error(f"[VectorStore] Failed to clear collection '{self._collection_name}': {e}")
 
     def delete_store(self) -> None:
         """Delete the entire collection from ChromaDB."""
-        try:
-            client = _get_chroma_client()
-            client.delete_collection(name=self._collection_name)
-            logger.info(f"[VectorStore] Deleted collection '{self._collection_name}'")
-        except Exception as e:
-            logger.warning(f"[VectorStore] Could not delete collection '{self._collection_name}': {e}")
-        self._collection = None
-        self._loaded = False
+        with collection_lock(self._collection_name):
+            try:
+                client = _get_chroma_client()
+                client.delete_collection(name=self._collection_name)
+                logger.info(f"[VectorStore] Deleted collection '{self._collection_name}'")
+            except Exception as e:
+                logger.warning(f"[VectorStore] Could not delete collection '{self._collection_name}': {e}")
+            self._collection = None
+            self._loaded = False
 
     # ── Write operations ──────────────────────────────────────────────────────
 
@@ -245,11 +301,21 @@ class VectorStore:
         -------
         Number of vectors added.
         """
-        if not self._loaded:
-            self.load_or_create()
-
         if not texts or embeddings is None:
             return 0
+
+        with collection_lock(self._collection_name):
+            # New vectors come from the active model — never append them to a
+            # collection holding another model's vectors.
+            self._ensure_current()
+            return self._add_locked(texts, metadatas, embeddings)
+
+    def _add_locked(
+        self,
+        texts: List[str],
+        metadatas: List[Dict[str, Any]],
+        embeddings: np.ndarray,
+    ) -> int:
 
         if len(texts) != len(metadatas) or len(texts) != len(embeddings):
             raise ValueError(
@@ -316,9 +382,11 @@ class VectorStore:
         -------
         Number of vectors removed.
         """
-        if not self._loaded:
-            self.load_or_create()
+        with collection_lock(self._collection_name):
+            self._ensure_live()
+            return self._delete_by_filter_locked(filter_key, filter_value)
 
+    def _delete_by_filter_locked(self, filter_key: str, filter_value: str) -> int:
         try:
             count_before = self._collection.count()
 
@@ -369,9 +437,25 @@ class VectorStore:
         List of dicts sorted by descending score:
         [{"score": float, "_text": str, <metadata fields>}, ...]
         """
-        if not self._loaded:
-            self.load_or_create()
+        with collection_lock(self._collection_name):
+            try:
+                # The query vector comes from the active model, so the stored vectors must too.
+                self._ensure_current()
+            except Exception as e:
+                logger.error(
+                    f"[VectorStore] '{self._collection_name}' could not be re-embedded with the "
+                    f"active model ({e}); skipping search instead of comparing vectors from different models."
+                )
+                return []
+            return self._search_locked(query_embedding, k, score_threshold, where)
 
+    def _search_locked(
+        self,
+        query_embedding: np.ndarray,
+        k: int,
+        score_threshold: float,
+        where: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         if self._collection is None or self._collection.count() == 0:
             return []
 
@@ -583,9 +667,11 @@ class VectorStore:
         accessed the FAISS store's _meta list directly (e.g., BM25 index
         construction, total vector counts, structure stats).
         """
-        if not self._loaded:
-            self.load_or_create()
+        with collection_lock(self._collection_name):
+            self._ensure_live()
+            return self._meta_locked()
 
+    def _meta_locked(self) -> List[Dict[str, Any]]:
         if self._collection is None or self._collection.count() == 0:
             return []
 
@@ -647,9 +733,12 @@ class _IndexProxy:
         retrieve_evidence_chunkwise() which iterates all chunks anyway.
         """
         try:
-            results = self._store._collection.get(
-                include=["embeddings"],
-            )
+            # Callers compare these vectors with active-model query embeddings.
+            self._store._ensure_current()
+            with collection_lock(self._store._collection_name):
+                results = self._store._collection.get(
+                    include=["embeddings"],
+                )
             embeddings = results.get("embeddings", [])
             if pos < len(embeddings):
                 return np.asarray(embeddings[pos], dtype=np.float32)
@@ -695,6 +784,14 @@ def _sanitize_collection_name(name: str) -> str:
 _STORE_CACHE: Dict[str, VectorStore] = {}
 
 
+def invalidate_store_cache(collection_name: str) -> None:
+    """Force the cached VectorStore for a collection to re-open it (e.g. after a re-embed swap)."""
+    store = _STORE_CACHE.get(collection_name)
+    if store is not None:
+        store._collection = None
+        store._loaded = False
+
+
 def _get_or_create_store(name: str, dim: int = 0) -> VectorStore:
     sanitized = _sanitize_collection_name(name)
     if sanitized in _STORE_CACHE:
@@ -728,3 +825,9 @@ def get_transcript_store(recording_id: str, dim: int = 0) -> VectorStore:
 def get_stage2_points_store(user_id: str, dim: int = 0) -> VectorStore:
     """Return the VectorStore for Stage 2 polished discussion points for a specific user."""
     return _get_or_create_store(f"stage2_points_{user_id}", dim=dim)
+
+
+def get_final_rom_points_store(user_id: str, dim: int = 0) -> VectorStore:
+    """Return the VectorStore for Final ROM points for a specific user."""
+    return _get_or_create_store(f"final_rom_{user_id}", dim=dim)
+

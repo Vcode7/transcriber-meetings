@@ -4,6 +4,7 @@ Endpoints for the ROM Training feature (Data Creation, Database, Training, Histo
 Completely separate from the existing Training & Optimization system.
 """
 import logging
+import os
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -198,6 +199,26 @@ async def delete_training_data(
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
+@router.get("/default-model")
+async def get_default_model(
+    current_user: dict = Depends(get_current_user),
+):
+    """Return local detected base model path and hardware capabilities for training."""
+    import torch
+    from services.model_loader import ModelLoader
+    local_path = ModelLoader.get_model_path("nlp_engine")
+    if not local_path or not os.path.isdir(str(local_path)):
+        local_path = ts.resolve_base_model_path("nlp_engine")
+
+    has_cuda = torch.cuda.is_available()
+    has_bf16 = has_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+    return {
+        "default_model_path": str(local_path) if local_path and os.path.isdir(str(local_path)) else "",
+        "cuda_available": has_cuda,
+        "bf16_supported": has_bf16,
+    }
+
+
 @router.post("/variants")
 async def start_training(
     body: StartRomTrainingRequest,
@@ -206,6 +227,27 @@ async def start_training(
 ):
     """Start a new ROM training job."""
     user_id = _uid(current_user)
+
+    # Prevent concurrent training jobs from running simultaneously and exhausting GPU resources
+    running_check = await db.execute(
+        text("SELECT id, name FROM rom_training_variants WHERE status IN ('pending', 'training') AND user_id = :uid"),
+        {"uid": user_id},
+    )
+    running = running_check.fetchone()
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A training job is already in progress ('{running[1]}'). Please wait for it to complete.",
+        )
+
+    # Pre-validate base model path resolution
+    resolved_model = ts.resolve_base_model_path(body.model_path)
+    if not os.path.isdir(resolved_model):
+        if getattr(app_settings, "OFFLINE_MODE", False) or ":" in resolved_model or "\\" in resolved_model or "/" in resolved_model:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Base model directory not found at '{resolved_model}'. Please check that the local model directory exists.",
+            )
 
     # Validate dataset availability
     all_data = await ds.list_training_data(user_id, db)
@@ -224,12 +266,22 @@ async def start_training(
 
     lora_config = body.lora_config.model_dump()
 
-    # Create variant record
+    # Hardware-aware precision fallback: ensure bf16 isn't passed if the CUDA hardware lacks native Ampere+ support
+    import torch
+    has_cuda = torch.cuda.is_available()
+    has_bf16 = has_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+    if str(lora_config.get("bnb_4bit_compute_dtype", "")).lower() in ("bfloat16", "bf16") and not has_bf16:
+        logger.warning("[RomTraining] Client device does not support native CUDA bf16. Sanitizing bnb_4bit_compute_dtype to float16.")
+        lora_config["bnb_4bit_compute_dtype"] = "float16"
+    elif has_bf16 and not lora_config.get("bnb_4bit_compute_dtype"):
+        lora_config["bnb_4bit_compute_dtype"] = "bfloat16"
+
+    # Create variant record with resolved model path
     variant_id = await ts.create_variant_record(
         user_id=user_id,
         name=body.name,
         description=body.description,
-        base_model=body.model_path,
+        base_model=resolved_model,
         training_type=body.training_type.value,
         parent_variant_id=body.parent_variant_id,
         config=lora_config,
@@ -242,7 +294,7 @@ async def start_training(
     await ts.start_training(
         variant_id=variant_id,
         user_id=user_id,
-        base_model=body.model_path,
+        base_model=resolved_model,
         training_type=body.training_type.value,
         parent_variant_id=body.parent_variant_id,
         lora_config=lora_config,
@@ -294,8 +346,17 @@ async def rerun_test(
     """Rerun test inference for a variant if its checkpoint adapter exists."""
     user_id = _uid(current_user)
     test_size = body.get("test_size") if body else None
+    disable_thinking = body.get("disable_thinking", True) if body else True
+    sample_ids = body.get("sample_ids") if body else None
     try:
-        result = await ts.rerun_variant_test(variant_id, user_id, db, test_size=test_size)
+        result = await ts.rerun_variant_test(
+            variant_id,
+            user_id,
+            db,
+            test_size=test_size,
+            sample_ids=sample_ids,
+            disable_thinking=disable_thinking,
+        )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

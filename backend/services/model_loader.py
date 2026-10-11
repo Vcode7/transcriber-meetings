@@ -126,7 +126,7 @@ class ModelLoader:
         The hyphen variant handles models shipped as plain directories whose
         folder name uses a hyphen (e.g. nlp-engine) rather than underscore.
         """
-        from config import settings
+        from config import settings, BASE_DIR
 
         models_dir = Path(settings.MODELS_DIR)
         runtime_dir = models_dir.parent  # one level up: runtime/
@@ -144,8 +144,31 @@ class ModelLoader:
             runtime_dir / hyphen_name,
         ]
 
+        # Additional candidates for dev, frozen exe, and client packaged installs
+        base_dir = Path(BASE_DIR)
+        app_candidates = [
+            base_dir.parent / "Application" / "runtime" / generic_name,
+            base_dir.parent / "Application" / "runtime" / hyphen_name,
+            base_dir.parent / "Application" / "runtime" / "models" / generic_name,
+            base_dir.parent / "Application" / "runtime" / "models" / hyphen_name,
+            base_dir / "runtime" / generic_name,
+            base_dir / "runtime" / hyphen_name,
+            base_dir / "runtime" / "models" / generic_name,
+            Path.cwd() / "Application" / "runtime" / generic_name,
+            Path.cwd() / "runtime" / generic_name,
+        ]
+        if getattr(sys, "frozen", False):
+            exe_parent = Path(sys.executable).parent
+            app_candidates.extend([
+                exe_parent / "runtime" / generic_name,
+                exe_parent / "runtime" / hyphen_name,
+                exe_parent.parent / "runtime" / generic_name,
+                exe_parent.parent / "runtime" / hyphen_name,
+                exe_parent.parent / "runtime" / "models" / generic_name,
+            ])
+        candidates.extend([c for c in app_candidates if c not in candidates])
+
         for candidate in candidates:
-            print(f"[ModelLoader] Checking candidate plain path: {candidate.resolve()}")
             if candidate.is_dir():
                 logger.info(f"[ModelLoader] Using plain model at {candidate}")
                 return candidate

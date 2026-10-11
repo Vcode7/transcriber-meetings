@@ -11,6 +11,7 @@ import type {
   Stage2HistoryEntry,
   Stage2Settings,
   Stage2OptimizationRunStatus,
+  ReferenceSource,
 } from '../types/stage2Types';
 
 const BASE = '/api/training/stage2';
@@ -37,7 +38,7 @@ export const fetchStage1PointsForMeeting = async (meetingId: string): Promise<{
   stage1_point_count: number;
   has_stage2: boolean;
   has_stage2_edits: boolean;
-  reference_source: string;
+  reference_source: ReferenceSource;
   reference_points: any[];
 }> => {
   const res = await api.get(`${BASE}/meetings/${meetingId}/stage1-points`);

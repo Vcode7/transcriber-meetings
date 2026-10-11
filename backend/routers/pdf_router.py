@@ -458,6 +458,14 @@ def _build_pdf(
 
     story.append(Spacer(1, 2*mm))
 
+    analytics = _speaker_analytics(segments)
+
+    # Speaker colors consistent with the frontend (used by sections 7 and 8)
+    speaker_color_map: Dict[str, Any] = {}
+    for idx, row in enumerate(analytics):
+        color_rgb = SPEAKER_COLORS_RGB[idx % len(SPEAKER_COLORS_RGB)]
+        speaker_color_map[row["speaker"]] = Color(*color_rgb)
+
     # ─────────────────────────────────────────────────────────────
     # SECTION 7: PER-SPEAKER SUMMARIES (optional — only when data exists)
     # ─────────────────────────────────────────────────────────────
@@ -507,14 +515,6 @@ def _build_pdf(
     # ─────────────────────────────────────────────────────────────
     analytics_section_num = "08" if not speaker_summary_data else "08"
     story.append(section_header(analytics_section_num, "Participant Analytics"))
-
-    analytics = _speaker_analytics(segments)
-
-    # Build color map consistent with frontend
-    speaker_color_map: Dict[str, Any] = {}
-    for idx, row in enumerate(analytics):
-        color_rgb = SPEAKER_COLORS_RGB[idx % len(SPEAKER_COLORS_RGB)]
-        speaker_color_map[row["speaker"]] = Color(*color_rgb)
 
     if analytics:
         # Stats table

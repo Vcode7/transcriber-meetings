@@ -1,6 +1,7 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.1
 python-multipart>=0.0.9
+httpx>=0.27.0
 pydantic>=2.10.0
 pydantic-settings>=2.3.1
 # SQLite async driver
@@ -35,7 +36,8 @@ sentencepiece
 protobuf
 # -- Agenda/Context file extraction & Video OCR
 python-pptx>=0.6.21
-rapidocr-onnxruntime>=1.4.0
+pyclipper>=1.3.0
+shapely>=2.0.0
 pypdf>=3.0.0
 # ── RAG / Vector Store ─────────────────────────────────────────────────────
 # ChromaDB for persistent vector indexing with metadata support

@@ -4,7 +4,7 @@ import {
   Mic, Upload, History, UserPlus, Settings,
   LogOut, Zap, PanelLeftClose, PanelLeftOpen,
   Sun, Moon, MonitorSpeaker, Sparkles, Loader, BookOpen, Database, Video, BrainCircuit,
-  MessageSquare, FlaskConical, BookMarked, Brain,
+  MessageSquare, FlaskConical, BookMarked, Brain, ScanText,
 } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
@@ -24,6 +24,7 @@ const WORKSPACE_NAV = [
 const SETTINGS_NAV = [
   { to: '/dashboard/add-voice', icon: UserPlus, label: 'Add Voice' },
   { to: '/dashboard/settings', icon: Settings, label: 'Settings' },
+  { to: '/dashboard/ocr-settings', icon: ScanText, label: 'OCR Settings' },
 ]
 
 const DEVELOPER_NAV = [
@@ -355,7 +356,7 @@ export default function Sidebar() {
               fontFamily: 'Inter, sans-serif',
               boxShadow: `0 0 8px ${avatarColor}30`,
             }}>
-              {avatarLetter}
+            {avatarLetter}
           </div>
         )}
 

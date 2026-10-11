@@ -58,7 +58,7 @@ metadata_packages = [
     "fastapi", "uvicorn", "starlette", "aiohttp", "pydantic", "Jinja2",
     "httpx", "aiofiles", "python-multipart", "multipart",
     # OCR / Image processing
-    "rapidocr_onnxruntime", "cv2", "opencv-python", "opencv-python-headless", "opencv-contrib-python", "opencv-contrib-python-headless", "pyclipper", "shapely", "rank_bm25",
+    "cv2", "opencv-python", "opencv-python-headless", "opencv-contrib-python", "opencv-contrib-python-headless", "pyclipper", "shapely", "rank_bm25",
     # Others probed by pyannote/speechbrain
     "onnxruntime", "psutil", "pygments", "rich", "optree",
     "optimum_quanto", "gammatone", "pesq", "piq", "pystoi",
@@ -85,7 +85,6 @@ data_packages = [
     "onnxruntime",
     "speechbrain",
     "pptx",
-    "rapidocr_onnxruntime",
     "cv2",
     "dspy",
     "gepa",
@@ -118,7 +117,6 @@ submodule_packages = [
     "pyannote",
     "speechbrain",
     "onnxruntime",
-    "rapidocr_onnxruntime",
     "cv2",
     "dspy",
     "gepa",
@@ -178,7 +176,6 @@ full_copy_packages = [
     "reportlab",
     "fitz",
     "pymupdf",
-    "rapidocr_onnxruntime",
     "cv2",
     "dspy",
     "gepa",
@@ -207,6 +204,9 @@ a = Analysis(
         *collected_metadata,
         # Bundle automatically collected data files
         *collected_datas,
+        # Bundle offline PP-OCRv6 Medium models if present
+        *(([(str(BACKEND_DIR / "runtime" / "paddleocr"), "runtime/paddleocr")] if (BACKEND_DIR / "runtime" / "paddleocr").is_dir() else [])),
+        *(([(str(ROOT / "download" / "ppocrv6"), "download/ppocrv6")] if (ROOT / "download" / "ppocrv6").is_dir() else [])),
         # Bundle full directories of packages that do dynamic import scanning or resource lookups
         *collected_full_packages,
         # Fallback raw copy of all local backend modules to guarantee import availability
@@ -268,7 +268,6 @@ a = Analysis(
         "pyannote.audio",
         "pyannote.audio.pipelines",
         "speechbrain",
-        "rapidocr_onnxruntime",
         "cv2",
         "pyclipper",
         "shapely",

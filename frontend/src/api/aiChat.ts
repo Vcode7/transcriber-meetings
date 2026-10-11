@@ -2,9 +2,8 @@
  * AI Chat API — SSE streaming + REST endpoints for the standalone AI Chat tab.
  */
 import { useAuthStore } from '../store/auth'
-import type { AIChatMeeting, AIChatMessage, SyncableMeeting, ResyncResult } from '../types/recording'
-
-const BASE_URL = 'http://127.0.0.1:8000'
+import type { AIChatMeeting, AIChatMessage, SyncableMeeting, ResyncResult, ManualMomItem, ManualMomDetail } from '../types/recording'
+import { BASE_URL } from '../config'
 
 function getAuthHeaders(): Record<string, string> {
   const token = useAuthStore.getState().accessToken
@@ -26,6 +25,7 @@ export async function streamAIChat(
   signal?: AbortSignal,
   selectedMeetingId?: string,
   maxResults?: number,
+  sessionId?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { message }
   if (selectedMeetingId) {
@@ -33,6 +33,9 @@ export async function streamAIChat(
   }
   if (maxResults !== undefined) {
     body.max_results = maxResults
+  }
+  if (sessionId) {
+    body.session_id = sessionId
   }
   return _streamSSE(
     `${BASE_URL}/ai-chat/send`,
@@ -57,10 +60,16 @@ export async function getAIChatMeetings(): Promise<AIChatMeeting[]> {
 }
 
 /**
- * Get AI Chat history.
+ * Get AI Chat sessions.
  */
-export async function getAIChatHistory(): Promise<AIChatMessage[]> {
-  const response = await fetch(`${BASE_URL}/ai-chat/history`, {
+export async function getAIChatSessions(): Promise<Array<{
+  id: string
+  title: string
+  selected_meeting_id?: string
+  created_at: string
+  updated_at: string
+}>> {
+  const response = await fetch(`${BASE_URL}/ai-chat/sessions`, {
     headers: getAuthHeaders(),
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -68,10 +77,89 @@ export async function getAIChatHistory(): Promise<AIChatMessage[]> {
 }
 
 /**
- * Clear AI Chat history.
+ * Create a new AI Chat session.
  */
-export async function clearAIChatHistory(): Promise<void> {
-  const response = await fetch(`${BASE_URL}/ai-chat/history`, {
+export async function createAIChatSession(
+  title = 'New Chat',
+  selectedMeetingId?: string,
+  id?: string,
+): Promise<{
+  id: string
+  title: string
+  selected_meeting_id?: string
+  created_at: string
+  updated_at: string
+}> {
+  const payload: Record<string, unknown> = {
+    title,
+    selected_meeting_id: selectedMeetingId || null,
+  }
+  if (id) {
+    payload.id = id
+  }
+  const response = await fetch(`${BASE_URL}/ai-chat/sessions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
+}
+
+/**
+ * Update an AI Chat session.
+ */
+export async function updateAIChatSession(
+  sessionId: string,
+  updates: { title?: string; selected_meeting_id?: string },
+): Promise<void> {
+  const response = await fetch(`${BASE_URL}/ai-chat/sessions/${sessionId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    },
+    body: JSON.stringify(updates),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+}
+
+/**
+ * Delete an AI Chat session.
+ */
+export async function deleteAIChatSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/ai-chat/sessions/${sessionId}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+}
+
+/**
+ * Get AI Chat history (optionally filtered by session).
+ */
+export async function getAIChatHistory(sessionId?: string): Promise<AIChatMessage[]> {
+  const url = sessionId
+    ? `${BASE_URL}/ai-chat/history?session_id=${encodeURIComponent(sessionId)}`
+    : `${BASE_URL}/ai-chat/history`
+  const response = await fetch(url, {
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
+}
+
+/**
+ * Clear AI Chat history (optionally filtered by session).
+ */
+export async function clearAIChatHistory(sessionId?: string): Promise<void> {
+  const url = sessionId
+    ? `${BASE_URL}/ai-chat/history?session_id=${encodeURIComponent(sessionId)}`
+    : `${BASE_URL}/ai-chat/history`
+  const response = await fetch(url, {
     method: 'DELETE',
     headers: getAuthHeaders(),
   })
@@ -198,4 +286,84 @@ async function _streamSSE(
   }
 
   onDone?.()
+}
+
+// ── Manual MoM API Client ────────────────────────────────────────────────────
+
+export interface UploadManualMomsResponse {
+  status: 'success' | 'error'
+  results: ManualMomItem[]
+  success_count: number
+  fail_count: number
+  errors: Array<{ filename: string; error: string }>
+}
+
+/**
+ * Upload multiple MoM files simultaneously.
+ */
+export async function uploadManualMoms(files: File[]): Promise<UploadManualMomsResponse> {
+  const formData = new FormData()
+  for (const file of files) {
+    formData.append('files', file)
+  }
+
+  const response = await fetch(`${BASE_URL}/ai-chat/manual-mom/upload`, {
+    method: 'POST',
+    headers: {
+      ...getAuthHeaders(),
+    },
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '')
+    throw new Error(`Upload failed (${response.status}): ${errText || response.statusText}`)
+  }
+
+  return response.json()
+}
+
+/**
+ * Fetch all uploaded manual MoMs.
+ */
+export async function getManualMoms(): Promise<ManualMomItem[]> {
+  const response = await fetch(`${BASE_URL}/ai-chat/manual-mom/list`, {
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
+}
+
+/**
+ * Fetch detailed content and metadata for a specific manual MoM.
+ */
+export async function getManualMomDetail(momId: string): Promise<ManualMomDetail> {
+  const response = await fetch(`${BASE_URL}/ai-chat/manual-mom/${momId}`, {
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
+}
+
+/**
+ * Delete a manual MoM and remove its vectors from ChromaDB.
+ */
+export async function deleteManualMom(momId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/ai-chat/manual-mom/${momId}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+}
+
+/**
+ * Re-index a manual MoM into ChromaDB.
+ */
+export async function reindexManualMom(momId: string): Promise<{ status: string; chunks_indexed: number }> {
+  const response = await fetch(`${BASE_URL}/ai-chat/manual-mom/${momId}/reindex`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.json()
 }

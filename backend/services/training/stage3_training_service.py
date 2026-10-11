@@ -761,6 +761,9 @@ def _run_stage3_optimizer_thread(
                 baseline_score = (parent.get('scores', {}) or {}).get('overall', 0.0) if parent else 0.0
                 improvement = round(current_overall - baseline_score, 1)
 
+        existing_labels = [v.get('label', '') for v in get_all_variants() if not v.get('is_default')]
+        v_num = max((int(m.group(1)) for m in (re.search(r'(\d+)', lbl) for lbl in existing_labels) if m), default=0) + 1
+        var_id = str(uuid.uuid4())
         new_variant = {
             'variant_id': var_id,
             'label': f"Stage 3 Variant {v_num:03d}",

@@ -78,11 +78,15 @@ def run_qlora_training(
     hf_path = config.hf_model_path
     _progress(f'Loading model with 4-bit quantization from {hf_path}...', 5.0)
 
+    has_cuda = torch.cuda.is_available()
+    has_bf16 = has_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+    compute_dtype = torch.bfloat16 if has_bf16 else torch.float16
+
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type='nf4',
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=compute_dtype,
     )
 
     try:
@@ -92,6 +96,7 @@ def run_qlora_training(
         model = AutoModelForCausalLM.from_pretrained(
             hf_path,
             quantization_config=bnb_config,
+            torch_dtype=compute_dtype,
             device_map='auto',
             trust_remote_code=True,
         )
@@ -143,7 +148,8 @@ def run_qlora_training(
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
-        bf16=True,
+        fp16=has_cuda and not has_bf16,
+        bf16=has_bf16,
         logging_steps=5,
         save_strategy='no',
         eval_strategy='no',

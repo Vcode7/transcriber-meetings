@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import numpy as np
-from typing import List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 

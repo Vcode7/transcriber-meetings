@@ -4,8 +4,7 @@
 import api from './client'
 import { useAuthStore } from '../store/auth'
 import type { ChatMessage } from '../types/recording'
-
-const BASE_URL = 'http://127.0.0.1:8000'
+import { BASE_URL } from '../config'
 
 function getAuthHeaders(): Record<string, string> {
   const token = useAuthStore.getState().accessToken

@@ -259,6 +259,9 @@ def test_input_points_meet_length_requirement():
         assert word_count > 100, f"Point {idx} ({p['id']}) has {word_count} words; must be > 100."
 
 
+import os
+
+@pytest.mark.skipif(not os.getenv("RUN_LIVE_TESTS"), reason="Live LLM benchmark test requiring downloaded Qwen weights")
 def test_action_point_generation_current_method():
     """Run the 10 Stage 2 points through current extract_actions_from_enhanced_points method."""
     provider = get_provider()

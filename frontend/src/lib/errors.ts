@@ -1,6 +1,8 @@
 import { isAxiosError } from 'axios'
 
-export function getApiErrorDetail(error: unknown, fallback: string): string {
+export function getApiErrorDetail(error: unknown, fallback: string): string
+export function getApiErrorDetail(error: unknown): string | undefined
+export function getApiErrorDetail(error: unknown, fallback?: string): string | undefined {
   if (isAxiosError(error)) {
     const data = error.response?.data
     if (data && typeof data === 'object' && 'detail' in data) {

@@ -20,6 +20,7 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const fetchVariants = async () => {
     setLoading(true);
@@ -41,8 +42,13 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
   const handleSelectVariant = async (variant: EmbeddingVariant) => {
     if (variant.is_active) return;
     setActionLoading(variant.id);
+    setNotice(null);
     try {
       await embeddingTrainingApi.selectVariant(variant.id);
+      setNotice(
+        `'${variant.name}' is now used for all embeddings (RAG retrieval, indexing and Stage 3 agenda mapping). ` +
+        'Existing ChromaDB data was embedded with the previous model — run Settings → RAG → "Reindex ChromaDB with Trained Variant".'
+      );
       await fetchVariants();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to activate variant.');
@@ -53,9 +59,16 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
 
   const handleDeleteVariant = async (variantId: string) => {
     setActionLoading(variantId);
+    setNotice(null);
     try {
-      await embeddingTrainingApi.deleteVariant(variantId);
+      const res = await embeddingTrainingApi.deleteVariant(variantId);
       setDeleteConfirmId(null);
+      if (res.fallback_model) {
+        setNotice(
+          `The deleted variant was active; embeddings now use '${res.fallback_model}'. ` +
+          'Reindex ChromaDB in Settings → RAG so stored vectors match it.'
+        );
+      }
       await fetchVariants();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to delete variant.');
@@ -138,6 +151,18 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
         }}>
           <AlertTriangle size={18} />
           <div>{error}</div>
+        </div>
+      )}
+
+      {notice && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          background: 'hsl(210 90% 55% / 0.1)', color: 'hsl(var(--foreground))',
+          border: '1px solid hsl(210 90% 55% / 0.3)', padding: '0.85rem 1rem',
+          borderRadius: '12px', fontSize: '0.85rem',
+        }}>
+          <RefreshCw size={16} style={{ color: 'hsl(210 90% 55%)', flexShrink: 0 }} />
+          <div>{notice}</div>
         </div>
       )}
 
@@ -257,7 +282,22 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
                       <span>Loss: {v.metrics.final_loss}</span>
                     </div>
                   )}
+                  {v.metrics?.verification?.embedding_shift !== undefined && (
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px', color: v.metrics.verification.differs_from_base ? 'hsl(var(--muted-foreground))' : 'hsl(35 90% 50%)' }}
+                      title="Verified after training: the variant reloads through the RAG loader. Shift = 1 − mean cosine similarity to the base model's embeddings."
+                    >
+                      <CheckCircle2 size={13} />
+                      <span>Verified · shift {v.metrics.verification.embedding_shift}</span>
+                    </div>
+                  )}
                 </div>
+
+                {v.exists_on_disk === false && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', color: 'hsl(0 80% 60%)' }}>
+                    <AlertTriangle size={13} /> Model files are missing on disk — this variant cannot be activated.
+                  </div>
+                )}
 
                 {/* Model Path */}
                 <div>
@@ -334,7 +374,7 @@ export default function VariantManagementTab({ onTrainNewClick }: VariantManagem
 
                   <button
                     onClick={() => handleSelectVariant(v)}
-                    disabled={v.is_active || actionLoading === v.id}
+                    disabled={v.is_active || actionLoading === v.id || v.exists_on_disk === false}
                     style={{
                       display: 'flex', alignItems: 'center', gap: '6px',
                       background: v.is_active ? 'hsl(150 75% 45% / 0.12)' : 'hsl(var(--accent))',

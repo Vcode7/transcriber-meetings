@@ -6,12 +6,12 @@ Responsibilities:
   2. sample_frames()             — extract one frame every stride_sec + scene changes via ffmpeg
   3. get_sr_model()              — cached AI Super-Resolution model loader (OpenCV DNN / Real-ESRGAN / Fallback)
   4. preprocess_frame_for_ocr()  — AI Super-Resolution (2x-4x), grayscale, CLAHE, sharpen, auto-invert, threshold
-  5. run_ocr_on_frame_detail()   — RapidOCR (PP-OCRv4/ONNX) OCR with confidence filtering, word & char counts
+  5. run_ocr_on_frame_detail()   — PP-OCRv6 Medium (ONNX Runtime) OCR with confidence filtering, word & char counts
   6. extract_video_ocr_timeline()— multi-frame OCR pipeline (evaluates T-0.2s, T, T+0.2s, T+0.4s in parallel)
   7. merge_ocr_results()         — merge consecutive OCR blocks via fuzzy text similarity
 
 Design decisions:
-  • OCR is provided by ocr_engine.py (RapidOCR + ONNX Runtime / PP-OCRv4), replacing Tesseract.
+  • OCR is provided by ocr_engine.py (PP-OCRv6 Medium + ONNX Runtime), replacing Tesseract and RapidOCR.
   • Multi-frame evaluation around each timestamp T (offsets -0.2s, 0.0s, +0.2s, +0.4s) avoids animation artifacts.
   • Candidate frames are scored by weighted combination of OCR confidence, word count, and character count.
   • AI Super-Resolution model is initialized once and cached for high-quality OCR input.
@@ -54,7 +54,7 @@ except ImportError:
     _CV2_AVAILABLE = False
     logger.warning("[VideoOCR] OpenCV (cv2) not available — using PIL fallback.")
 
-# ── OCR engine (RapidOCR / PP-OCRv4 via ONNX Runtime) ───────────────────────
+# ── OCR engine (PP-OCRv6 Medium via ONNX Runtime) ───────────────────────
 try:
     from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 except ImportError:
@@ -491,21 +491,20 @@ def _clean_ocr_text(raw: str) -> str:
 def run_ocr_on_frame_detail(
     image_path_or_img: Union[str, "Image.Image"],
     min_conf: float = MIN_WORD_CONFIDENCE,
-    config: str = r"--oem 3 --psm 6",  # kept for API compat; ignored (RapidOCR has no config string)
+    config: str = r"--oem 3 --psm 6",  # kept for API compat; ignored (PP-OCRv6 has no config string)
     save_debug: bool = False,
     debug_prefix: str = "frame",
 ) -> Dict[str, Union[str, float, int, bool]]:
     """
-    Run RapidOCR (PP-OCRv4 / ONNX Runtime) on a frame with preprocessing.
+    Run PP-OCRv6 Medium (ONNX Runtime) on a frame.
 
-    Accepts either a file path (str) or a PIL.Image.  Preprocessing is
-    delegated to ocr_engine.preprocess_for_ocr() which applies upscaling,
-    CLAHE, sharpening, and Otsu binarisation.
+    Accepts either a file path (str) or a PIL.Image.
+    Preprocessing is handled natively by the PP-OCRv6 pipeline in ocr_engine.
 
     Returns Dict {
         "raw": str,
         "clean": str,
-        "avg_conf": float,   # 0.0–1.0 (RapidOCR native score)
+        "avg_conf": float,   # 0.0–1.0 (PP-OCRv6 native score)
         "word_count": int,
         "char_count": int,
         "sr_applied": bool
@@ -574,7 +573,7 @@ def run_ocr_on_frame_detail(
                 logger.warning(f"[VideoOCR Debug] Failed to save debug outputs: {dbg_err}")
 
         return {
-            "raw": clean_text,   # RapidOCR doesn't separate raw/clean; use clean for both
+            "raw": clean_text,   # PP-OCRv6 doesn't separate raw/clean; use clean for both
             "clean": clean_text,
             "avg_conf": round(avg_conf * 100, 1),  # normalise to 0–100 range for compat
             "word_count": word_count,
@@ -588,7 +587,7 @@ def run_ocr_on_frame_detail(
 
 def run_ocr_on_frame(image_path: str) -> str:
     """
-    Run RapidOCR on the given image file.
+    Run PP-OCRv6 on the given image file.
     Returns cleaned OCR text, or "" if OCR is unavailable or text is too short.
     (Preserves exact function signature for existing API compatibility).
     """
@@ -689,7 +688,7 @@ def extract_video_ocr_timeline(
         List[{"start_time": float, "text": str}]
     """
     if not is_ocr_available():
-        logger.warning("[VideoOCR] RapidOCR engine not available — returning empty OCR timeline")
+        logger.warning("[VideoOCR] PP-OCRv6 engine not available — returning empty OCR timeline")
         return []
 
     if not os.path.exists(video_path):
@@ -899,7 +898,7 @@ def unload_sr_model():
 
 
 def unload_video_ocr_pipeline():
-    """Unload both RapidOCR ONNX sessions and AI Super-Resolution model."""
+    """Unload both PP-OCRv6 ONNX sessions and AI Super-Resolution model."""
     try:
         from services.ocr_engine import unload_ocr_engine
         unload_ocr_engine()

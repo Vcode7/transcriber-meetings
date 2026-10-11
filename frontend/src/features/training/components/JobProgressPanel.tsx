@@ -10,7 +10,7 @@ export default function JobProgressPanel() {
     sourceType, selectedMeetingId, manualMom,
     datasetBuilding, setDatasetBuilding,
     builtDatasetId, setBuiltDatasetId, setDatasetPreview, setDatasetSamplesByStage,
-    activeJobId, setActiveJobId, activeJob,
+    activeJobId, setActiveJobId, activeJob, setActiveJob,
     validationResults
   } = useTrainingStore();
 

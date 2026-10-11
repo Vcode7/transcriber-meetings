@@ -28,6 +28,16 @@ export const deleteTrainingData = (id: string) => api.delete(`/api/rom-training/
 export const startTraining = (body: any) => api.post('/api/rom-training/variants', body).then(r => r.data);
 export const listVariants = () => api.get('/api/rom-training/variants').then(r => r.data);
 export const getVariant = (id: string) => api.get(`/api/rom-training/variants/${id}`).then(r => r.data);
-export const rerunVariantTest = (id: string, testSize?: number) =>
-  api.post(`/api/rom-training/variants/${id}/rerun-test`, { test_size: testSize }).then(r => r.data);
+export const rerunVariantTest = (
+  id: string,
+  testSize?: number,
+  disableThinking: boolean = true,
+  sampleIds?: string[],
+) =>
+  api.post(`/api/rom-training/variants/${id}/rerun-test`, {
+    test_size: testSize,
+    disable_thinking: disableThinking,
+    sample_ids: sampleIds,
+  }).then(r => r.data);
+export const getDefaultModel = () => api.get('/api/rom-training/default-model').then(r => r.data);
 export const deleteVariant = (id: string) => api.delete(`/api/rom-training/variants/${id}`).then(r => r.data);

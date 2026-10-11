@@ -1,7 +1,18 @@
 import pytest
 from database import to_json
 
-def test_generate_mom_from_rom_schema_fields():
+def test_generate_mom_from_rom_schema_fields(monkeypatch):
+    class DummyProvider:
+        def query(self, prompt, **kwargs):
+            return '{"title": "Test Meeting", "introduction": "Intro sentence one. Intro sentence two. Intro sentence three. Intro sentence four. Intro sentence five.", "conclusion": "Conclusion sentence one. Conclusion sentence two. Conclusion sentence three. Conclusion sentence four. Conclusion sentence five."}'
+        def _infer(self, prompt, **kwargs):
+            return self.query(prompt, **kwargs)
+        def extract_actions_from_enhanced_points(self, points, **kwargs):
+            return [{"task": "Implement endpoints by Friday", "owner": "Vikas", "deadline": "2026-08-07"}]
+        def unload_model(self):
+            pass
+
+    monkeypatch.setattr("services.ai_provider.get_provider", lambda: DummyProvider())
     polished_points = [
         {
             "polished_text": "The engineering team finalized the API architecture for Q3.",
@@ -17,7 +28,6 @@ def test_generate_mom_from_rom_schema_fields():
         "duration": 300,
         "speakers_detected": ["Vikas", "Alice"]
     }
-
     from services.rom_service import rom_service
     mom_out = rom_service.generate_mom_from_enhanced_rom(
         polished_points=polished_points,

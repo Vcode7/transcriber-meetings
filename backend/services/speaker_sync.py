@@ -49,17 +49,17 @@ def replace_speaker_in_text(text_val: str, mapping: Dict[str, str]) -> str:
     result = text_val
     for old in sorted(mapping, key=len, reverse=True):
         new = mapping[old]
-        if old in result:
-            result = result.replace(old, new)
         old_clean = str(old).strip()
-        if old_clean:
-            # Match variations like SPEAKER_01, Speaker_01, speaker_01, Speaker 01, etc.
-            escaped = re.escape(old_clean).replace(r'\_', r'[\s\_]?').replace(r'\ ', r'[\s\_]?')
-            pattern = r'\b' + escaped + r'\b'
-            try:
-                result = re.sub(pattern, new, result, flags=re.IGNORECASE)
-            except Exception:
-                pass
+        if not old_clean:
+            continue
+        # Match variations like SPEAKER_01, Speaker_01, speaker_01, Speaker 01, etc.
+        # Whole-identifier match only: "Speaker 1" must never match inside "Speaker 10".
+        escaped = r'[\s_]?'.join(re.escape(part) for part in re.split(r'[\s_]+', old_clean))
+        pattern = r'(?<!\w)' + escaped + r'(?!\w)'
+        try:
+            result = re.sub(pattern, lambda _m: new, result, flags=re.IGNORECASE)
+        except Exception:
+            pass
     return result
 
 

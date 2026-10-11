@@ -11,6 +11,7 @@ import { useJobsStore } from '../store/jobs'
 import { useProcessingStore } from '../store/processing'
 import { listVariants } from '../features/rom-training/api/romTrainingApi'
 import type { RomVariant } from '../features/rom-training/types/romTrainingTypes'
+import EmbeddingReindexCard from '../components/EmbeddingReindexCard'
 
 interface ProfileRecording {
   id: string
@@ -75,6 +76,7 @@ interface UserSettings {
   rom_windows_per_batch?: number
   rom_parallel_window_processing?: number
   rom_separate_action_extraction?: boolean
+  rom_action_owner_verification?: boolean
   rom_action_generation_chunk_size?: number
   rom_pipeline_mode?: string
   rom_short_model_mode?: 'base' | 'trained'
@@ -184,6 +186,8 @@ interface EmbeddingModelOption {
   quantization?: string
   installed: boolean
   path?: string | null
+  is_trained_variant?: boolean
+  base_model?: string | null
 }
 
 type SettingsTab = 'processing' | 'rom' | 'prompts' | 'voice' | 'llm' | 'rag' | 'audio' | 'tokens'
@@ -193,6 +197,7 @@ export default function SettingsPage() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModelOption[]>([])
+  const [reindexRefreshKey, setReindexRefreshKey] = useState(0)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editLabel, setEditLabel] = useState('')
@@ -483,9 +488,13 @@ export default function SettingsPage() {
     if (!settings) return
     setSavingSettings(true)
     try {
-      await api.put('/settings', settings)
+      const res = await api.put('/settings', settings)
       setSettingsSaved(true)
       toast.success('Settings saved successfully!')
+      if (res.data?.embedding_model_changed) {
+        toast.info('Embedding model changed. Reindex existing ChromaDB data in Settings → RAG so stored vectors match the new model.')
+        setReindexRefreshKey(k => k + 1)
+      }
       setTimeout(() => setSettingsSaved(false), 2000)
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'Failed to save settings')
@@ -1069,7 +1078,7 @@ export default function SettingsPage() {
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 3 }}>Use Separate Action Point Extraction (Stage 1)</div>
                       <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5 }}>
-                        When enabled, Stage 1 runs two parallel LLM calls per window: one focused exclusively on discussion points and one dedicated to extracting rich, self-contained action items. Action items are attached to the first discussion point in each window. Disable to use the standard single-call extraction (default).
+                        When enabled, Stage 1 runs two parallel LLM calls per window: one focused exclusively on discussion points and one dedicated to extracting rich, self-contained action items. Each action item's owner is checked against the transcript turns it cites, and the item is attached to the discussion point covering those turns. Disable to use the standard single-call extraction (default).
                       </div>
                     </div>
                     <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1087,6 +1096,38 @@ export default function SettingsPage() {
                         <span style={{
                           position: 'absolute', top: 3,
                           left: settings.rom_separate_action_extraction ? 23 : 3,
+                          width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                          transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.25)'
+                        }} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Verify Uncertain Action Owners Toggle */}
+                {settings && (
+                  <div style={{ marginTop: '1rem', padding: '1rem 1.15rem', borderRadius: 10, border: '1.5px solid hsl(280,75%,60%/.2)', background: 'hsl(280,75%,60%/.04)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1.5rem' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '.88rem', fontWeight: 700, color: 'hsl(var(--ink))', marginBottom: 3 }}>Verify Uncertain Action Owners (Stage 1)</div>
+                      <div style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))', lineHeight: 1.5 }}>
+                        When enabled, any action owner that could not be confirmed against the transcript speaker turns gets one extra, focused LLM check over the turns around it. Improves owner accuracy at the cost of extra Stage 1 time. Owners that remain uncertain are marked with (?).
+                      </div>
+                    </div>
+                    <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: '.74rem', color: 'hsl(var(--pencil))' }}>{settings.rom_action_owner_verification ? 'Enabled' : 'Disabled'}</span>
+                      <button
+                        onClick={() => setSettings({ ...settings, rom_action_owner_verification: !settings.rom_action_owner_verification })}
+                        style={{
+                          width: 44, height: 24, borderRadius: 12,
+                          background: settings.rom_action_owner_verification ? 'hsl(280,75%,60%)' : 'hsl(var(--muted))',
+                          border: 'none', cursor: 'pointer', position: 'relative', transition: 'background .2s',
+                          flexShrink: 0
+                        }}
+                        aria-label="Toggle Verify Uncertain Action Owners"
+                      >
+                        <span style={{
+                          position: 'absolute', top: 3,
+                          left: settings.rom_action_owner_verification ? 23 : 3,
                           width: 18, height: 18, borderRadius: '50%', background: '#fff',
                           transition: 'left .2s', boxShadow: '0 1px 3px rgba(0,0,0,.25)'
                         }} />
@@ -1180,10 +1221,16 @@ export default function SettingsPage() {
                       {(['base', 'trained'] as const).map(mode => {
                         const isActive = (settings.rom_short_model_mode || 'base') === mode
                         const label = mode === 'base' ? '⚡ Base' : '🧠 Trained'
+                        const doneVariants = romVariants.filter(v => v.status === 'done')
                         return (
                           <button
                             key={mode}
-                            onClick={() => setSettings({ ...settings, rom_short_model_mode: mode })}
+                            onClick={() => {
+                              const nextVid = mode === 'trained'
+                                ? (settings.rom_short_model_variant_id || (doneVariants[0]?.id ?? null))
+                                : settings.rom_short_model_variant_id
+                              setSettings({ ...settings, rom_short_model_mode: mode, rom_short_model_variant_id: nextVid })
+                            }}
                             style={{
                               flex: 1, padding: '.55rem .75rem', borderRadius: 8,
                               border: isActive ? '2px solid hsl(280,75%,60%)' : '1.5px solid hsl(var(--border)/.5)',
@@ -1206,26 +1253,54 @@ export default function SettingsPage() {
                           : 'Ollama is disabled; using default local pipeline model.'}
                       </div>
                     )}
-                    {settings.rom_short_model_mode === 'trained' && (
-                      <div style={{ marginTop: '.85rem' }}>
-                        <div style={{ fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--ink))', marginBottom: 4 }}>Select Trained Variant</div>
-                        <select
-                          value={settings.rom_short_model_variant_id || ''}
-                          onChange={e => setSettings({ ...settings, rom_short_model_variant_id: e.target.value || null })}
-                          style={{
-                            width: '100%', padding: '.55rem .8rem', borderRadius: 8,
-                            border: '1px solid hsl(var(--border))',
-                            background: 'hsl(var(--background))', color: 'hsl(var(--foreground))',
-                            fontSize: '.82rem', fontFamily: 'Inter, sans-serif'
-                          }}
-                        >
-                          <option value="">— Select variant —</option>
-                          {romVariants.filter(v => v.status === 'done').map(v => (
-                            <option key={v.id} value={v.id}>{v.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
+                    {settings.rom_short_model_mode === 'trained' && (() => {
+                      const doneVariants = romVariants.filter(v => v.status === 'done')
+                      const selectedVariant = doneVariants.find(v => v.id === settings.rom_short_model_variant_id)
+                      return (
+                        <div style={{ marginTop: '.85rem' }}>
+                          <div style={{ fontSize: '.74rem', fontWeight: 600, color: 'hsl(var(--ink))', marginBottom: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <span>Select Trained LoRA Variant</span>
+                            {doneVariants.length > 0 && (
+                              <span style={{ fontSize: '.7rem', color: 'hsl(var(--pencil))' }}>
+                                {doneVariants.length} available
+                              </span>
+                            )}
+                          </div>
+                          {doneVariants.length === 0 ? (
+                            <div style={{ marginTop: '.4rem', fontSize: '.75rem', color: 'hsl(38,90%,45%)', background: 'hsl(38,90%,50%/.1)', border: '1px solid hsl(38,90%,50%/.3)', padding: '.5rem .75rem', borderRadius: 6 }}>
+                              ⚠️ No completed trained variants found. Train a model in the ROM Training tab first.
+                            </div>
+                          ) : (
+                            <select
+                              value={settings.rom_short_model_variant_id || ''}
+                              onChange={e => setSettings({ ...settings, rom_short_model_variant_id: e.target.value || null })}
+                              style={{
+                                width: '100%', padding: '.55rem .8rem', borderRadius: 8,
+                                border: '1px solid hsl(var(--border))',
+                                background: 'hsl(var(--background))', color: 'hsl(var(--foreground))',
+                                fontSize: '.82rem', fontFamily: 'Inter, sans-serif'
+                              }}
+                            >
+                              <option value="">— Select variant —</option>
+                              {doneVariants.map(v => {
+                                const baseName = v.base_model ? v.base_model.replace(/\\/g, '/').split('/').filter(Boolean).pop() : 'LoRA'
+                                const dateStr = v.completed_at ? ` • ${new Date(v.completed_at).toLocaleDateString()}` : ''
+                                return (
+                                  <option key={v.id} value={v.id}>
+                                    {v.name} ({baseName}){dateStr}
+                                  </option>
+                                )
+                              })}
+                            </select>
+                          )}
+                          {selectedVariant && (
+                            <div style={{ marginTop: '.45rem', fontSize: '.73rem', color: 'hsl(140,70%,38%)', display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}>
+                              <CheckCircle size={13} /> Active for Short ROM: {selectedVariant.name} ({selectedVariant.id.slice(0, 8)})
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
 
                     {/* Reasoning Mode for Short ROM */}
                     <div style={{ marginTop: '.85rem', paddingTop: '.75rem', borderTop: '1px solid hsl(var(--border)/.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1.5rem' }}>
@@ -2057,9 +2132,15 @@ export default function SettingsPage() {
                       style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))', fontSize: '.78rem', color: 'hsl(var(--ink))', fontFamily: 'Inter' }}
                     >
                       {embeddingModels.map(m => (
-                        <option key={m.id} value={m.id}>{m.name} ({m.description})</option>
+                        <option key={m.id} value={m.id} disabled={!m.installed && m.id !== settings.embedding_model}>
+                          {m.is_trained_variant ? '★ ' : ''}{m.name} ({m.description}){m.installed ? '' : ' — not installed'}
+                        </option>
                       ))}
                     </select>
+                    <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 6, lineHeight: 1.45 }}>
+                      Used for every embedding: RAG retrieval and indexing, Stage 2 context and Stage 3 agenda mapping.
+                      ★ marks trained variants. After switching models, reindex existing ChromaDB data below.
+                    </div>
                   </div>
                 )}
 
@@ -2072,6 +2153,8 @@ export default function SettingsPage() {
                   <SettingCard title="Score Cutoff Threshold" description="Minimum relative similarity score cutoff (0.00–0.50)." value={settings.rag_relative_score_cutoff ?? 0.01} min={0.0} max={0.5} step={0.01} onChange={v => setSettings({ ...settings, rag_relative_score_cutoff: v })} />
                 </div>
               </div>
+
+              <EmbeddingReindexCard refreshKey={reindexRefreshKey} />
             </div>
           )}
 

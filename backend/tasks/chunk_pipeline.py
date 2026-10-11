@@ -18,6 +18,7 @@ Whisper inference runs at a time and no LLM is loaded until finalize.
 """
 import json
 import logging
+import os
 import asyncio
 from typing import Optional
 

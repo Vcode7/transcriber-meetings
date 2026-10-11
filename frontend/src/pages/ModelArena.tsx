@@ -168,7 +168,7 @@ export default function ModelArena() {
     const stage1Keys = ["rom_discussion_embedded", "rom_discussion", "rom_discussion_no_actions", "rom_action_extraction", "stage1_json_repair"]
     const stage2Keys = ["rom_enhance_window", "rom_enhance_all_together", "rom_deduplicate", "rom_polish"]
     const stage3Keys = ["rom_agenda", "rom_agenda_assign_batch", "rom_mom_expansion", "rom_agenda_doc_points"]
-    const finalRomKeys = ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_ai_chat"]
+    const finalRomKeys = ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat"]
     const momKeys = ["mom", "mom_extract_actions", "mom_merge", "mom_action_dedup", "mom_action_regen"]
 
     if (stage1Keys.includes(selectedPromptKey)) {

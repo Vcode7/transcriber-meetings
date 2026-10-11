@@ -4,6 +4,7 @@ import {
   X, CheckCircle, AlertTriangle, Sparkles, FileText, ChevronRight,
   Tag, Zap,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import api from '../api/client'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -27,7 +28,7 @@ type ImportMode = 'rule' | 'ai'
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function SectionHeader({ icon: Icon, title, color, count }: {
-  icon: React.ComponentType<{ size?: number, style?: React.CSSProperties }>
+  icon: LucideIcon
   title: string
   color: string
   count?: number
@@ -750,7 +751,7 @@ function ImportTab() {
 // MAIN DICTIONARY PAGE
 // ════════════════════════════════════════════════════════════════════════════
 
-const TAB_CONFIG: { id: Tab; label: string; icon: React.ComponentType<{ size?: number, style?: React.CSSProperties }> }[] = [
+const TAB_CONFIG: { id: Tab; label: string; icon: LucideIcon }[] = [
   { id: 'shortcuts', label: 'Shortcuts', icon: Zap },
   { id: 'vocabulary', label: 'Vocabulary', icon: Tag },
   { id: 'import', label: 'Import from Doc', icon: FileText },

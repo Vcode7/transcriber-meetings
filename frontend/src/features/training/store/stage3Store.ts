@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type {
-  MeetingDataSummary,
+  MeetingListItem,
   Stage3Variant,
   Stage3Settings,
   Stage3HistoryEntry,
@@ -17,8 +17,8 @@ interface Stage3State {
   setActiveTab: (tab: Stage3Tab) => void;
 
   // Meetings
-  meetings: MeetingDataSummary[];
-  setMeetings: (m: MeetingDataSummary[]) => void;
+  meetings: MeetingListItem[];
+  setMeetings: (m: MeetingListItem[]) => void;
 
   // Dataset selection & inputs
   datasetMeetingId: string | null;

@@ -13,8 +13,8 @@
 import { create } from 'zustand'
 import type { ProcessingResult } from '../types/recording'
 
-export type JobSource = 'record' | 'upload' | 'tab-audio'
-export type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'done' | 'error' | 'cancelled'
+export type JobSource = 'record' | 'upload' | 'tab-audio' | 'video-upload'
+export type JobStatus = 'pending' | 'processing' | 'transcript_ready' | 'pending_transcript_review' | 'done' | 'error' | 'cancelled'
 
 export interface ActiveJob {
   jobId: string

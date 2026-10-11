@@ -45,6 +45,8 @@ from tasks.pipeline import (
     _build_and_store_context_summary,
     _update_status_safe,
     _recover_gpu_and_run_llm,
+    _generic_speaker_labels,
+    _speaker_confidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,18 +92,30 @@ def _transcript_to_aligned_result(
     timestamps are already forced-aligned.
     """
     segments = []
+    total_words = 0
+    fallback_words = 0
+
     for seg in transcript:
         # Copy the segment but remove speaker-specific fields so
         # assign_word_speakers can write fresh speaker annotations.
         words = []
         for w in seg.get("words", []):
+            total_words += 1
+            w_score = w.get("score")
+            w_prob = w.get("probability")
+            if w_score is None and w_prob is None:
+                fallback_words += 1
+                conf_val = 1.0
+            else:
+                conf_val = float(w_prob if w_prob is not None else w_score)
+
             words.append({
                 "word": w.get("word", ""),
                 "start": float(w.get("start", seg.get("start", 0.0))),
                 "end": float(w.get("end", seg.get("end", 0.0))),
                 # WhisperX uses "score"; we also keep "probability" for our own code.
-                "score": float(w.get("probability", w.get("score", 1.0))),
-                "probability": float(w.get("probability", w.get("score", 1.0))),
+                "score": conf_val,
+                "probability": conf_val,
             })
         segments.append({
             "start": float(seg.get("start", 0.0)),
@@ -110,6 +124,13 @@ def _transcript_to_aligned_result(
             "words": words,
             "avg_logprob": float(seg.get("avg_logprob", 0.0)),
         })
+
+    if fallback_words > 0:
+        logger.warning(
+            f"[ReID] ⚠️ Word confidence fallback in transcript reconstruction: "
+            f"{fallback_words}/{total_words} words lacked both 'probability' and 'score', defaulted to 1.0."
+        )
+
     return {"segments": segments}
 
 
@@ -331,10 +352,7 @@ async def _run_reidentify_impl(
     except Exception as e:
         logger.error(f"[ReID] {recording_id} — Speaker ID FAILED: {e}", exc_info=True)
         logger.warning(f"[ReID] {recording_id} — Falling back to generic speaker labels")
-        identified_segs = [
-            {**seg, "speaker_label": f"Speaker {i+1}", "speaker_profile_id": None, "similarity": 0.0}
-            for i, seg in enumerate(diar_segs)
-        ]
+        identified_segs = _generic_speaker_labels(diar_segs)
 
     # ── Stage 4: Word→speaker assignment ──────────────────────────────────────
     logger.info(f"[ReID] {recording_id} — STAGE 4: Word-speaker assignment")
@@ -389,7 +407,7 @@ async def _run_reidentify_impl(
     # ── Stage 5: Build final segments ─────────────────────────────────────────
     final_segments = []
     for seg in speaker_segments:
-        final_segments.append({
+        final_seg = {
             "speaker_label": seg.get("speaker_label") or seg.get("speaker") or "Speaker 1",
             "speaker_profile_id": seg.get("speaker_profile_id"),
             "speaker": seg.get("speaker"),
@@ -401,7 +419,11 @@ async def _run_reidentify_impl(
             "overlap_regions": seg.get("overlap_regions", []),
             # Preserve original avg_logprob if present
             "avg_logprob": seg.get("avg_logprob", 0.0),
-        })
+            "speaker_confidence": _speaker_confidence(seg),
+        }
+        if seg.get("speaker_refined"):
+            final_seg["speaker_refined"] = True
+        final_segments.append(final_seg)
 
     speakers_detected = []
     for s in final_segments:

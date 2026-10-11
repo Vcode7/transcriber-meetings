@@ -1,0 +1,21 @@
+{
+  "variant_id": "f7a6b4ea-62f8-44fa-aeb0-1f9029e2d793",
+  "base_model": "E:\\projects\\Transcriber-meeting-initial\\Application\\runtime\\nlp_engine",
+  "training_type": "new",
+  "method": "qlora",
+  "use_4bit": true,
+  "lora_config": {
+    "method": "qlora",
+    "r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": "q_proj,v_proj",
+    "learning_rate": 0.0002,
+    "num_epochs": 3,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 4,
+    "use_4bit": true,
+    "bnb_4bit_compute_dtype": "float16",
+    "max_seq_length": 2048
+  }
+}

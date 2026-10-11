@@ -123,3 +123,21 @@ def test_generate_mom_from_enhanced_rom_action_items():
     assert actions[1]["task"] == "Carol assigned to complete Draft RFC document before July 15"
     assert actions[1]["raw_json"]["assigner"] == "Carol"
     assert actions[1]["raw_json"]["assignee"] is None
+
+
+def test_format_action_point_display_text_does_not_repeat_owner_or_deadline():
+    # LLM-written tasks already name the owner and deadline
+    item = {"assigner": None, "assignee": "Dr. Rao", "task": "Dr. Rao will update the simulation model by Oct 15.", "deadline": "Oct 15"}
+    assert format_action_point_display_text(item) == "Dr. Rao will update the simulation model by Oct 15."
+
+    # Deadline mentioned mid-sentence (not at the end) is not appended again
+    item2 = {"assigner": "Alice", "assignee": "Bob", "task": "Bob to send the Friday report to finance", "deadline": "Friday"}
+    assert format_action_point_display_text(item2) == "Bob to send the Friday report to finance"
+
+    # Multiple assignees all named in the task
+    item3 = {"assignee": "Alice, Bob", "task": "Alice and Bob will pair on the migration", "deadline": None}
+    assert format_action_point_display_text(item3) == "Alice and Bob will pair on the migration"
+
+    # Trailing period is dropped before appending a deadline
+    item4 = {"assignee": None, "task": "Publish the release notes.", "deadline": "Monday"}
+    assert format_action_point_display_text(item4) == "Publish the release notes before Monday"

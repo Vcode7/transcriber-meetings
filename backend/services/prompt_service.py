@@ -286,8 +286,8 @@ PROMPT_META: list[dict] = [
         "key": "rom_agenda_assign_batch",
         "name": "Stage 3: Batch Agenda Assignment",
         "category": "ROM",
-        "description": "Assigns each discussion point in a batch directly to the most appropriate agenda from the complete agenda list.",
-        "variables": ["{agenda_reference}", "{discussion_order_guidance}", "{timeline_guidance}", "{batch_json}"],
+        "description": "Assigns each discussion point in a batch directly to the most appropriate agenda from the complete agenda list, using embedding similarity scores as additional reference.",
+        "variables": ["{agenda_reference}", "{discussion_order_guidance}", "{timeline_guidance}", "{similarity_guidance}", "{batch_json}"],
     },
     {
         "key": "rom_agenda_doc_points",
@@ -295,6 +295,27 @@ PROMPT_META: list[dict] = [
         "category": "ROM",
         "description": "Extracts 2–5 factual, agenda-specific points from an uploaded supporting document.",
         "variables": ["{agenda_title}", "{agenda_description}", "{document_text}"],
+    },
+    {
+        "key": "rom_point_classification",
+        "name": "Stage 3: Classify Discussion Points",
+        "category": "ROM",
+        "description": "Discussion analysis before agenda creation: classifies each Stage 2 point as a decision, action item, question, risk or general discussion.",
+        "variables": ["{points_json}"],
+    },
+    {
+        "key": "rom_agenda_topic_synthesis",
+        "name": "Stage 3: Build Agenda Topics from Discussion",
+        "category": "ROM",
+        "description": "Discussion analysis before agenda creation: writes one titled agenda topic (description, context, decisions, action items, open questions, risks, keywords) per group of semantically related points. Topics become the agendas when no agenda document is uploaded; otherwise unmatched topics are suggested.",
+        "variables": ["{clusters_json}"],
+    },
+    {
+        "key": "rom_agenda_action_points",
+        "name": "Final ROM: Agenda Action Points",
+        "category": "ROM",
+        "description": "Generates the action points of one Final ROM agenda from all of its discussion points when 'Include Action Points' is selected for that agenda. Output is validated: vague, unsupported and duplicate tasks are dropped and unstated owners/deadlines become 'Not specified'.",
+        "variables": ["{agenda_json}", "{points_json}"],
     },
     {
         "key": "rom_version_short",
@@ -318,6 +339,13 @@ PROMPT_META: list[dict] = [
         "variables": ["{agenda_context}", "{selected_points}", "{user_prompt}", "{chat_history_section}"],
     },
     {
+        "key": "rom_conclude_points",
+        "name": "Conclude ROM Discussion Points",
+        "category": "ROM",
+        "description": "Combines multiple selected Final ROM discussion points into one concise conclusion of 2-3 sentences, preserving critical facts and meaning.",
+        "variables": ["{agenda_context}", "{selected_points}"],
+    },
+    {
         "key": "rom_ai_chat",
         "name": "AI Chat about ROM",
         "category": "ROM",
@@ -330,6 +358,13 @@ PROMPT_META: list[dict] = [
         "category": "ROM",
         "description": "Extracts and enhances action points from Stage 2 discussion points, producing self-contained tasks with owner and deadline context.",
         "variables": ["{points_json}"],
+    },
+    {
+        "key": "rom_action_owner_verify",
+        "name": "Stage 1: Verify Action Owner",
+        "category": "ROM",
+        "description": "Optional focused check of who owns an action item whose owner could not be verified against the transcript with high confidence. Runs only when 'Verify Uncertain Action Owners' is enabled.",
+        "variables": ["{task}", "{participants_section}", "{transcript}"],
     },
 ]
 
@@ -378,12 +413,17 @@ def _defaults() -> dict[str, str]:
         ROM_MOM_EXPANSION_PROMPT,
         ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         ROM_AGENDA_DOC_POINTS_PROMPT,
+        ROM_POINT_CLASSIFICATION_PROMPT,
+        ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT,
+        ROM_AGENDA_ACTION_POINTS_PROMPT,
         MOM_DEDUPLICATE_ACTION_POINTS_PROMPT,
         ROM_VERSION_SHORT_PROMPT,
         ROM_VERSION_MEDIUM_PROMPT,
         ROM_AI_EDIT_POINTS_PROMPT,
+        ROM_CONCLUDE_POINTS_PROMPT,
         ROM_AI_CHAT_PROMPT,
         ROM_ENHANCE_ACTION_POINTS_PROMPT,
+        ROM_ACTION_OWNER_VERIFY_PROMPT,
     )
     return {
         "mom":                            MOM_PROMPT,
@@ -422,11 +462,16 @@ def _defaults() -> dict[str, str]:
         "rom_mom_expansion":              ROM_MOM_EXPANSION_PROMPT,
         "rom_agenda_assign_batch":        ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         "rom_agenda_doc_points":          ROM_AGENDA_DOC_POINTS_PROMPT,
+        "rom_point_classification":       ROM_POINT_CLASSIFICATION_PROMPT,
+        "rom_agenda_topic_synthesis":     ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT,
+        "rom_agenda_action_points":       ROM_AGENDA_ACTION_POINTS_PROMPT,
         "rom_version_short":              ROM_VERSION_SHORT_PROMPT,
         "rom_version_medium":             ROM_VERSION_MEDIUM_PROMPT,
         "rom_ai_edit_points":             ROM_AI_EDIT_POINTS_PROMPT,
+        "rom_conclude_points":            ROM_CONCLUDE_POINTS_PROMPT,
         "rom_ai_chat":                    ROM_AI_CHAT_PROMPT,
         "rom_enhance_action_points":       ROM_ENHANCE_ACTION_POINTS_PROMPT,
+        "rom_action_owner_verify":         ROM_ACTION_OWNER_VERIFY_PROMPT,
     }
 
 

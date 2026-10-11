@@ -48,12 +48,26 @@ export interface LossPoint {
   loss: number;
 }
 
+/** Post-training check: the saved variant reloaded through the RAG loader and compared with the base model. */
+export interface VariantVerification {
+  status: string;
+  variant_loads?: boolean;
+  probe_passages?: number;
+  embedding_dim?: number;
+  mean_cosine_to_base?: number;
+  min_cosine_to_base?: number;
+  embedding_shift?: number;
+  differs_from_base?: boolean;
+  base_mean_pairwise_similarity?: number;
+  variant_mean_pairwise_similarity?: number;
+}
+
 export interface TrainingJobStatus {
   job_id: string;
   variant_name: string;
   base_model_name: string;
   base_model_path: string;
-  status: 'initializing' | 'training' | 'completed' | 'failed' | 'cancelling' | 'cancelled';
+  status: 'initializing' | 'training' | 'verifying' | 'completed' | 'failed' | 'cancelling' | 'cancelled';
   total_chunks: number;
   epochs: number;
   current_epoch: number;
@@ -61,6 +75,7 @@ export interface TrainingJobStatus {
   current_step: number;
   total_steps: number;
   current_loss: number | null;
+  initial_loss?: number | null;
   final_loss: number | null;
   progress_percent: number;
   elapsed_seconds: number;
@@ -69,6 +84,7 @@ export interface TrainingJobStatus {
   logs: string[];
   error?: string | null;
   staged_model_path?: string | null;
+  verification?: VariantVerification | null;
 }
 
 export interface EmbeddingVariant {
@@ -88,9 +104,11 @@ export interface EmbeddingVariant {
     epochs?: number;
     learning_rate?: number;
     duration_seconds?: number;
+    verification?: VariantVerification;
     [key: string]: any;
   };
   is_active: boolean;
+  exists_on_disk?: boolean;
 }
 
 export const embeddingTrainingApi = {
@@ -161,14 +179,88 @@ export const embeddingTrainingApi = {
   },
 
   /** Select an embedding variant for active RAG pipeline use */
-  selectVariant: async (variant_id: string): Promise<{ status: string; active_variant_name: string }> => {
+  selectVariant: async (variant_id: string): Promise<{ status: string; active_variant_name: string; message?: string }> => {
     const res = await api.post(`/api/embedding-training/variants/${variant_id}/select`);
     return res.data;
   },
 
   /** Delete a saved variant */
-  deleteVariant: async (variant_id: string): Promise<{ status: string; name: string }> => {
+  deleteVariant: async (variant_id: string): Promise<{ status: string; name: string; active_model?: string; fallback_model?: string | null }> => {
     const res = await api.delete(`/api/embedding-training/variants/${variant_id}`);
+    return res.data;
+  },
+};
+
+// ── ChromaDB reindex with the active (trained) embedding model ────────────────
+
+export interface EmbeddingIndexCollection {
+  name: string;
+  kind: string;
+  vectors: number;
+  embedding_model: string | null;
+  is_current: boolean;
+}
+
+export interface ReindexFailure {
+  collection: string;
+  vectors: number;
+  error: string;
+}
+
+export interface ReindexJobStatus {
+  job_id?: string;
+  status: 'idle' | 'running' | 'cancelling' | 'completed' | 'completed_with_errors' | 'cancelled' | 'failed';
+  target_model?: string;
+  force?: boolean;
+  started_at?: string;
+  finished_at?: string | null;
+  total_collections?: number;
+  processed_collections?: number;
+  reindexed_collections?: number;
+  skipped_collections?: number;
+  failed_collections?: number;
+  total_vectors?: number;
+  processed_vectors?: number;
+  current_collection?: string | null;
+  progress_percent?: number;
+  failures?: ReindexFailure[];
+  logs?: string[];
+  error?: string | null;
+}
+
+export interface EmbeddingIndexStatus {
+  active_model: string;
+  active_model_info: {
+    name: string;
+    available: boolean;
+    is_trained_variant: boolean;
+    base_model: string | null;
+  };
+  total_collections: number;
+  total_vectors: number;
+  stale_collections: number;
+  stale_vectors: number;
+  vectors_by_model: Record<string, number>;
+  collections: EmbeddingIndexCollection[];
+  model_switch_locked: string | null;
+  reindex_job: ReindexJobStatus | null;
+}
+
+export const embeddingIndexApi = {
+  getStatus: async (): Promise<EmbeddingIndexStatus> => {
+    const res = await api.get('/settings/embedding-index/status');
+    return res.data;
+  },
+  startReindex: async (force: boolean): Promise<ReindexJobStatus> => {
+    const res = await api.post('/settings/embedding-index/reindex', { force });
+    return res.data;
+  },
+  getReindexStatus: async (): Promise<ReindexJobStatus> => {
+    const res = await api.get('/settings/embedding-index/reindex/status');
+    return res.data;
+  },
+  cancelReindex: async (): Promise<{ status: string }> => {
+    const res = await api.post('/settings/embedding-index/reindex/cancel');
     return res.data;
   },
 };

@@ -4,6 +4,7 @@ All endpoints under /api/training/.
 Completely isolated from existing transcription and MoM pipeline.
 """
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import uuid
@@ -1250,14 +1251,15 @@ async def stage3_get_meeting_data(
                         'keywords': [],
                     })
 
-    # Ground truth mappings if Stage 3 was previously run
-    ground_truth = {}
-    for a in rom_data.get('stage3', {}).get('final_rom', {}).get('agendas', []) or rom_data.get('stage3', {}).get('agendas', []):
-        aid = a.get('agenda_id')
-        for p in a.get('points', []):
-            pid = p.get('id') if isinstance(p, dict) else None
-            if pid and aid:
-                ground_truth[pid] = aid
+    # Ground truth mappings if Stage 3 was previously run: the Stage 3 point → agenda mapping,
+    # overridden by the Final ROM (long version), which reflects points the user moved.
+    ground_truth = dict((rom_data.get('stage3') or {}).get('point_mappings') or {})
+    final_src = (rom_data.get('final_rom_versions') or {}).get('long') or rom_data.get('final_rom') or {}
+    for a in final_src.get('agendas') or []:
+        aid = a.get('agenda_id') if isinstance(a, dict) else None
+        for p in (a.get('discussion_points') or a.get('points') or []) if aid else []:
+            if isinstance(p, dict) and p.get('id') and not p.get('is_doc_point'):
+                ground_truth[p['id']] = aid
 
     return {
         'meeting_id': meeting_id,
@@ -1320,7 +1322,8 @@ async def stage3_generate_agendas(
         rom_data = from_json(row.get('rom_data') or '{}', {})
 
     from services.rom_service import rom_service
-    agendas_res = rom_service.generate_agendas_only(
+    # Blocking LLM + embedding work: run it off the event loop (as the ROM router does).
+    agendas_res = await asyncio.get_running_loop().run_in_executor(None, lambda: rom_service.generate_agendas_only(
         agenda_text=req.agenda_text,
         recording_id=req.meeting_id,
         user_id=user_id,
@@ -1328,7 +1331,7 @@ async def stage3_generate_agendas(
         global_context_top_k=req.global_context_top_k if req.use_global_context else 0,
         transcript=transcript,
         previous_mom_texts=req.previous_mom_texts or [],
-    )
+    ))
 
     agendas = agendas_res.get('agendas', [])
     expanded = agendas_res.get('expanded_agendas', [])
@@ -1374,11 +1377,11 @@ async def stage3_upload_agenda(
         raise HTTPException(status_code=400, detail='Failed to extract text from the agenda file.')
 
     from services.rom_service import rom_service
-    agendas_res = rom_service.generate_agendas_only(
+    agendas_res = await asyncio.get_running_loop().run_in_executor(None, lambda: rom_service.generate_agendas_only(
         agenda_text=extracted_text,
         user_id=user_id,
         recording_id=meeting_id,
-    )
+    ))
 
     agendas = agendas_res.get('agendas', [])
 

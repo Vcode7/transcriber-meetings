@@ -20,6 +20,9 @@ class DummyTranscriptionOptions:
 
 class TestWhisperInitialPrompt(unittest.TestCase):
     def setUp(self):
+        if "whisperx" not in sys.modules:
+            mock_wx = MagicMock()
+            sys.modules["whisperx"] = mock_wx
         unload_align_model()
 
     @patch("soundfile.read")

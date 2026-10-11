@@ -1,9 +1,8 @@
-
 import axios, { AxiosRequestConfig, isAxiosError } from 'axios'
 import { useAuthStore } from '../store/auth'
+import { API_BASE_URL as BASE_URL } from '../config'
 
-// This is a local desktop app — backend always runs on port 8000.
-const BASE_URL = 'http://127.0.0.1:8000'
+export { BASE_URL }
 
 const api = axios.create({
   baseURL: BASE_URL,

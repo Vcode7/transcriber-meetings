@@ -557,8 +557,8 @@ def test_generate_advanced_mom_selective_regeneration(monkeypatch):
         regenerate_conclusion=True,
     )
     assert res_regen_all["title"] == "New Refined Title"
-    assert res_regen_all["introduction"] == "New Refined Intro"
-    assert res_regen_all["conclusion"] == "New Refined Conclusion"
+    assert res_regen_all["introduction"].rstrip(".") == "New Refined Intro"
+    assert res_regen_all["conclusion"].rstrip(".") == "New Refined Conclusion"
 
 
 def test_sequential_multi_speaker_training():

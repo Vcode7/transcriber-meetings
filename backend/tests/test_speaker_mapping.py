@@ -79,3 +79,11 @@ def test_apply_speaker_mappings_prefix_prevention():
     p1 = result["agendas"][0]["discussion_points"][0]
     assert p1["speaker"] == "Charlie Brown"
     assert p1["text"] == "Alice Smith and Charlie Brown both joined."
+
+
+def test_replace_speaker_never_matches_inside_longer_label():
+    from services.speaker_sync import replace_speaker_in_text
+
+    text = "Speaker 10 agreed with Speaker 1; SPEAKER_1 will follow up. Speaker 12 abstained."
+    result = replace_speaker_in_text(text, {"Speaker 1": "Alice"})
+    assert result == "Speaker 10 agreed with Alice; Alice will follow up. Speaker 12 abstained."

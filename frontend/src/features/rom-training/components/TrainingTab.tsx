@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Brain, Play, Loader, ChevronDown, ChevronUp, Check,
-  AlertCircle, RefreshCw, Eye,
+  AlertCircle, RefreshCw, Eye, Maximize2,
 } from 'lucide-react';
-import { startTraining, getVariant, listTrainingData, listVariants } from '../api/romTrainingApi';
+import { startTraining, getVariant, listTrainingData, listVariants, getDefaultModel } from '../api/romTrainingApi';
 import type { LoRAConfig, RomVariant, TrainingDataEntry, TestResult } from '../types/romTrainingTypes';
+import TestComparisonModal from './TestComparisonModal';
 
 const DEFAULT_LORA: LoRAConfig = {
   method: 'qlora',
@@ -17,7 +18,7 @@ const DEFAULT_LORA: LoRAConfig = {
   per_device_train_batch_size: 2,
   gradient_accumulation_steps: 4,
   use_4bit: true,
-  bnb_4bit_compute_dtype: 'float16',
+  bnb_4bit_compute_dtype: 'bfloat16',
   max_seq_length: 2048,
 };
 
@@ -47,6 +48,7 @@ export default function TrainingTab() {
 
   // Config
   const [modelPath, setModelPath] = useState('');
+  const [defaultModelPath, setDefaultModelPath] = useState('');
   const [trainingType, setTrainingType] = useState<'new' | 'upgrade'>('new');
   const [parentVariantId, setParentVariantId] = useState('');
   const [name, setName] = useState('');
@@ -55,6 +57,7 @@ export default function TrainingTab() {
   const [testSize, setTestSize] = useState(10);
   const [loraConfig, setLoraConfig] = useState<LoRAConfig>(DEFAULT_LORA);
   const [showLoRA, setShowLoRA] = useState(false);
+  const [bf16Supported, setBf16Supported] = useState(false);
 
   // Training state
   const [training, setTraining] = useState(false);
@@ -63,16 +66,74 @@ export default function TrainingTab() {
   const [error, setError] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Full Comparison Modal state
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    results: TestResult[];
+    initialIndex: number;
+    variantName: string;
+    accuracy: string | null;
+  }>({
+    isOpen: false,
+    results: [],
+    initialIndex: 0,
+    variantName: '',
+    accuracy: null,
+  });
+
   useEffect(() => {
-    listTrainingData().then(r => setDbSize(r.total || 0)).catch(() => {});
-    listVariants().then(r => setVariants(r.variants || [])).catch(() => {});
+    listTrainingData().then(r => {
+      const total = r.total || 0;
+      setDbSize(total);
+      if (total >= 2) {
+        const test = Math.max(1, Math.min(10, Math.floor(total * 0.2)));
+        const train = Math.max(1, total - test);
+        setTestSize(test);
+        setDatasetSize(train);
+      } else if (total === 1) {
+        setTestSize(1);
+        setDatasetSize(1);
+      }
+    }).catch(() => {});
+
+    listVariants().then(r => {
+      const list: RomVariant[] = r.variants || [];
+      setVariants(list);
+      // Auto-resume active training if one is currently in progress
+      const active = list.find((v: RomVariant) => v.status === 'training' || v.status === 'pending');
+      if (active) {
+        setCurrentVariantId(active.id);
+        setCurrentVariant(active);
+        setTraining(true);
+      } else if (list.length > 0) {
+        // Display the most recent variant by default
+        setCurrentVariant(list[0]);
+      }
+    }).catch(() => {});
+
+    getDefaultModel().then(r => {
+      if (r?.default_model_path) {
+        setDefaultModelPath(r.default_model_path);
+        setModelPath(prev => prev || r.default_model_path);
+      }
+      if (r && typeof r.bf16_supported === 'boolean') {
+        setBf16Supported(r.bf16_supported);
+        if (r.bf16_supported) {
+          patchLora('bnb_4bit_compute_dtype', 'bfloat16');
+        } else {
+          patchLora('bnb_4bit_compute_dtype', 'float16');
+        }
+      }
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!currentVariantId) return;
+    let consecutiveErrors = 0;
     pollRef.current = setInterval(async () => {
       try {
         const v = await getVariant(currentVariantId);
+        consecutiveErrors = 0;
         setCurrentVariant(v);
         if (v.status === 'done' || v.status === 'error') {
           clearInterval(pollRef.current!);
@@ -80,8 +141,12 @@ export default function TrainingTab() {
           listVariants().then(r => setVariants(r.variants || [])).catch(() => {});
         }
       } catch {
-        clearInterval(pollRef.current!);
-        setTraining(false);
+        consecutiveErrors++;
+        // Tolerate up to 5 consecutive network hiccups before stopping polling
+        if (consecutiveErrors >= 5) {
+          clearInterval(pollRef.current!);
+          setTraining(false);
+        }
       }
     }, 3000);
     return () => clearInterval(pollRef.current!);
@@ -92,8 +157,16 @@ export default function TrainingTab() {
       setError('Model Path and Name are required.');
       return;
     }
+    if (trainingType === 'upgrade' && !parentVariantId) {
+      setError('Please select a base variant to upgrade.');
+      return;
+    }
+    if (dbSize === 0) {
+      setError('No training data in database. Please create training data in the Data Creation tab first.');
+      return;
+    }
     if (datasetSize + testSize > dbSize) {
-      setError(`Not enough data. Need ${datasetSize + testSize}, have ${dbSize}.`);
+      setError(`Not enough data. Selected ${datasetSize} train + ${testSize} test = ${datasetSize + testSize}, but DB only has ${dbSize} entries.`);
       return;
     }
     setError('');
@@ -142,7 +215,23 @@ export default function TrainingTab() {
           </div>
           {/* Model Path */}
           <div>
-            <label style={S.label}>Model Path *</label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+              <label style={{ ...S.label, marginBottom: 0 }}>Model Path *</label>
+              {defaultModelPath && modelPath !== defaultModelPath && (
+                <button
+                  type="button"
+                  onClick={() => setModelPath(defaultModelPath)}
+                  style={{
+                    border: 'none', background: 'transparent',
+                    color: 'hsl(var(--accent))', cursor: 'pointer',
+                    fontSize: '0.7rem', fontWeight: 600, padding: 0,
+                  }}
+                  title="Use detected local model path"
+                >
+                  Use local default
+                </button>
+              )}
+            </div>
             <input style={S.input} value={modelPath} onChange={e => setModelPath(e.target.value)} placeholder="e.g. Qwen/Qwen2.5-7B-Instruct" />
           </div>
           {/* Training Type */}
@@ -268,8 +357,10 @@ export default function TrainingTab() {
                     onChange={e => patchLora('bnb_4bit_compute_dtype', e.target.value)}
                     style={S.input}
                   >
-                    <option value="float16">float16</option>
-                    <option value="bfloat16">bfloat16</option>
+                    <option value="float16">float16 (Standard / Recommended)</option>
+                    <option value="bfloat16" disabled={!bf16Supported}>
+                      {bf16Supported ? 'bfloat16 (Ampere+)' : 'bfloat16 (Requires RTX 30xx/40xx+)'}
+                    </option>
                     <option value="float32">float32</option>
                   </select>
                 </div>
@@ -289,16 +380,16 @@ export default function TrainingTab() {
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
               padding: '0.6rem 1.5rem', borderRadius: '10px', border: 'none',
-              background: training ? 'hsl(var(--muted))' : 'hsl(var(--accent))',
-              color: training ? 'hsl(var(--muted-foreground))' : 'white',
-              fontSize: '0.9rem', fontWeight: 700, cursor: training ? 'not-allowed' : 'pointer',
+              background: training || dbSize === 0 ? 'hsl(var(--muted))' : 'hsl(var(--accent))',
+              color: training || dbSize === 0 ? 'hsl(var(--muted-foreground))' : 'white',
+              fontSize: '0.9rem', fontWeight: 700, cursor: training || dbSize === 0 ? 'not-allowed' : 'pointer',
               fontFamily: 'Inter, sans-serif',
             }}
             onClick={handleTrain}
-            disabled={training}
+            disabled={training || dbSize === 0}
           >
             {training ? <Loader size={16} className="spin" /> : <Play size={16} />}
-            {training ? 'Training in progress…' : 'Train'}
+            {training ? 'Training in progress…' : dbSize === 0 ? 'No Training Data Available' : 'Train'}
           </button>
         </div>
       </div>
@@ -346,23 +437,79 @@ export default function TrainingTab() {
           {/* Test Results */}
           {currentVariant.status === 'done' && currentVariant.test_results.length > 0 && (
             <div>
-              <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Eye size={14} /> Test Case Comparison ({currentVariant.test_results.length} samples)
+              <div style={{
+                fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.75rem',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                flexWrap: 'wrap', gap: 8,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Eye size={14} /> Test Case Comparison ({currentVariant.test_results.length} samples)
+                </div>
+                <button
+                  type="button"
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '0.3rem 0.75rem', borderRadius: 6,
+                    border: '1px solid hsl(var(--accent) / .4)',
+                    background: 'hsl(var(--accent) / .12)',
+                    color: 'hsl(var(--accent))', cursor: 'pointer',
+                    fontSize: '0.74rem', fontWeight: 700,
+                  }}
+                  onClick={() => setModalState({
+                    isOpen: true,
+                    results: currentVariant.test_results,
+                    initialIndex: 0,
+                    variantName: currentVariant.name,
+                    accuracy: currentVariant.accuracy,
+                  })}
+                  title="Open full-screen side-by-side comparison modal with untruncated outputs"
+                >
+                  <Maximize2 size={12} /> View Full Comparison
+                </button>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                 {currentVariant.test_results.map((result, idx) => (
-                  <TestResultCard key={idx} result={result} index={idx} />
+                  <TestResultCard
+                    key={idx}
+                    result={result}
+                    index={idx}
+                    onExpand={() => setModalState({
+                      isOpen: true,
+                      results: currentVariant.test_results,
+                      initialIndex: idx,
+                      variantName: currentVariant.name,
+                      accuracy: currentVariant.accuracy,
+                    })}
+                  />
                 ))}
               </div>
             </div>
           )}
         </div>
       )}
+
+      {/* Full Comparison Modal */}
+      <TestComparisonModal
+        isOpen={modalState.isOpen}
+        onClose={() => setModalState(prev => ({ ...prev, isOpen: false }))}
+        results={modalState.results}
+        initialIndex={modalState.initialIndex}
+        variantName={modalState.variantName}
+        accuracySummary={modalState.accuracy}
+      />
     </div>
   );
 }
 
-function TestResultCard({ result, index }: { result: TestResult; index: number }) {
+function TestResultCard({
+  result,
+  index,
+  onExpand,
+}: {
+  result: TestResult;
+  index: number;
+  onExpand?: () => void;
+}) {
   const [expanded, setExpanded] = useState(index === 0);
   return (
     <div style={{ borderRadius: 10, border: '1px solid hsl(var(--border))', overflow: 'hidden' }}>
@@ -378,7 +525,34 @@ function TestResultCard({ result, index }: { result: TestResult; index: number }
         <span style={{ fontWeight: 700, fontSize: '0.8rem' }}>
           Sample {index + 1}: {result.agenda_title || result.recording_title}
         </span>
-        {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {onExpand && (
+            <button
+              type="button"
+              style={{
+                border: '1px solid hsl(var(--border))',
+                background: 'hsl(var(--muted) / .5)',
+                color: 'hsl(var(--foreground))',
+                borderRadius: 5,
+                padding: '2px 8px',
+                cursor: 'pointer',
+                fontSize: '0.68rem',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onExpand();
+              }}
+              title="Open full-screen comparison modal for this sample"
+            >
+              <Maximize2 size={10} /> Full View
+            </button>
+          )}
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </div>
       </div>
       {expanded && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 0 }}>
@@ -395,7 +569,9 @@ function TestResultCard({ result, index }: { result: TestResult; index: number }
               }}
             >
               <div style={{ fontSize: '0.68rem', fontWeight: 700, color: col.color, marginBottom: 8 }}>{col.label}</div>
-              <div style={{ fontSize: '0.73rem', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{col.text}</div>
+              <div style={{ fontSize: '0.73rem', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                {col.text ? (col.text.slice(0, 300) + (col.text.length > 300 ? '…' : '')) : 'N/A'}
+              </div>
             </div>
           ))}
         </div>

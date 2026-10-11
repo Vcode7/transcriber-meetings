@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ProcessingSource = 'record' | 'upload' | 'tab-audio'
+export type ProcessingSource = 'record' | 'upload' | 'tab-audio' | 'video-upload'
 
 export type ProcessingStage =
   | 'uploading'

@@ -1096,15 +1096,19 @@ def _get_or_load_peft_model(base_model_path: str, adapter_path: str, is_qlora: b
         if is_qlora and torch.cuda.is_available():
             try:
                 from transformers import BitsAndBytesConfig
+                has_cuda = torch.cuda.is_available()
+                has_bf16 = has_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+                bnb_compute_dtype = torch.bfloat16 if has_bf16 else torch.float16
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_use_double_quant=True,
                     bnb_4bit_quant_type='nf4',
-                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_compute_dtype=bnb_compute_dtype,
                 )
                 base_model = AutoModelForCausalLM.from_pretrained(
                     base_model_path,
                     quantization_config=bnb_config,
+                    torch_dtype=bnb_compute_dtype,
                     device_map='auto',
                     trust_remote_code=True,
                 )
@@ -1695,16 +1699,21 @@ def _run_lora_qlora_stage2_worker(
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        if is_qlora:
+        has_cuda = torch.cuda.is_available()
+        has_bf16 = has_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+        compute_dtype = torch.bfloat16 if has_bf16 else (torch.float16 if has_cuda else torch.float32)
+
+        if is_qlora and has_cuda:
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type='nf4',
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=compute_dtype,
             )
             model = AutoModelForCausalLM.from_pretrained(
                 hf_model_path,
                 quantization_config=bnb_config,
+                torch_dtype=compute_dtype,
                 device_map='auto',
                 trust_remote_code=True,
             )
@@ -1713,8 +1722,8 @@ def _run_lora_qlora_stage2_worker(
             model = AutoModelForCausalLM.from_pretrained(
                 hf_model_path,
                 trust_remote_code=True,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map='auto' if torch.cuda.is_available() else 'cpu',
+                torch_dtype=compute_dtype,
+                device_map='auto' if has_cuda else 'cpu',
             )
 
         # 6. Apply LoRA Config
@@ -1745,19 +1754,22 @@ def _run_lora_qlora_stage2_worker(
         # 8. Training
         _set_run_status(run_id, 'running', 40, f'[{tag}] Starting fine-tuning for {num_epochs} epochs...')
 
+        train_bf16 = is_qlora and has_bf16
+        train_fp16 = has_cuda and not train_bf16
+
         training_args = TrainingArguments(
             output_dir=str(artifact_dir / 'checkpoints'),
             num_train_epochs=num_epochs,
             per_device_train_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             learning_rate=learning_rate,
-            fp16=torch.cuda.is_available() and not is_qlora,
-            bf16=is_qlora,
+            fp16=train_fp16,
+            bf16=train_bf16,
             logging_steps=1,
             save_strategy='no',
             eval_strategy='no',
             report_to='none',
-            optim='paged_adamw_8bit' if is_qlora else 'adamw_torch',
+            optim='paged_adamw_8bit' if (is_qlora and has_cuda) else 'adamw_torch',
         )
 
         class ProgressLoggerCallback(TrainerCallback):

@@ -47,6 +47,8 @@ PROTECTED_PREFIXES: List[str] = [
     "runtime/nlp-engine/",
     "runtime/backup_",
     "backend/.env",
+    "backend/checkpoints/",
+    "runtime/checkpoints/",
     "logs/",
     "runtime/_hf_home/",
 ]

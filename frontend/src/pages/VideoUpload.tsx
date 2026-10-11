@@ -199,7 +199,11 @@ export default function VideoUploadPage() {
   const [file, setFile] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [recordingId, setRecordingId] = useState<string | null>(null)
+  const isUploadingRef = useRef(false)
+  const [recordingId, setRecordingId] = useState<string | null>(() => {
+    const active = useJobsStore.getState().jobs.find((j) => j.source === 'video-upload' && isActiveJobStatus(j.status))
+    return active ? active.jobId : null
+  })
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [result, setResult] = useState<ProcessingResult | null>(null)
   const [error, setError] = useState('')
@@ -280,25 +284,34 @@ export default function VideoUploadPage() {
 
   // ── Restore in-flight job on mount ─────────────────────────────────────
   useEffect(() => {
-    const priorJob = useJobsStore.getState().jobs.find((j) => j.source === 'video-upload')
-    if (!priorJob) return
-    setRecordingId(priorJob.jobId)
-    if (priorJob.result?.transcript) {
-      setResult(priorJob.result as ProcessingResult)
-      setIsGeneratingMom(priorJob.status === 'transcript_ready')
-      clearProcessing()
-    } else if (isActiveJobStatus(priorJob.status)) {
-      setIsGeneratingMom(priorJob.status === 'transcript_ready')
-      setProcessing('video-upload' as ProcessingStage, priorJob.stage as ProcessingStage || 'queued', new Date(priorJob.startedAt).getTime())
-    } else {
+    const allVideoJobs = useJobsStore.getState().jobs.filter((j) => j.source === 'video-upload')
+    const activeJob = allVideoJobs.find((j) => isActiveJobStatus(j.status))
+    if (activeJob) {
+      setRecordingId(activeJob.jobId)
+      if (activeJob.status === 'transcript_ready' && activeJob.result?.transcript) {
+        setResult(activeJob.result as ProcessingResult)
+        setIsGeneratingMom(true)
+      } else {
+        setProcessing('video-upload', (activeJob.stage as ProcessingStage) || 'queued', new Date(activeJob.startedAt).getTime())
+      }
+      return
+    }
+
+    const priorDoneJob = allVideoJobs.find((j) => j.status === 'done' && j.result?.transcript)
+    if (priorDoneJob && !file && !recordingId) {
+      setRecordingId(priorDoneJob.jobId)
+      setResult(priorDoneJob.result as ProcessingResult)
       setIsGeneratingMom(false)
       clearProcessing()
     }
-  }, [setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setProcessing, clearProcessing, file, recordingId])
 
   // ── Sync from global job store ─────────────────────────────────────────
   useEffect(() => {
-    if (!currentJob) { if (recordingId) clearProcessing(); return }
+    if (!currentJob) {
+      if (recordingId && !uploading && !isUploadingRef.current) clearProcessing()
+      return
+    }
     if (currentJob.status === 'cancelled') {
       setFile(null); setRecordingId(null); setResult(null); setError(''); setIsGeneratingMom(false); clearProcessing()
     } else if (currentJob.status === 'done') {
@@ -312,16 +325,23 @@ export default function VideoUploadPage() {
     } else if (currentJob.status === 'pending_transcript_review') {
       clearProcessing()
     } else {
-      setProcessing('video-upload' as ProcessingStage, currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
+      setProcessing('video-upload', currentJob.stage as ProcessingStage || 'queued', new Date(currentJob.startedAt).getTime())
     }
-  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentJob?.status, currentJob?.result, result, setProcessing, clearProcessing, recordingId, uploading])
 
   useEffect(() => {
     if (jobData?.progress) updateStage(jobData.progress as ProcessingStage)
     if (jobData?.status === 'error') clearProcessing()
   }, [jobData?.progress, jobData?.status, updateStage, clearProcessing])
 
-  useEffect(() => () => { clearProcessing() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    return () => {
+      const hasActive = useJobsStore.getState().jobs.some((j) => j.source === 'video-upload' && isActiveJobStatus(j.status))
+      if (!hasActive && !isUploadingRef.current) {
+        clearProcessing()
+      }
+    }
+  }, [clearProcessing])
 
   // ── Poll OCR status independently ─────────────────────────────────────
   useEffect(() => {
@@ -397,9 +417,10 @@ export default function VideoUploadPage() {
     cutStartSec?: number,
     cutEndSec?: number
   ) => {
-    if (!file) return
+    if (!file || isUploadingRef.current || uploading) return
+    isUploadingRef.current = true
     setUploading(true); setError('')
-    setProcessing('video-upload' as ProcessingStage, 'uploading')
+    setProcessing('video-upload', 'uploading')
     try {
       const form = new FormData()
       form.append('file', file)
@@ -432,6 +453,7 @@ export default function VideoUploadPage() {
       clearProcessing()
     } finally {
       setUploading(false)
+      isUploadingRef.current = false
     }
   }
 
@@ -466,7 +488,10 @@ export default function VideoUploadPage() {
     }
   }, [recordingId, isGeneratingInsights])
 
-  const isProcessingActive = useProcessingStore((s) => s.isProcessing && s.source === 'video-upload')
+  const isProcessingActive =
+    (useProcessingStore((s) => s.isProcessing && s.source === 'video-upload')) ||
+    uploading ||
+    (currentJob ? isActiveJobStatus(currentJob.status) : false)
   const fmtSize = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`
   const chatW = chatOpen ? `${chatWidth}px` : '48px'
 
@@ -479,7 +504,12 @@ export default function VideoUploadPage() {
       <div className="center-panel" style={{ position: 'relative' }}>
 
         {isProcessingActive && (
-          <ProcessingOverlay stage={stage} startedAt={startedAt} source={source} onCancel={handleCancel} />
+          <ProcessingOverlay
+            stage={stage || (currentJob?.stage as ProcessingStage) || (uploading ? 'uploading' : 'queued')}
+            startedAt={startedAt || (currentJob?.startedAt ? new Date(currentJob.startedAt).getTime() : Date.now())}
+            source={source || 'video-upload'}
+            onCancel={handleCancel}
+          />
         )}
 
         {/* Header */}
@@ -496,10 +526,10 @@ export default function VideoUploadPage() {
               : <Video size={16} style={{ color: 'hsl(260 80% 65%)' }} />}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <h1>{result ? 'Transcript' : 'Upload Video'}</h1>
+            <h1>{result ? 'Transcript' : isProcessingActive ? 'Processing Video' : 'Upload Video'}</h1>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
               <p style={{ fontSize: '.82rem', color: 'hsl(var(--pencil))', fontFamily: 'Inter, sans-serif', fontWeight: 400, marginTop: '1px' }}>
-                {result && file ? file.name : 'MP4 · AVI · MOV · MKV · WebM'}
+                {file?.name || currentJob?.filename || (result ? 'Video recording' : 'MP4 · AVI · MOV · MKV · WebM')}
               </p>
               {recordingId && ocrStatus !== 'unknown' && (
                 <OcrStatusBadge status={ocrStatus} />
@@ -659,6 +689,7 @@ export default function VideoUploadPage() {
                       </div>
                       <button
                         onClick={() => handleUpload()}
+                        disabled={uploading || isProcessingActive}
                         style={{
                           alignSelf: 'flex-start',
                           padding: '0.55rem 1.1rem',
@@ -668,10 +699,11 @@ export default function VideoUploadPage() {
                           fontWeight: 600,
                           fontSize: '0.85rem',
                           border: 'none',
-                          cursor: 'pointer',
+                          cursor: (uploading || isProcessingActive) ? 'not-allowed' : 'pointer',
+                          opacity: (uploading || isProcessingActive) ? 0.7 : 1,
                         }}
                       >
-                        Process Full Video
+                        {uploading || isProcessingActive ? 'Processing...' : 'Process Full Video'}
                       </button>
                     </div>
                   }
@@ -679,6 +711,7 @@ export default function VideoUploadPage() {
                   <AudioTrimmer
                     file={file}
                     fileName={file.name}
+                    isProcessing={uploading || isProcessingActive}
                     onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
                     onSkip={() => handleUpload()}
                   />
@@ -694,7 +727,7 @@ export default function VideoUploadPage() {
             recordingId={recordingId}
             onResumed={() => {
               updateStage('diarizing')
-              setProcessing('video-upload' as ProcessingStage, 'diarizing')
+              setProcessing('video-upload', 'diarizing')
             }}
           />
         )}

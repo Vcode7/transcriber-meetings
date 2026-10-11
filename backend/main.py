@@ -66,6 +66,7 @@ from routers.rom_training_router import router as rom_training_router
 from routers.arena_router import router as arena_router
 from routers.correction_router import router as correction_router
 from routers.embedding_training_router import router as embedding_training_router
+from routers.ocr_router import router as ocr_router
 
 from services.record import OverlapModel
 from services.device_utils import DEVICE as _ML_DEVICE, log_device_info as _log_device
@@ -234,6 +235,23 @@ async def lifespan(app: FastAPI):
     await connect_db()
     init_diarization()      # try load pyannote if HF_TOKEN set
 
+    # Re-apply the persisted embedding model (base or trained variant) so every
+    # embedding feature uses the selected variant from the first request on.
+    try:
+        from services.embedding_training.variant_manager import restore_active_embedding_model
+        await restore_active_embedding_model()
+    except Exception as e:
+        logger.warning(f"[Startup] Could not restore the active embedding model: {e}")
+
+    # Finish/clean up any ChromaDB re-embed that was interrupted by a shutdown.
+    try:
+        from services.embedding_reindex import recover_interrupted_reindex
+        restored = recover_interrupted_reindex()
+        if restored:
+            logger.warning(f"[Startup] Restored interrupted ChromaDB re-embed for: {restored}")
+    except Exception as e:
+        logger.warning(f"[Startup] ChromaDB reindex recovery skipped: {e}")
+
     # Pre-load prompt templates into in-memory cache
     try:
         from services.prompt_service import _ensure_cache_loaded
@@ -243,6 +261,16 @@ async def lifespan(app: FastAPI):
         logger.info("[PromptService] Prompt templates cache loaded at startup.")
     except Exception as e:
         logger.warning(f"[PromptService] Failed to preload prompt cache at startup: {e}")
+
+    # Pre-load the system-wide OCR settings so every OCR task uses the saved values
+    try:
+        from services.ocr_settings import load_ocr_settings, settings_fingerprint
+        from database import get_db_context
+        async with get_db_context() as db:
+            _ocr_cfg, _ = await load_ocr_settings(db)
+        logger.info(f"[OCRSettings] Loaded at startup ({settings_fingerprint(_ocr_cfg)})")
+    except Exception as e:
+        logger.warning(f"[OCRSettings] Failed to preload OCR settings at startup: {e}")
 
     # Overlap model device setup (do not pre-load model to save RAM/VRAM)
     _overlap_device = _ML_DEVICE
@@ -335,6 +363,7 @@ app.include_router(rom_training_router)
 app.include_router(arena_router)
 app.include_router(correction_router)
 app.include_router(embedding_training_router)
+app.include_router(ocr_router)
 
 # ── Serve uploaded audio files ────────────────────────────────
 if os.path.exists(settings.UPLOAD_DIR):

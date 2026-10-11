@@ -431,11 +431,19 @@ def diarize(file_path: str) -> List[Dict[str, Any]]:
     """
     Returns a list of diarization segments:
     [{"start": float, "end": float, "speaker": str, "is_overlap": bool}]
+
+    Pyannote turns as short as DIARIZATION_ASSIGN_MIN_DURATION are kept: short
+    replies ("Yes, I'll do it") must keep their own speaker during word
+    assignment, otherwise fill_nearest gives their words to the neighbouring
+    (usually requesting) speaker. Speaker identification still only embeds
+    turns of at least MIN_SEGMENT_DURATION.
     """
-    min_dur = settings.MIN_SEGMENT_DURATION
     if is_pyannote_available():
+        min_dur = getattr(settings, "DIARIZATION_ASSIGN_MIN_DURATION", settings.MIN_SEGMENT_DURATION)
         raw = _diarize_pyannote(file_path)
     else:
+        # The energy fallback alternates labels blindly; short segments would only add noise.
+        min_dur = settings.MIN_SEGMENT_DURATION
         raw = _diarize_energy(file_path, min_seg_dur=min_dur)
 
     # filter out too-short segments

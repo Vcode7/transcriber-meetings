@@ -621,6 +621,7 @@ async def connect_db():
             ("rom_windows_per_batch", "INTEGER NOT NULL DEFAULT 5"),
             ("rom_parallel_window_processing", "INTEGER NOT NULL DEFAULT 2"),
             ("rom_separate_action_extraction", "INTEGER NOT NULL DEFAULT 0"),
+            ("rom_action_owner_verification", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_action_generation_chunk_size", "INTEGER NOT NULL DEFAULT 10"),
             ("rom_stage2_process_all_together", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_min_similarity_threshold", "REAL DEFAULT 0.80"),
@@ -753,6 +754,17 @@ async def connect_db():
             )
         """))
 
+        # ── OCR Settings — system-wide, single row (id = 1) ────────────────────
+        # JSON blob of services.ocr_settings.OcrSettings; absent row = defaults.
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ocr_settings (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                config_json TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                updated_by  TEXT
+            )
+        """))
+
         # ── Meeting Collections — organizational folders for recordings ────────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS meeting_collections (
@@ -806,7 +818,7 @@ async def connect_db():
             "CREATE INDEX IF NOT EXISTS idx_chat_user ON collection_chat_messages(user_id)"
         ))
 
-        # ── Standalone AI Chat Messages ─────────────────────────────────────────
+        # ── Standalone AI Chat Messages & Sessions ──────────────────────────────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ai_chat_messages (
                 id          TEXT PRIMARY KEY,
@@ -814,11 +826,37 @@ async def connect_db():
                 role        TEXT NOT NULL,
                 content     TEXT NOT NULL,
                 metadata    TEXT DEFAULT '{}',
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                session_id  TEXT DEFAULT 'default'
             )
         """))
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_messages(user_id)"
+        ))
+
+        # Migration: ensure session_id exists on ai_chat_messages
+        try:
+            await conn.execute(text("ALTER TABLE ai_chat_messages ADD COLUMN session_id TEXT DEFAULT 'default'"))
+        except Exception:
+            pass  # column already exists
+
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_ai_chat_session ON ai_chat_messages(session_id)"
+        ))
+
+        # Standalone AI Chat Sessions table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+                id                  TEXT PRIMARY KEY,
+                user_id             TEXT NOT NULL,
+                title               TEXT NOT NULL,
+                selected_meeting_id TEXT DEFAULT NULL,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_ai_chat_sessions_user ON ai_chat_sessions(user_id)"
         ))
 
 
@@ -912,6 +950,32 @@ async def connect_db():
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
             except Exception:
                 pass
+
+        # ── Manual MoM (Minutes of Meeting) Uploads ──────────────────────────────
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS manual_moms (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                title TEXT NOT NULL,
+                meeting_date TEXT,
+                file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                file_type TEXT NOT NULL DEFAULT '',
+                raw_text TEXT NOT NULL DEFAULT '',
+                summary TEXT DEFAULT '',
+                speakers TEXT NOT NULL DEFAULT '[]',
+                agendas TEXT NOT NULL DEFAULT '[]',
+                action_items TEXT NOT NULL DEFAULT '[]',
+                decisions TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                chunks_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_manual_moms_user ON manual_moms(user_id)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_manual_moms_created ON manual_moms(created_at DESC)"))
 
         # Fixes users who have an old 30-day cookie that has already expired.
         # Sessions are only revoked by explicit logout, never by time expiry.

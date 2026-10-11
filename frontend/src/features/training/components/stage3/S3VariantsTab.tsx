@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { BarChart3, Star, Code2, ChevronDown, ChevronRight } from 'lucide-react';
 import { useStage3Store } from '../../store/stage3Store';
 import type { Stage3Variant } from '../../types/training';
@@ -103,7 +103,7 @@ export default function S3VariantsTab() {
               const parentLabel = v.is_default ? '—' : (parentVariant?.label || 'Baseline');
 
               return (
-                <React.Fragment key={v.variant_id}>
+                <Fragment key={v.variant_id}>
                   <tr
                     onClick={() => toggleExpand(v.variant_id)}
                     style={{
@@ -281,7 +281,7 @@ export default function S3VariantsTab() {
                       </td>
                     </tr>
                   )}
-                </React.Fragment>
+                </Fragment>
               );
             })}
           </tbody>

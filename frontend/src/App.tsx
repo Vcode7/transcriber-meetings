@@ -25,6 +25,7 @@ import RomTraining from "./pages/RomTraining";
 import AIChat from "./pages/AIChat";
 import ModelArena from "./pages/ModelArena";
 import EmbeddingTrainingPage from "./pages/EmbeddingTrainingPage";
+import OcrSettings from "./pages/OcrSettings";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -33,8 +34,7 @@ import SmoothScroll from "@/components/sketch/SmoothScroll";
 import GlobalJobTracker from "./components/GlobalJobTracker";
 import { recordingService } from "./services/recordingService";
 import ErrorBoundary from "./components/ErrorBoundary";
-
-const BASE_URL = "http://127.0.0.1:8000";
+import { BASE_URL } from "./config";
 
 // ── License expiry date (must match backend/license.py) ───────
 const LICENSE_EXPIRY = new Date("2026-10-15T23:59:59");
@@ -271,6 +271,7 @@ export default function App() {
                 <Route path="history/:id/mom" element={<MomPage />} />
                 <Route path="add-voice" element={<AddVoice />} />
                 <Route path="settings" element={<Settings />} />
+                <Route path="ocr-settings" element={<OcrSettings />} />
                 <Route path="dictionary" element={<Dictionary />} />
                 <Route path="global-context" element={<GlobalContext />} />
                 <Route path="history/:id/rom" element={<RomPage />} />

@@ -2,67 +2,87 @@
 doc_extractor.py — Offline text extraction from uploaded agenda/context files.
 
 Supported formats:
-  - PDF   : PyMuPDF (fitz) text extraction + PyMuPDF embedded image extraction + RapidOCR
-  - DOCX  : python-docx text extraction + inline image extraction + RapidOCR
-  - PPTX  : python-pptx text extraction + picture shape extraction + RapidOCR
+  - PDF   : PyMuPDF (fitz) text extraction + embedded image OCR; scanned pages are
+            rendered at the configured DPI and OCR'd page by page (PP-OCRv6)
+  - DOCX  : python-docx text extraction + inline image extraction + PP-OCRv6
+  - PPTX  : python-pptx text extraction + picture shape extraction + PP-OCRv6
   - TXT   : plain read
   - MD    : plain read
-  - PNG / JPG / JPEG / WEBP : RapidOCR (PP-OCRv4 / ONNX Runtime)
+  - PNG / JPG / JPEG / WEBP : PP-OCRv6 Medium (ONNX Runtime)
   - XLSX / XLS / CSV        : pandas spreadsheet sheet-by-sheet extraction + row indices tracking
 
-OCR is provided by ocr_engine.py which uses RapidOCR + ONNX Runtime with bundled
-PP-OCRv4 models. No external OCR binary (Tesseract) is required.
+OCR is provided by ocr_engine.py which uses PP-OCRv6 Medium + ONNX Runtime with offline
+models in download/ppocrv6/. No external OCR binary (Tesseract) is required.
 """
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import subprocess
 import sys
-from typing import Optional
+import threading
+import time
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── OCR engine (RapidOCR) ─────────────────────────────────────────────────────────
+# ── OCR engine (PP-OCRv6 Medium) ───────────────────────────────────────────────────
 try:
     from services.ocr_engine import ocr_image_bytes as _ocr_bytes_engine
     from services.ocr_engine import ocr_image_file as _ocr_file_engine
+    from services.ocr_engine import ocr_image_detailed as _ocr_detailed_engine
+    from services.ocr_engine import effective_ocr_workers as _ocr_workers
     from services.ocr_engine import is_ocr_available as _ocr_ready
 except ImportError:
     try:
         from backend.services.ocr_engine import ocr_image_bytes as _ocr_bytes_engine
         from backend.services.ocr_engine import ocr_image_file as _ocr_file_engine
+        from backend.services.ocr_engine import ocr_image_detailed as _ocr_detailed_engine
+        from backend.services.ocr_engine import effective_ocr_workers as _ocr_workers
         from backend.services.ocr_engine import is_ocr_available as _ocr_ready
     except ImportError:
-        def _ocr_bytes_engine(b, *, label="") -> str: return ""  # type: ignore[misc]
-        def _ocr_file_engine(p) -> str: return ""  # type: ignore[misc]
+        def _ocr_bytes_engine(b, *, label="", cfg=None) -> str: return ""  # type: ignore[misc]
+        def _ocr_file_engine(p, cfg=None) -> str: return ""  # type: ignore[misc]
+        def _ocr_detailed_engine(img, cfg=None, **kw): return None  # type: ignore[misc]
+        def _ocr_workers(cfg=None) -> int: return 1  # type: ignore[misc]
         def _ocr_ready() -> bool: return False  # type: ignore[misc]
         logger.warning("[DocExtractor] ocr_engine not available — image OCR disabled.")
 
+try:
+    from services.ocr_settings import OcrSettings, get_ocr_settings, settings_fingerprint, use_ocr_settings
+except ImportError:
+    from backend.services.ocr_settings import (  # type: ignore[no-redef]
+        OcrSettings, get_ocr_settings, settings_fingerprint, use_ocr_settings,
+    )
 
-def _ocr_image_bytes(image_bytes: bytes, *, label: str = "<bytes>") -> str:
+# Image formats PIL decodes reliably; anything else (JBIG2, JPX, CCITT…) is re-rendered by PyMuPDF.
+_PIL_SAFE_IMAGE_EXTS = {"png", "jpeg", "jpg", "bmp", "gif", "tif", "tiff", "webp"}
+
+
+def _ocr_image_bytes(image_bytes: bytes, *, label: str = "<bytes>", cfg: Optional[OcrSettings] = None) -> str:
     """
-    Run RapidOCR on in-memory image bytes.
+    Run PP-OCRv6 on in-memory image bytes using the active OCR settings.
 
-    Retries at most once on transient failure.  If the retry also fails,
-    the image is silently skipped and an empty string is returned.
+    If OCR fails, the image is silently skipped and an empty string is returned.
     """
     if not _ocr_ready():
         logger.warning(f"[DocExtractor] OCR engine not available — skipping image ({label}).")
         return ""
-    return _ocr_bytes_engine(image_bytes, label=label)
+    return _ocr_bytes_engine(image_bytes, label=label, cfg=cfg)
 
 
 def _ocr_image_file(path: str) -> str:
     """
-    Run RapidOCR directly on an image file path.
+    Run PP-OCRv6 directly on an image file path.
 
     Returns "" if OCR is unavailable or fails.
     """
     if not _ocr_ready():
         logger.warning(
             f"[DocExtractor] OCR engine not available — skipping image {os.path.basename(path)}. "
-            "Install rapidocr-onnxruntime to enable image text extraction."
+            "Please ensure PP-OCRv6 models are in download/ppocrv6/."
         )
         return ""
     return _ocr_file_engine(path)
@@ -92,41 +112,59 @@ def _is_duplicate(selectable_text: str, ocr_text: str) -> bool:
 
 
 def _run_parallel_image_ocr(
-    tasks: list[dict],
+    tasks: Iterable[dict],
     filename: str,
     total_images: int,
-    max_workers: int = 5,
+    max_workers: Optional[int] = None,
+    cfg: Optional[OcrSettings] = None,
+    keep_images: bool = False,
 ) -> list[dict]:
     """
-    Process a batch of image OCR tasks in parallel using max_workers=5 worker threads.
-    Runs 5 different images simultaneously while logging real-time progress.
+    OCR a stream of image tasks on a thread pool (size from the OCR settings).
+
+    Tasks carry either encoded `image_bytes` (embedded images) or a rendered RGB
+    `image_np` (scanned pages, kind="page_scan"). `tasks` may be a generator that
+    renders pages lazily on the calling thread; at most 2× workers rendered pages
+    are held in memory at once. Worker threads do not inherit ContextVars, so the
+    settings object is passed to every OCR call explicitly.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    if not tasks:
-        return []
-
-    logger.info(
-        f"[DocExtractor] [{filename}] Submitting {len(tasks)} candidate image(s) "
-        f"to parallel OCR pool (processing 5 different images concurrently)."
-    )
+    cfg = cfg or get_ocr_settings()
+    workers = max_workers or _ocr_workers(cfg)
+    in_flight = threading.BoundedSemaphore(workers * 2)
 
     def _worker(task: dict) -> dict:
         g_idx = task["global_idx"]
         p_idx = task.get("page_idx", 1)
         w, h = task.get("w", 0), task.get("h", 0)
         label = task.get("label", "<bytes>")
-        img_bytes = task["image_bytes"]
         context_text = task.get("context_text", "")
+        is_scan = task.get("kind") == "page_scan"
 
         logger.info(
             f"[DocExtractor] [{filename}] [Parallel Pool] Starting OCR image {g_idx}/{total_images} "
             f"(Page {p_idx}, xref {task.get('xref')}, {w}x{h}px)..."
         )
-        ocr_text = _ocr_image_bytes(img_bytes, label=label)
+        started = time.perf_counter()
+        task_out = {k: v for k, v in task.items() if k not in ("image_bytes", "image_np")}
+        if is_scan:
+            result = _ocr_detailed_engine(task.pop("image_np"), cfg, keep_image=keep_images, label=label)
+            ocr_text = result.text if result is not None else ""
+            task_out["ocr_result"] = result
+        else:
+            ocr_text = _ocr_image_bytes(task.pop("image_bytes"), label=label, cfg=cfg)
+        task_out["elapsed_ms"] = (time.perf_counter() - started) * 1000
 
         extracted = ""
-        if ocr_text:
+        if ocr_text and is_scan:
+            # A scanned page's OCR text *is* the page text — never de-duplicated away.
+            extracted = ocr_text
+            logger.info(
+                f"[DocExtractor] [{filename}] [Parallel Pool] Page scan {p_idx} "
+                f"complete -> Extracted {len(ocr_text)} chars"
+            )
+        elif ocr_text:
             if not _is_duplicate(context_text, ocr_text):
                 extracted = ocr_text
                 logger.info(
@@ -144,13 +182,22 @@ def _run_parallel_image_ocr(
                 f"complete -> No text detected"
             )
 
-        task_out = dict(task)
         task_out["ocr_text"] = extracted
         return task_out
 
     results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_worker, t): t for t in tasks}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for task in tasks:
+            in_flight.acquire()
+            future = executor.submit(_worker, task)
+            future.add_done_callback(lambda _f: in_flight.release())
+            futures[future] = {"global_idx": task.get("global_idx"), "page_idx": task.get("page_idx")}
+        if futures:
+            logger.info(
+                f"[DocExtractor] [{filename}] Submitted {len(futures)} OCR task(s) "
+                f"to the parallel pool ({workers} worker(s))."
+            )
         for future in as_completed(futures):
             try:
                 res = future.result()
@@ -214,145 +261,85 @@ def _format_table_matrix_to_markdown(matrix: list[list[str]], title: str = "Tabl
     return "\n".join(lines)
 
 
-def _extract_pdf(path: str) -> str:
+def _page_image_coverage(page) -> float:
+    """Fraction of the page covered by placed images (overlapping images counted once)."""
+    try:
+        infos = page.get_image_info()
+        frame = page.rect * page.derotation_matrix  # image bboxes use unrotated coordinates
+    except Exception:
+        return 0.0
+    if not infos or frame.width <= 0 or frame.height <= 0:
+        return 0.0
+    import numpy as np
+    grid = np.zeros((100, 100), dtype=bool)
+    for info in infos:
+        x0, y0, x1, y1 = info.get("bbox", (0, 0, 0, 0))
+        gx0 = int(max(0.0, (x0 - frame.x0) / frame.width) * 100)
+        gx1 = int(math.ceil(min(1.0, (x1 - frame.x0) / frame.width) * 100))
+        gy0 = int(max(0.0, (y0 - frame.y0) / frame.height) * 100)
+        gy1 = int(math.ceil(min(1.0, (y1 - frame.y0) / frame.height) * 100))
+        if gx1 > gx0 and gy1 > gy0:
+            grid[gy0:gy1, gx0:gx1] = True
+    return float(grid.mean())
+
+
+def _is_scanned_page(page, text: str, cfg: OcrSettings) -> bool:
+    """
+    Decide whether a PDF page is rendered and OCR'd as a whole.
+      always → every page;  never → no page;
+      auto   → too little selectable text, or mostly images with only a little text
+               (e.g. a scan with a stamped header or page number).
+    """
+    if cfg.pdf_ocr_mode == "never":
+        return False
+    if cfg.pdf_ocr_mode == "always":
+        return True
+    chars = len(text.strip())
+    if chars < cfg.pdf_scan_text_threshold:
+        return True
+    return chars < 200 and _page_image_coverage(page) >= cfg.pdf_scan_image_coverage
+
+
+def _render_page_rgb(page, cfg: OcrSettings):
+    """
+    Render a PDF page to an RGB array at the configured DPI. Rendering applies the
+    page rotation, image masks and tiled scan strips. The DPI is lowered when needed
+    so the longer side stays within the detector's maximum side length.
+    Returns (image, dpi_used).
+    """
+    import fitz
+    import numpy as np
+
+    dpi = cfg.pdf_render_dpi
+    longest_pt = max(page.rect.width, page.rect.height)
+    if longest_pt > 0 and longest_pt * dpi / 72.0 > cfg.det_max_side_limit:
+        dpi = max(36, int(cfg.det_max_side_limit * 72.0 / longest_pt))
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB, alpha=False)
+    buf = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)
+    img = buf[:, : pix.width * pix.n].reshape(pix.height, pix.width, pix.n)
+    return np.ascontiguousarray(img[:, :, :3]), dpi
+
+
+def _embedded_image_bytes(doc, xref: int, base_image: dict) -> bytes:
+    """Encoded bytes for an embedded image; formats PIL can't decode are re-rendered as PNG."""
+    ext = str(base_image.get("ext", "")).lower()
+    if ext in _PIL_SAFE_IMAGE_EXTS:
+        return base_image["image"]
+    import fitz
+    pix = fitz.Pixmap(doc, xref)
+    if pix.alpha or (pix.colorspace and pix.colorspace.n not in (1, 3)):
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    return pix.tobytes("png")
+
+
+def _extract_pdf(path: str, cfg: Optional[OcrSettings] = None) -> str:
     """Extract plain text, structured tables, and run OCR on embedded images/scans in parallel."""
     filename = os.path.basename(path)
+    cfg = cfg or get_ocr_settings()
     try:
         import fitz
-        doc = fitz.open(path)
-
-        MIN_DIM = 100
-        MIN_AREA = 10000
-
-        # 1. Collect selectable text, tables, and candidate image tasks per page
-        page_texts = []
-        page_tables = {}
-        raw_image_tasks = []
-        global_img_count = 0
-
-        for page_idx, page in enumerate(doc, 1):
-            text = (page.get_text() or "").strip()
-            page_texts.append((page_idx, text))
-
-            # 1a. Extract structured tables if present on the page
-            try:
-                if hasattr(page, "find_tables"):
-                    tabs = page.find_tables()
-                    if tabs and getattr(tabs, "tables", None):
-                        tbl_md_list = []
-                        for t_idx, tab in enumerate(tabs.tables, 1):
-                            matrix = tab.extract()
-                            if matrix and any(any(c for c in row if c and str(c).strip()) for row in matrix):
-                                tbl_md = _format_table_matrix_to_markdown(
-                                    matrix, title=f"Table (Page {page_idx}, #{t_idx})"
-                                )
-                                if tbl_md:
-                                    tbl_md_list.append(tbl_md)
-                        if tbl_md_list:
-                            page_tables[page_idx] = tbl_md_list
-            except Exception as tbl_err:
-                logger.warning(
-                    f"[DocExtractor] Failed extracting tables on page {page_idx} of {filename}: {tbl_err}"
-                )
-
-            # 1b. Collect embedded images
-            has_embedded_images = False
-            try:
-                images = page.get_images(full=True)
-                for img_info in images:
-                    global_img_count += 1
-                    xref = img_info[0]
-                    base_image = doc.extract_image(xref)
-                    w = base_image.get("width", 0)
-                    h = base_image.get("height", 0)
-
-                    # Filter small images (<100px or <10,000 total pixels) before OCR
-                    if w > 0 and h > 0 and (w < MIN_DIM or h < MIN_DIM or (w * h) < MIN_AREA):
-                        logger.info(
-                            f"[DocExtractor] [{filename}] Image {global_img_count}/? "
-                            f"(Page {page_idx}, xref {xref}, {w}x{h}px) -> SKIPPED (too small < 100px)"
-                        )
-                        continue
-
-                    has_embedded_images = True
-                    raw_image_tasks.append({
-                        "global_idx": global_img_count,
-                        "page_idx": page_idx,
-                        "xref": xref,
-                        "w": w,
-                        "h": h,
-                        "image_bytes": base_image["image"],
-                        "context_text": text,
-                        "label": f"PDF page {page_idx} img xref={xref}",
-                    })
-            except Exception as page_img_err:
-                logger.warning(
-                    f"[DocExtractor] Failed inspecting images on page {page_idx} of {filename}: {page_img_err}"
-                )
-
-            # 1c. Scanned PDF fallback: If page has virtually no selectable text and no embedded images,
-            # render the page to a pixmap and run OCR on the rendered image.
-            if len(text) < 20 and not has_embedded_images and not page_tables.get(page_idx):
-                try:
-                    pix = page.get_pixmap(dpi=150)
-                    img_bytes = pix.tobytes("png")
-                    global_img_count += 1
-                    raw_image_tasks.append({
-                        "global_idx": global_img_count,
-                        "page_idx": page_idx,
-                        "xref": f"scan_{page_idx}",
-                        "w": pix.width,
-                        "h": pix.height,
-                        "image_bytes": img_bytes,
-                        "context_text": text,
-                        "label": f"PDF page {page_idx} full-page scan",
-                    })
-                    logger.info(
-                        f"[DocExtractor] [{filename}] Page {page_idx} has minimal text ({len(text)} chars) "
-                        f"and 0 embedded images -> Added full-page scan OCR task ({pix.width}x{pix.height}px)"
-                    )
-                except Exception as scan_err:
-                    logger.warning(
-                        f"[DocExtractor] Failed rendering page {page_idx} scan for {filename}: {scan_err}"
-                    )
-
-        total_images = global_img_count
-        if total_images > 0:
-            logger.info(
-                f"[DocExtractor] PDF '{filename}': Found {total_images} total image/scan candidate(s) across {len(doc)} pages. "
-                f"{len(raw_image_tasks)} qualify for parallel OCR."
-            )
-        else:
-            logger.info(f"[DocExtractor] PDF '{filename}': 0 image OCR candidates across {len(doc)} pages.")
-
-        # 2. Process candidate images in parallel (5 different images at once)
-        completed_tasks = _run_parallel_image_ocr(raw_image_tasks, filename, total_images=total_images, max_workers=5)
-
-        # 3. Group extracted OCR text by page_idx
-        ocr_by_page = {}
-        for t in completed_tasks:
-            p_idx = t["page_idx"]
-            ocr_txt = t.get("ocr_text", "").strip()
-            if ocr_txt:
-                ocr_by_page.setdefault(p_idx, []).append(ocr_txt)
-
-        # 4. Re-assemble document text in original page order
-        parts = []
-        for page_idx, text in page_texts:
-            page_parts = []
-            if text:
-                page_parts.append(text)
-            if page_idx in page_tables:
-                for tbl_md in page_tables[page_idx]:
-                    page_parts.append(tbl_md)
-            if page_idx in ocr_by_page:
-                for ocr_txt in ocr_by_page[page_idx]:
-                    page_parts.append(f"[Embedded Image OCR: {ocr_txt}]")
-
-            if page_parts:
-                parts.append("\n\n".join(page_parts))
-
-        return "\n\n".join(parts)
+        with fitz.open(path) as doc:
+            return _extract_pdf_doc(doc, filename, cfg)
     except Exception as e:
         logger.warning(f"[DocExtractor] PDF PyMuPDF extraction failed for {path}: {e}. Falling back to pypdf.")
         # Fallback to pypdf
@@ -368,6 +355,208 @@ def _extract_pdf(path: str) -> str:
         except Exception as pypdf_err:
             logger.warning(f"[DocExtractor] PDF fallback pypdf extraction also failed: {pypdf_err}")
             return ""
+
+
+def _extract_pdf_doc(
+    doc,
+    filename: str,
+    cfg: OcrSettings,
+    *,
+    max_pages: Optional[int] = None,
+    details: Optional[dict] = None,
+    keep_images: bool = False,
+) -> str:
+    """
+    Page-by-page PDF extraction.
+
+    Scanned pages (see _is_scanned_page) are rendered to images and OCR'd as a whole;
+    their text becomes the page body, in page order. Other pages keep their text layer
+    and tables, with OCR text from embedded images appended. When `details` is a dict,
+    per-page diagnostics are stored in it (used by the OCR test endpoint).
+    """
+    page_count = len(doc) if max_pages is None else min(len(doc), max_pages)
+
+    # 1. Collect selectable text, tables, scan pages and embedded image tasks per page
+    page_texts = []
+    page_tables = {}
+    scan_pages: list[int] = []
+    image_tasks = []
+    image_count_by_page: dict[int, int] = {}
+    global_img_count = 0
+
+    for page_idx in range(1, page_count + 1):
+        page = doc[page_idx - 1]
+        text = (page.get_text() or "").strip()
+        page_texts.append((page_idx, text))
+
+        if _is_scanned_page(page, text, cfg):
+            scan_pages.append(page_idx)
+            logger.info(
+                f"[DocExtractor] [{filename}] Page {page_idx} treated as scanned "
+                f"({len(text)} selectable chars, mode={cfg.pdf_ocr_mode}) -> full-page OCR"
+            )
+            continue
+
+        # 1a. Extract structured tables if present on the page
+        try:
+            if hasattr(page, "find_tables"):
+                tabs = page.find_tables()
+                if tabs and getattr(tabs, "tables", None):
+                    tbl_md_list = []
+                    for t_idx, tab in enumerate(tabs.tables, 1):
+                        matrix = tab.extract()
+                        if matrix and any(any(c for c in row if c and str(c).strip()) for row in matrix):
+                            tbl_md = _format_table_matrix_to_markdown(
+                                matrix, title=f"Table (Page {page_idx}, #{t_idx})"
+                            )
+                            if tbl_md:
+                                tbl_md_list.append(tbl_md)
+                    if tbl_md_list:
+                        page_tables[page_idx] = tbl_md_list
+        except Exception as tbl_err:
+            logger.warning(
+                f"[DocExtractor] Failed extracting tables on page {page_idx} of {filename}: {tbl_err}"
+            )
+
+        # 1b. Collect embedded images
+        try:
+            images = page.get_images(full=True)
+            for img_info in images:
+                global_img_count += 1
+                xref = img_info[0]
+                base_image = doc.extract_image(xref)
+                w = base_image.get("width", 0)
+                h = base_image.get("height", 0)
+
+                # Filter small images (icons, bullets) before OCR
+                if w > 0 and h > 0 and (
+                    w < cfg.min_image_side or h < cfg.min_image_side or (w * h) < cfg.min_image_area
+                ):
+                    logger.info(
+                        f"[DocExtractor] [{filename}] Image {global_img_count}/? "
+                        f"(Page {page_idx}, xref {xref}, {w}x{h}px) -> SKIPPED (below minimum image size)"
+                    )
+                    continue
+
+                image_tasks.append({
+                    "global_idx": global_img_count,
+                    "page_idx": page_idx,
+                    "xref": xref,
+                    "w": w,
+                    "h": h,
+                    "image_bytes": _embedded_image_bytes(doc, xref, base_image),
+                    "context_text": text,
+                    "label": f"PDF page {page_idx} img xref={xref}",
+                })
+                image_count_by_page[page_idx] = image_count_by_page.get(page_idx, 0) + 1
+        except Exception as page_img_err:
+            logger.warning(
+                f"[DocExtractor] Failed inspecting images on page {page_idx} of {filename}: {page_img_err}"
+            )
+
+    total_images = global_img_count + len(scan_pages)
+    if total_images > 0:
+        logger.info(
+            f"[DocExtractor] PDF '{filename}': {len(scan_pages)} scanned page(s) and "
+            f"{len(image_tasks)} embedded image(s) queued for OCR across {page_count} pages."
+        )
+    else:
+        logger.info(f"[DocExtractor] PDF '{filename}': 0 image OCR candidates across {page_count} pages.")
+
+    # 2. OCR in parallel. Scanned pages are rendered lazily on this thread (PyMuPDF is
+    #    not thread-safe) so only a bounded number of page images is in memory at once.
+    render_dpi: dict[int, int] = {}
+
+    def _task_stream():
+        yield from image_tasks
+        for scan_no, page_idx in enumerate(scan_pages, 1):
+            try:
+                img, dpi = _render_page_rgb(doc[page_idx - 1], cfg)
+            except Exception as scan_err:
+                logger.warning(f"[DocExtractor] Failed rendering page {page_idx} of {filename}: {scan_err}")
+                continue
+            render_dpi[page_idx] = dpi
+            yield {
+                "kind": "page_scan",
+                "global_idx": global_img_count + scan_no,
+                "page_idx": page_idx,
+                "xref": f"scan_{page_idx}",
+                "w": img.shape[1],
+                "h": img.shape[0],
+                "image_np": img,
+                "label": f"PDF page {page_idx} full-page scan ({dpi} dpi)",
+            }
+
+    completed_tasks = _run_parallel_image_ocr(
+        _task_stream(), filename, total_images=total_images, cfg=cfg, keep_images=keep_images
+    )
+
+    # 3. Group extracted OCR text by page_idx
+    ocr_by_page: dict[int, list[str]] = {}
+    scan_results: dict[int, dict] = {}
+    for t in completed_tasks:
+        if t.get("kind") == "page_scan":
+            scan_results[t["page_idx"]] = t
+            continue
+        ocr_txt = t.get("ocr_text", "").strip()
+        if ocr_txt:
+            ocr_by_page.setdefault(t["page_idx"], []).append(ocr_txt)
+
+    # 4. Re-assemble document text in original page order
+    parts = []
+    for page_idx, text in page_texts:
+        page_parts = []
+        if page_idx in scan_pages:
+            scan = scan_results.get(page_idx, {})
+            ocr_txt = (scan.get("ocr_text") or "").strip()
+            # Fall back to the (small) text layer if OCR found nothing
+            page_parts.append(ocr_txt or text)
+        else:
+            if text:
+                page_parts.append(text)
+            for tbl_md in page_tables.get(page_idx, []):
+                page_parts.append(tbl_md)
+            for ocr_txt in ocr_by_page.get(page_idx, []):
+                page_parts.append(f"[Embedded Image OCR: {ocr_txt}]")
+
+        page_parts = [p for p in page_parts if p]
+        if page_parts:
+            parts.append("\n\n".join(page_parts))
+
+        if details is not None:
+            scan = scan_results.get(page_idx, {})
+            details[page_idx] = {
+                "page": page_idx,
+                "source": "ocr" if page_idx in scan_pages else "text_layer",
+                "text": "\n\n".join(page_parts),
+                "text_layer_chars": len(text),
+                "embedded_images": image_count_by_page.get(page_idx, 0),
+                "embedded_images_with_text": len(ocr_by_page.get(page_idx, [])),
+                "render_dpi": render_dpi.get(page_idx),
+                "elapsed_ms": scan.get("elapsed_ms"),
+                "ocr_result": scan.get("ocr_result"),
+            }
+
+    return "\n\n".join(parts)
+
+
+def ocr_pdf_pages_detailed(
+    path: str, cfg: OcrSettings, max_pages: int, keep_images: bool = False
+) -> tuple[str, dict, int]:
+    """
+    Run the production PDF path on the first `max_pages` pages and return
+    (text, per-page details, total page count). Used by the OCR test endpoint.
+    """
+    import fitz
+
+    details: dict = {}
+    with fitz.open(path) as doc:
+        total = len(doc)
+        text = _extract_pdf_doc(
+            doc, os.path.basename(path), cfg,
+            max_pages=max_pages, details=details, keep_images=keep_images,
+        )
+    return text, details, total
 
 
 def _process_docx_paragraph(para, doc, parts_acc: list[str]) -> None:
@@ -941,7 +1130,12 @@ SUPPORTED_EXTENSIONS = {
 UNSUPPORTED_EXTENSIONS: set[str] = set()
 
 
-def extract_text_from_bytes(content: bytes, filename: str = "document") -> str:
+OCR_CAPABLE_EXTENSIONS = {".pdf", ".docx", ".pptx", ".doc", ".ppt", ".png", ".jpg", ".jpeg", ".webp"}
+
+
+def extract_text_from_bytes(
+    content: bytes, filename: str = "document", ocr_settings: Optional[OcrSettings] = None
+) -> str:
     """Extract plain text from in-memory file bytes by writing to a temporary file."""
     import tempfile
     suffix = os.path.splitext(filename.lower())[1] or ".bin"
@@ -949,7 +1143,7 @@ def extract_text_from_bytes(content: bytes, filename: str = "document") -> str:
         tmp.write(content)
         tmp_path = tmp.name
     try:
-        return extract_text_from_file(tmp_path, filename)
+        return extract_text_from_file(tmp_path, filename, ocr_settings=ocr_settings)
     finally:
         try:
             os.unlink(tmp_path)
@@ -957,18 +1151,35 @@ def extract_text_from_bytes(content: bytes, filename: str = "document") -> str:
             pass
 
 
-def extract_text_from_file(file_path: str | bytes, filename: str = "", content_type: str = "") -> str:
-    """Extract plain text from a document, image, or spreadsheet file."""
+def extract_text_from_file(
+    file_path: str | bytes,
+    filename: str = "",
+    content_type: str = "",
+    ocr_settings: Optional[OcrSettings] = None,
+) -> str:
+    """
+    Extract plain text from a document, image, or spreadsheet file.
+
+    OCR uses one snapshot of the OCR settings for the whole document: the saved
+    system-wide settings by default, or `ocr_settings` when given (OCR test page).
+    """
     if isinstance(file_path, (bytes, bytearray)):
-        return extract_text_from_bytes(file_path, filename or "uploaded_file")
+        return extract_text_from_bytes(file_path, filename or "uploaded_file", ocr_settings=ocr_settings)
 
     if not filename:
         filename = os.path.basename(file_path)
 
     ext = os.path.splitext(filename.lower())[1]
 
+    with use_ocr_settings(ocr_settings) as cfg:
+        if ext in OCR_CAPABLE_EXTENSIONS:
+            logger.info(f"[DocExtractor] '{filename}': OCR settings {settings_fingerprint(cfg)}")
+        return _extract_by_extension(file_path, filename, ext, cfg)
+
+
+def _extract_by_extension(file_path: str, filename: str, ext: str, cfg: OcrSettings) -> str:
     if ext == ".pdf":
-        text = _extract_pdf(file_path)
+        text = _extract_pdf(file_path, cfg)
     elif ext == ".docx":
         text = _extract_docx(file_path)
     elif ext == ".pptx":
@@ -1009,8 +1220,8 @@ def extract_text_from_file(file_path: str | bytes, filename: str = "", content_t
         logger.warning(f"[DocExtractor] Unknown extension '{ext}' for '{filename}' — skipping.")
         return ""
 
-    # If OCR could have been used, unload RapidOCR sessions to release ONNX / CUDA resources
-    if ext in (".pdf", ".docx", ".pptx", ".doc", ".ppt", ".png", ".jpg", ".jpeg", ".webp"):
+    # If OCR could have been used, unload PP-OCRv6 sessions to release ONNX / CUDA resources
+    if ext in OCR_CAPABLE_EXTENSIONS:
         try:
             from services.ocr_engine import unload_ocr_engine
             unload_ocr_engine()

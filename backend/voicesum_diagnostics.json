@@ -1,5 +1,5 @@
 {
-  "timestamp": 1788203811.5535362,
+  "timestamp": 1791747124.2535696,
   "status": {
     "system": {
       "os": "Windows 11 (10.0.26200)",
@@ -8,21 +8,21 @@
       "cpu_cores_logical": 12,
       "cpu_cores_physical": 8,
       "ram_total": 16788930560,
-      "ram_used": 15828946944,
-      "ram_percent": 94.3,
-      "process_ram": 1027072000,
+      "ram_used": 16202932224,
+      "ram_percent": 96.5,
+      "process_ram": 638849024,
       "process_cpu": 0.0,
-      "uptime": 120.03072166442871
+      "uptime": 160.8896951675415
     },
     "gpu": {
       "cuda_available": true,
       "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
       "utilization": 0.0,
-      "memory_used": 5526.0,
+      "memory_used": 3378.0,
       "memory_total": 6141.0,
-      "memory_free": 396.0,
-      "temperature": 53.0,
-      "power_draw": 3.66,
+      "memory_free": 2544.0,
+      "temperature": 56.0,
+      "power_draw": 3.75,
       "driver_version": "571.96",
       "cuda_version": ""
     },
@@ -80,37 +80,37 @@
     "active_jobs": [],
     "storage": {
       "models": {
-        "size": 4404524495,
-        "files": 62
+        "size": 4520960145,
+        "files": 64
       },
       "uploads": {
-        "size": 4013256087,
-        "files": 212
+        "size": 1863600598,
+        "files": 382
       },
       "vector_store": {
-        "size": 848470,
-        "files": 28
+        "size": 1036886,
+        "files": 29
       },
       "database": {
-        "size": 70389760,
+        "size": 73576448,
         "files": 1
       },
       "logs": {
-        "size": 12066187,
+        "size": 19627182,
         "files": 1
       }
     },
     "database": {
       "path": "E:\\projects\\Transcriber-meeting-initial\\backend\\voicesum.db",
-      "size": 70389760,
+      "size": 73576448,
       "tables": {
         "users": 1,
-        "sessions": 141,
-        "login_attempts": 142,
-        "voice_profiles": 10,
-        "recordings": 98,
+        "sessions": 189,
+        "login_attempts": 190,
+        "voice_profiles": 20,
+        "recordings": 26,
         "recording_attachments": 8,
-        "global_context_documents": 46,
+        "global_context_documents": 71,
         "dictionary": 0
       }
     },
@@ -121,8 +121,8 @@
         "size": 0
       },
       "meeting_context": {
-        "count": 11,
-        "vectors": 87,
+        "count": 17,
+        "vectors": 88,
         "size": 0
       },
       "transcript": {
@@ -130,7 +130,7 @@
         "vectors": 0,
         "size": 0
       },
-      "total_size": 15835046
+      "total_size": 37564506
     },
     "performance": {
       "avg_total": 0.0,
@@ -143,64 +143,64 @@
     },
     "activity": [
       {
-        "id": "dab3b686-39d1-4cb6-88e5-f0466b4e9236",
-        "filename": "5min-demo.wav",
-        "status": "pending_transcript_review",
-        "timestamp": "2026-08-31T18:51:32.400986+00:00"
-      },
-      {
-        "id": "4c651d7c-7c5e-4117-9d6f-db94c6490669",
-        "filename": "Infosys Limited AGM 2023 \uff5c Infosys Annual General Meeting FY 22-23 [zoBznNOxor4].mp3",
+        "id": "test_rec_118942c5",
+        "filename": "test_all.wav",
         "status": "done",
-        "timestamp": "2026-08-31T16:26:27.756888+00:00"
+        "timestamp": "2026-10-10 16:31:56"
       },
       {
-        "id": "9e62c79d-6c51-4b53-88e8-a1a6afda9dce",
-        "filename": "Infosys Limited AGM 2023 \uff5c Infosys Annual General Meeting FY 22-23 [zoBznNOxor4].mp3",
+        "id": "test_rec_585852a7",
+        "filename": "test_all.wav",
+        "status": "done",
+        "timestamp": "2026-10-10 16:29:52"
+      },
+      {
+        "id": "test_rec_49c0538b",
+        "filename": "test_all.wav",
+        "status": "done",
+        "timestamp": "2026-10-10 13:19:43"
+      },
+      {
+        "id": "4b913bb3-bae7-42b0-a2b0-3c06cc3f4e38",
+        "filename": "5min-demo.wav",
+        "status": "done",
+        "timestamp": "2026-10-08T12:16:34.994495+00:00"
+      },
+      {
+        "id": "293a4b4a-70f8-4636-ba2a-6b7db8cf019a",
+        "filename": "5min-demo.wav",
+        "status": "error",
+        "timestamp": "2026-10-08T12:14:16.355709+00:00"
+      },
+      {
+        "id": "c0126d51-9853-447c-a9da-ee1ac6858a4d",
+        "filename": "recording.webm",
+        "status": "done",
+        "timestamp": "2026-10-08T12:12:25.026716+00:00"
+      },
+      {
+        "id": "3ff5911c-4a57-4c69-aa14-6415b882083e",
+        "filename": "Chairing a meeting.mp3",
         "status": "cancelled",
-        "timestamp": "2026-08-31T15:52:22.495168+00:00"
+        "timestamp": "2026-09-30T07:36:51.981341+00:00"
       },
       {
-        "id": "d6bcd268-5e96-4d19-a413-b773e4eae5c4",
-        "filename": "5min-demo.wav",
-        "status": "done",
-        "timestamp": "2026-08-04T03:48:59.253112+00:00"
+        "id": "a6878370-adbd-4243-96fd-2943cecc72fd",
+        "filename": "test_sample.wav",
+        "status": "error",
+        "timestamp": "2026-09-30T07:30:35.550931+00:00"
       },
       {
-        "id": "3e9a299d-5bf6-4fc2-b120-5fdfc6e1f1e2",
-        "filename": "output.wav",
-        "status": "done",
-        "timestamp": "2026-08-01T17:55:34.467460+00:00"
+        "id": "a954f7a8-f017-4eef-ab5b-f7f744ef6f54",
+        "filename": "test_sample.wav",
+        "status": "cancelled",
+        "timestamp": "2026-09-30T07:30:32.511640+00:00"
       },
       {
-        "id": "e586b6d3-b563-4f58-b1a5-92084474eb40",
-        "filename": "Finance Meeting for April 20, 2020 [Fa-hbpZx6OQ].mp4",
+        "id": "9eb787e2-4449-43b6-af5d-90cc0a3b295c",
+        "filename": "output1.wav",
         "status": "done",
-        "timestamp": "2026-08-01T17:33:14.672886+00:00"
-      },
-      {
-        "id": "4e1cbe9f-351d-496e-8dd2-a4ba0a597aeb",
-        "filename": "recording.webm",
-        "status": "done",
-        "timestamp": "2026-07-28T20:02:39.041044+00:00"
-      },
-      {
-        "id": "389b8ed5-2017-4507-beac-d7dfcdd79622",
-        "filename": "recording.webm",
-        "status": "done",
-        "timestamp": "2026-07-28T06:46:15.094528+00:00"
-      },
-      {
-        "id": "53c4acec-f02f-45fe-b05b-c44408ecc59e",
-        "filename": "recording.webm",
-        "status": "done",
-        "timestamp": "2026-07-28T06:37:02.342699+00:00"
-      },
-      {
-        "id": "7a13acc8-ce0d-4d9b-9368-22ede9acc1ab",
-        "filename": "output.mp4",
-        "status": "done",
-        "timestamp": "2026-07-28T06:29:36.184917+00:00"
+        "timestamp": "2026-09-22T03:12:37.898707+00:00"
       }
     ],
     "config": {
@@ -223,64 +223,142 @@
   },
   "recent_logs": [
     {
-      "timestamp": "2026-09-01 00:46:46,207",
+      "timestamp": "2026-10-12 00:59:55,874",
+      "name": "services.ai_provider",
+      "level": "WARNING",
+      "message": "[ROM Final] Agenda action point generation returned no parsable JSON: 'No genuine action points.'"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:52,490",
+      "name": "services.embedding_eres2net",
+      "level": "ERROR",
+      "message": "[ERes2Net] extract_embedding_from_file failed: Error opening 'E:\\\\projects\\\\Transcriber-meeting-initial\\\\backend\\\\runtime\\\\uploads\\\\test_user_123\\\\voice_profiles_audio\\\\3145d94a-e901-411a-a3a0-e9f8f5a29664\\\\rec_1791747112_a0c39083.wav': Error in WAV/W64/RF64 file. Malformed 'fmt ' chunk."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:52,496",
+      "name": "services.embedding_eres2net",
+      "level": "ERROR",
+      "message": "[ERes2Net] extract_embedding_from_file failed: Error opening 'E:\\\\projects\\\\Transcriber-meeting-initial\\\\backend\\\\runtime\\\\uploads\\\\test_user_123\\\\voice_profiles_audio\\\\3145d94a-e901-411a-a3a0-e9f8f5a29664\\\\rec_1791747112_d4657df3.wav': Error in WAV/W64/RF64 file. Malformed 'fmt ' chunk."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:52,535",
+      "name": "services.embedding_eres2net",
+      "level": "ERROR",
+      "message": "[ERes2Net] extract_embedding_from_file failed: Error opening 'E:\\\\projects\\\\Transcriber-meeting-initial\\\\backend\\\\runtime\\\\uploads\\\\test_user_123\\\\voice_profiles_audio\\\\9db291ee-689e-48eb-b4a7-43fac7848527\\\\rec_1791747112_9c44c791.wav': Error in WAV/W64/RF64 file. Malformed 'fmt ' chunk."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,529",
       "name": "services.audio_preprocessing",
       "level": "WARNING",
       "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
     },
     {
-      "timestamp": "2026-09-01 00:46:46,218",
+      "timestamp": "2026-10-12 01:01:54,536",
+      "name": "services.transcription",
+      "level": "WARNING",
+      "message": "[Transcription] \u26a0\ufe0f WORD CONFIDENCE FALLBACK DETECTED: 1/1 segments had NO word data from alignment, and 0 words lacked score/probability and defaulted to 1.0. (Aligned words with genuine scores: 0)"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,537",
+      "name": "services.transcript_normalizer",
+      "level": "WARNING",
+      "message": "[TranscriptNormalizer] \u26a0\ufe0f Fallback word confidence triggered: Segment [0.00s - 2.00s] has NO word alignment data! Synthesizing 2 words with fallback probability=1.0. Text: 'test segment'"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,538",
+      "name": "services.transcript_normalizer",
+      "level": "WARNING",
+      "message": "[TranscriptNormalizer] \u26a0\ufe0f WORD ALIGNMENT FALLBACK DETECTED: 1/1 segments (2 words) had missing word alignments and received synthetic probability=1.0! Likely cause: WhisperX forced alignment failed or was bypassed for these segments."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,539",
       "name": "services.audio_preprocessing",
       "level": "WARNING",
       "message": "[Preprocess] Audio preprocessing failed (Error opening 'dummy_path.wav': System error.). Returning original WAV path unchanged."
     },
     {
-      "timestamp": "2026-09-01 00:46:46,743",
+      "timestamp": "2026-10-12 01:01:54,542",
+      "name": "services.transcription",
+      "level": "WARNING",
+      "message": "[Transcription] \u26a0\ufe0f WORD CONFIDENCE FALLBACK DETECTED: 1/1 segments had NO word data from alignment, and 0 words lacked score/probability and defaulted to 1.0. (Aligned words with genuine scores: 0)"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,543",
+      "name": "services.transcript_normalizer",
+      "level": "WARNING",
+      "message": "[TranscriptNormalizer] \u26a0\ufe0f Fallback word confidence triggered: Segment [0.00s - 2.00s] has NO word alignment data! Synthesizing 2 words with fallback probability=1.0. Text: 'test segment'"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:54,544",
+      "name": "services.transcript_normalizer",
+      "level": "WARNING",
+      "message": "[TranscriptNormalizer] \u26a0\ufe0f WORD ALIGNMENT FALLBACK DETECTED: 1/1 segments (2 words) had missing word alignments and received synthetic probability=1.0! Likely cause: WhisperX forced alignment failed or was bypassed for these segments."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:56,219",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-248' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.906 seconds"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:56,312",
+      "name": "tasks.pipeline",
+      "level": "WARNING",
+      "message": "[Pipeline] \u26a0\ufe0f WORD CONFIDENCE FALLBACK in post-processing: 3/3 words lacked both 'probability' and 'score', defaulted to 1.0! Root cause: Forced alignment was missing or incomplete."
+    },
+    {
+      "timestamp": "2026-10-12 01:01:56,329",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
     },
     {
-      "timestamp": "2026-09-01 00:46:47,042",
+      "timestamp": "2026-10-12 01:01:56,623",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-56' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.297 seconds"
+      "message": "Executing <Task pending name='Task-248' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.297 seconds"
     },
     {
-      "timestamp": "2026-09-01 00:46:47,919",
+      "timestamp": "2026-10-12 01:01:57,849",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-56' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.875 seconds"
+      "message": "Executing <Task finished name='Task-248' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_fallback_to_full_audio() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 1.218 seconds"
     },
     {
-      "timestamp": "2026-09-01 00:46:47,974",
+      "timestamp": "2026-10-12 01:01:58,631",
+      "name": "asyncio",
+      "level": "WARNING",
+      "message": "Executing <Task pending name='Task-253' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.719 seconds"
+    },
+    {
+      "timestamp": "2026-10-12 01:01:58,646",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 Found 2 chunks missing summaries. Triggering VRAM recovery and retry sequence..."
     },
     {
-      "timestamp": "2026-09-01 00:46:48,311",
+      "timestamp": "2026-10-12 01:01:59,002",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-61' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.343 seconds"
+      "message": "Executing <Task pending name='Task-253' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.360 seconds"
     },
     {
-      "timestamp": "2026-09-01 00:46:48,331",
+      "timestamp": "2026-10-12 01:01:59,022",
       "name": "tasks.pipeline",
       "level": "WARNING",
       "message": "[FinalPipeline] rec_id \u2014 MoM returned empty/invalid without exception. Triggering VRAM recovery and retry..."
     },
     {
-      "timestamp": "2026-09-01 00:46:48,631",
+      "timestamp": "2026-10-12 01:01:59,334",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task pending name='Task-61' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.313 seconds"
+      "message": "Executing <Task pending name='Task-253' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() running at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1407> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\futures.py:387, Task.task_wakeup()] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:449> cb=[_run_until_complete_cb() at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\base_events.py:182] created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.313 seconds"
     },
     {
-      "timestamp": "2026-09-01 00:46:49,577",
+      "timestamp": "2026-10-12 01:02:00,678",
       "name": "asyncio",
       "level": "WARNING",
-      "message": "Executing <Task finished name='Task-61' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 0.937 seconds"
+      "message": "Executing <Task finished name='Task-253' coro=<TestRunFinalizePipeline.test_run_finalize_pipeline_merges_chunks() done, defined at C:\\Users\\vikas\\miniconda3\\Lib\\unittest\\mock.py:1402> result=None created at C:\\Users\\vikas\\miniconda3\\Lib\\asyncio\\runners.py:100> took 1.343 seconds"
     }
   ]
 }

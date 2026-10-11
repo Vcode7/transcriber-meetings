@@ -1,6 +1,6 @@
 {
   "name": "ai-meeting-transcriber",
-  "version": "5.1.2",
+  "version": "5.1.4",
   "description": "AI Meeting Transcriber — Electron desktop wrapper",
   "main": "main.js",
   "private": true,

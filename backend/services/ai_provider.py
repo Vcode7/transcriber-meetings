@@ -22,7 +22,7 @@ import logging
 import re
 import textwrap
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -1653,7 +1653,12 @@ CORE EXTRACTION RULES:
    - Preserve ALL technical terminology, abbreviations, and project names EXACTLY as spoken.
    - Never replace abbreviations with generic wording.
 
-5. JSON BUDGET
+5. SPEAKERS & TURN IDS
+   - Every transcript line starts with a turn ID and the speaker label, e.g. `[T12 | 03:41-03:52] Speaker 2: ...`.
+   - In `speakers`, list only the speaker labels of turns the point is based on, written exactly as in the turn headers.
+   - In `turn_ids`, list the IDs of every turn the point summarises (e.g. ["T12", "T13"]).
+
+6. JSON BUDGET
    - Keep the output compact. If output risks hitting the token limit, prioritize meaningful discussion points and factual completeness over unnecessary repetition.
    - Ensure the JSON is complete and properly closed.
 
@@ -1662,6 +1667,8 @@ previous_context:
 {previous_context}
 video_context:
 {video_context_section}
+
+{participants_section}
 
 TRANSCRIPT WINDOW:
 {window_text}
@@ -1673,6 +1680,7 @@ Extract discussion points as JSON. Leave action_items as an empty list for every
     {{
       "discussion_point": "Complete, meaningful capture of who said what and what was discussed — including decisions made and questions raised",
       "speakers": ["Speaker Name"],
+      "turn_ids": ["T12", "T13"],
       "technical_terms": ["Exact abbreviations, technical terms, and project names used"],
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
@@ -1709,6 +1717,20 @@ EXTRACTION RULES:
    - Carefully follow the conversation flow and speaker turns.
    - Determine who requested or assigned the work (`assigner`) and who became responsible for completing it (`assignee`).
    - Do not assume that the speaker mentioning the task is automatically the assignee.
+   - Resolve "I"/"me" to the speaker label of that turn, and "you" to the person being addressed (the person named in the request, or the speaker who accepts it in a following turn).
+   - The person who ASKS or ASSIGNS is the `assigner`, never the `assignee` of that same request.
+   - Write participants exactly as their speaker labels appear in the turn headers / MEETING PARTICIPANTS list.
+
+2a. OWNERSHIP EVIDENCE (REQUIRED FOR EVERY ITEM):
+   - Every transcript line starts with a turn ID, e.g. `[T12 | 03:41-03:52] Speaker 2: ...`.
+   - `assignee_basis` — how the assignee became responsible:
+     * "self_commitment": the assignee said they will do it ("I'll…", "I will…", "let me…").
+     * "direct_assignment": another participant assigned or asked the assignee to do it.
+     * "accepted_request": a request was made and the assignee accepted it in a following turn ("Sure", "Will do").
+     * "named_responsibility": a person, role or organization was named as responsible.
+     * "unclear": none of the above is clearly stated.
+   - `evidence_turn_ids` — the turn IDs that prove the ownership: the commitment turn, or BOTH the request turn and the acceptance turn.
+   - `owner_confidence` — "high" when the turns state the owner unambiguously, "medium" when it must be inferred from context, "low" when unsure or when a deciding turn is marked "(speaker uncertain)" or "(overlap ...)".
 
 3. DEADLINES:
    - For every action item, actively search the entire transcript window for any explicit due date, timeframe, schedule, milestone, or completion condition related to that task.
@@ -1721,6 +1743,8 @@ EXTRACTION RULES:
 
 4. SCOPE:
    - Extract ALL action items, commitments, and follow-up tasks visible in this window — even implicit ones where a participant clearly agrees to do something.
+   - Only extract actions that are raised in the CURRENT WINDOW. Turns after the "LOOK-AHEAD" marker belong to the next window: use them only to find the acceptance, owner, or deadline of an action raised in the current window — never extract an action that is first raised there.
+   - Never extract actions from the previous transcript window (context only).
    - If no action items exist in this window, return an empty action_items array.
 
 REFERENCE CONTEXT:
@@ -1730,6 +1754,8 @@ previous_context:
 video_context:
 {video_context_section}
 
+{participants_section}
+
 TRANSCRIPT WINDOW:
 {window_text}
 
@@ -1738,10 +1764,13 @@ Return ONLY a JSON object with an action_items array:
 {{
   "action_items": [
     {{
-      "assigner": "Person who assigned/requested the task or null",
-      "assignee": "Person responsible for the task or null",
+      "assigner": "Speaker label of the person who assigned/requested the task, or null",
+      "assignee": "Speaker label (or explicit name/role) of the person responsible, or null",
       "task": "Complete self-contained task description including full context from the transcript",
-      "deadline": "Deadline/timeframe mentioned or null"
+      "deadline": "Deadline/timeframe mentioned or null",
+      "assignee_basis": "self_commitment | direct_assignment | accepted_request | named_responsibility | unclear",
+      "evidence_turn_ids": ["T12", "T13"],
+      "owner_confidence": "high | medium | low"
     }}
   ]
 }}
@@ -1782,9 +1811,22 @@ CORE EXTRACTION RULES:
      * FIRST-PERSON COMMITMENTS: When a speaker says "I will...", "I'll handle...", "Let me...", "I can take this", "I'm going to...", or agrees/volunteers to do something, set `action_owner` to THAT speaker's label/name.
      * DIRECT ASSIGNMENTS & REQUESTS: When participant A assigns or asks participant B to do a task (e.g., "Alice: Bob, please update the ticket"), and Bob acknowledges or the assignment is clear, set `action_owner` to the assigned person ("Bob").
      * NAMED RESPONSIBILITIES: If any named person, specific role/title, or organization is identified as responsible, extract their name into `action_owner`.
-   - Do NOT output vague pronouns ("I", "you", "we", "they", "someone") — resolve them to the actual named speaker from the transcript turn header (e.g. `[12.0-15.0] Vikas: ...` -> `Vikas`).
+   - Do NOT output vague pronouns ("I", "you", "we", "they", "someone") — resolve them to the actual named speaker from the transcript turn header (e.g. `[T12 | 00:12-00:15] Vikas: ...` -> `Vikas`).
+   - The person who ASKS or ASSIGNS a task is never its owner; the owner is the person asked/assigned, or the speaker who says "I will...".
+   - Write owners exactly as their speaker labels appear in the turn headers / MEETING PARTICIPANTS list.
    - If multiple people are responsible for actions in the point, list them comma-separated (e.g., "Alice, Bob").
    - If there is no task or action commitment in this discussion point, set `action_owner` to null.
+   - For every owner, add an entry to `owner_evidence`:
+     * `owner`: the owner (same label as in `action_owner`).
+     * `basis`: "self_commitment" (owner said they will do it), "direct_assignment" (another participant assigned/asked the owner), "accepted_request" (owner accepted a request in a following turn), "named_responsibility" (a person/role was named as responsible), or "unclear".
+     * `turn_ids`: the turn IDs that prove it — the commitment turn, or BOTH the request turn and the acceptance turn.
+   - If there is no action in the point, set `owner_evidence` to [].
+
+3a. TURN IDS
+   - Every transcript line starts with a turn ID, e.g. `[T12 | 03:41-03:52] Speaker 2: ...`.
+   - In `turn_ids`, list the IDs of every turn the discussion point summarises.
+   - In `speakers`, list only the speaker labels of those turns, exactly as written in the turn headers.
+   - Never extract points or actions from the previous transcript window (context only).
 
 4. AVOID DUPLICATION ACROSS POINTS
    - Do NOT repeat the same technical terms, speaker names, dates, numbers, or context across multiple discussion points.
@@ -1806,6 +1848,8 @@ previous_context:
 video_context:
 {video_context_section}
 
+{participants_section}
+
 TRANSCRIPT WINDOW :
 {window_text}
 
@@ -1816,11 +1860,15 @@ Extract discussion points as JSON. Do NOT include a separate action_items list:
     {{
       "discussion_point": "Complete, meaningful capture of who said what and what was discussed — including decisions, questions raised, AND any task/action/commitment with the responsible person woven into the text naturally.",
       "speakers": ["Speaker Name"],
+      "turn_ids": ["T12", "T13", "T14"],
       "technical_terms": ["Exact abbreviations, technical terms, and project names used"],
       "dates": ["Actual calendar dates mentioned (e.g. July 8, 2026)"],
       "numbers": ["Any numbers, measurements, quantities mentioned"],
       "references": ["Any documents, standards, or references mentioned"],
-      "action_owner": "Name of person responsible for completing the action (e.g. Speaker Name), or comma-separated names if multiple, or null if no action"
+      "action_owner": "Name of person responsible for completing the action (e.g. Speaker Name), or comma-separated names if multiple, or null if no action",
+      "owner_evidence": [
+        {{"owner": "Speaker Name", "basis": "accepted_request", "turn_ids": ["T13", "T14"]}}
+      ]
     }}
   ]
 }}
@@ -1858,6 +1906,8 @@ Each discussion point in the provided JSON array contains:
 - `enhanced_text`: The full, detailed discussion text.
 - `action_owner`: Candidate owner if pre-identified (or null).
 - `speakers`: List of attendees who participated in that discussion point.
+- `owner_candidates` (optional): Owners already verified against the meeting transcript for this point.
+- `transcript_excerpt` (optional): The original transcript turns behind this point, one per line as `[T12 | 03:41-03:52] Speaker: text`.
 
 WRITING QUALITY GUIDELINES:
 1. Complete, Self-Contained Task Sentence (Action + Owner + Deadline):
@@ -1879,6 +1929,9 @@ WRITING QUALITY GUIDELINES:
    - STRICT RULE: Do NOT assign or list all speakers involved in the discussion. If people were merely speaking, presenting, participating, or sharing updates, they are NOT action owners.
    - If multiple individuals are explicitly co-assigned to complete the work, list only those specific co-assignees separated by commas (e.g. "Alice, Bob").
    - If no specific action owner was explicitly assigned or volunteered to do the work, set `owner: null`.
+   - When `owner_candidates` is present, the owner MUST be one of those candidates, unless `transcript_excerpt` clearly shows a different person committing to or being assigned the task.
+   - When `transcript_excerpt` is present, use its speaker turns to decide ownership: the speaker who says "I will…" owns that commitment; for a request ("Can you…?"), the owner is the person asked or the speaker who accepts it — never the person asking.
+   - Write owner names exactly as they appear in `owner_candidates` or the transcript turn headers.
 4. Deadlines & Milestones:
    - `deadline`: Specific date, sprint, milestone, or relative timeframe mentioned (e.g. "2026-10-15", "End of Q3", "Next Tuesday", "Sprint 42").
    - If no deadline or timeframe was discussed, set `deadline: null` (never invent dates).
@@ -2192,6 +2245,34 @@ Return exactly this JSON structure:
 
 #endregion
 
+# ===========================================================================
+# PROMPT: ROM_ACTION_OWNER_VERIFY_PROMPT
+# STATUS: CURRENTLY IN USE (only when the rom_action_owner_verification setting is enabled)
+# USED IN: QwenProvider.verify_action_owner(), called from RomService Stage 1 for action owners
+#          whose deterministic validation confidence is not "high"
+# TASK KEY: "rom_action_owner_verify"
+# PURPOSE: Focused closed-set check of who owns one action, given only the turns around its evidence.
+# ===========================================================================
+ROM_ACTION_OWNER_VERIFY_PROMPT = """You are verifying who is responsible for ONE action item from a meeting transcript.
+
+ACTION ITEM:
+{task}
+
+{participants_section}
+
+TRANSCRIPT EXCERPT (each line: [turn ID | time] speaker label: text):
+{transcript}
+
+RULES:
+- The assignee is the person who must do the work: the speaker who says "I will…" / "I'll…" / "let me…", or the person asked or assigned (named in the request, or the speaker who accepts it in a following turn).
+- The assigner is the person who asked for or assigned the work. The assigner is never the assignee of their own request.
+- Answer ONLY with speaker labels from the MEETING PARTICIPANTS list, or "unclear" when the excerpt does not show who is responsible. Do not guess.
+- Turns marked "(speaker uncertain)" or "(overlap ...)" may be attributed to the wrong speaker; rely on names spoken in the text when available.
+
+Return ONLY this JSON:
+{"assignee": "speaker label or unclear", "assigner": "speaker label or null", "basis": "self_commitment | direct_assignment | accepted_request | named_responsibility | unclear", "evidence_turn_ids": ["T12"]}
+"""
+
 # ROM_ENHANCE_ACTION_POINTS_PROMPT — UNUSED / kept for reference only
 # (Separate action-point enhancement pass is handled in _enhance_action_points_separately)
 # ===========================================================================
@@ -2415,9 +2496,7 @@ Use:
 
 8. ONE POINT = ONE ASSIGNMENT
 - Each discussion point must receive exactly one assignment.
-- The assignment must contain either:
-  - one valid agenda_id, or
-  - null when there is insufficient evidence.
+- The assignment must contain one valid agenda_id. When the evidence is weak, choose the closest agenda and set "confidence": "low" (never null).
 - Do not merge discussion points.
 - Do not split discussion points.
 - Do not combine multiple discussion points.
@@ -2432,6 +2511,8 @@ AGENDA REFERENCE:
 
 {timeline_guidance}
 
+{similarity_guidance}
+
 DISCUSSION POINTS:
 
 {batch_json}
@@ -2445,7 +2526,7 @@ For every discussion point, verify:
 3. The assignment is not based only on chronological position.
 4. The assignment is not based only on broad semantic similarity.
 5. The selected agenda is the one most specifically supported by the available evidence.
-6. If sufficient evidence does not exist, assigned_agenda_id is null and confidence is low.
+6. If sufficient evidence does not exist, the closest agenda is still assigned and confidence is low.
 7. The discussion point itself has not been changed, merged, or split.
 
 Return ONLY a JSON object. One entry per discussion point, in the same order as the batch:
@@ -2497,6 +2578,129 @@ Return ONLY a JSON object:
   ]
 }
 ```"""
+#endregion
+
+
+
+# ===========================================================================
+# PROMPT: ROM_POINT_CLASSIFICATION_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: QwenProvider.classify_discussion_points() <- services/agenda_analysis.py (Stage 3 Create Agenda)
+# TASK KEY: "rom_point_classification"
+# PURPOSE: Classifies Stage 2 discussion points as decision / action item / question / risk / discussion.
+# ===========================================================================
+#region ROM_POINT_CLASSIFICATION_PROMPT
+ROM_POINT_CLASSIFICATION_PROMPT = """You are an expert meeting analyst. Classify each discussion point by what it records.
+
+TYPES
+- "decision": something was decided, agreed, approved, rejected or finalised.
+- "action_item": someone committed to, was assigned, or was asked to do a specific task.
+- "question": an open question or unresolved issue raised without a final answer.
+- "risk": a risk, concern, blocker, dependency, delay or problem that could affect outcomes.
+- "discussion": general discussion, status updates, explanations or information sharing.
+
+RULES
+- "primary_type" is the single most important type of the point.
+- "types" lists every type that applies, including the primary type.
+- "evidence" is the shortest phrase copied exactly from the point text that justifies the primary type.
+- Classify only from the point text. Do not infer a type from who spoke.
+- Return exactly one entry per point, using the given ids.
+
+DISCUSSION POINTS:
+{points_json}
+
+Return ONLY a JSON object:
+{"classifications": [{"point_id": "id", "primary_type": "decision|action_item|question|risk|discussion", "types": ["decision"], "evidence": "exact phrase"}]}"""
+#endregion
+
+
+
+# ===========================================================================
+# PROMPT: ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: QwenProvider.synthesize_agenda_topics() <- services/agenda_analysis.py (Stage 3 Create Agenda)
+# TASK KEY: "rom_agenda_topic_synthesis"
+# PURPOSE: Writes one titled, evidenced agenda topic per group of semantically related discussion points.
+# ===========================================================================
+#region ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT
+ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT = """You are an expert meeting analyst building the agenda of a meeting from what was actually discussed.
+
+The discussion points below were grouped by meaning into clusters, in chronological order. Each point has "id", "text", "type" (decision / action_item / question / risk / discussion), and when known "speakers" and "time".
+
+CLUSTERS:
+{clusters_json}
+
+For EACH cluster write one agenda topic:
+- "cluster_id": the cluster id given.
+- "title": a concise, specific title of 3 to 10 words naming the actual subject. Never use generic labels such as "General Discussion", "Updates" or "Miscellaneous".
+- "description": 2 to 4 sentences on what was discussed, the outcome, and why it matters.
+- "supporting_context": the key facts from the points (figures, dates, systems, documents, names) as one short paragraph.
+- "decisions", "action_items", "open_questions", "risks": lists of {"text": "...", "point_ids": ["..."]} taken only from this cluster's points, each citing the ids of the points it comes from. Use an empty list when there are none. Put each statement under the type it really is.
+- "keywords", "related_concepts", "alternative_terminology", "expected_themes": short lists of terms describing the topic; they are used to match discussion points to the agenda.
+- "point_ids": the ids of the points that belong to this topic. Normally every point of the cluster; leave a point out only if it clearly belongs to a different subject.
+
+RULES
+- Use ONLY facts stated in the points. Copy dates, numbers, amounts, acronyms and names exactly. Never invent, estimate or generalise them.
+- Keep chronology: describe developments and outcomes in the order they happened.
+- Do not repeat the same statement in several lists.
+- If two clusters clearly cover the same subject, give them the same title so they can be merged.
+
+Return ONLY a JSON object:
+{"topics": [{"cluster_id": "C1", "title": "...", "description": "...", "supporting_context": "...", "decisions": [], "action_items": [], "open_questions": [], "risks": [], "keywords": [], "related_concepts": [], "alternative_terminology": [], "expected_themes": [], "point_ids": []}]}"""
+#endregion
+
+
+
+# ===========================================================================
+# PROMPT: ROM_AGENDA_ACTION_POINTS_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: QwenProvider.generate_agenda_action_points() <- services/agenda_action_points.py (Final ROM)
+# TASK KEY: "rom_agenda_action_points"
+# PURPOSE: Generates the action points of ONE Final ROM agenda from all of its discussion points.
+# ===========================================================================
+#region ROM_AGENDA_ACTION_POINTS_PROMPT
+ROM_AGENDA_ACTION_POINTS_PROMPT = """You are an expert meeting analyst preparing the Action Points of ONE agenda item for a Record of Meeting.
+
+AGENDA ITEM:
+{agenda_json}
+
+DISCUSSION POINTS UNDER THIS AGENDA (complete text, chronological):
+{points_json}
+
+Each discussion point has "id" and "text" (the complete discussion), and when known: "point_type" (decision / action_item / question / risk / discussion), "speakers", "action_owner" and "owner_candidates" (owners already validated against the transcript), "dates", "numbers", "technical_terms", "references", "time", and "candidate_actions" (tasks extracted earlier from the transcript; hints only, they may be incomplete, vague or duplicated).
+
+TASK
+Analyse ALL the discussion points of this agenda together and list the action points the meeting actually produced.
+
+1. WHAT IS AN ACTION POINT
+- Work that remains to be done AFTER the meeting: a concrete next step that someone agreed to do, was assigned, volunteered for, or was explicitly asked to do, or follow-up work that a recorded decision requires (for example: provide the requested figures, revise and resubmit a document, implement an approved change).
+- It must be stated in, or clearly required by, the discussion text. Do not create tasks from background information, status updates, opinions or general concerns.
+- When one commitment is spread over several discussion points, write ONE complete action point and cite every point it comes from.
+
+2. EXCLUDE
+- Anything already completed during the meeting: motions moved, votes taken, approvals or recommendations given, amendments adopted, presentations or briefings delivered. These are decisions or discussion, not action points.
+- Vague items such as "follow up", "look into it", "discuss further", "keep monitoring" without a specific object and outcome.
+- Low-value items: courtesies, scheduling chatter, remarks with no deliverable.
+- Repeats: the same task worded differently. Keep the single most complete version.
+- Anything not supported by the discussion points.
+
+3. WRITING THE TASK
+- One clear, specific sentence that starts with a verb and states what must be done, on what, and to what result.
+- Preserve EXACTLY as written in the discussion: dates, numbers, amounts, units, percentages, acronyms, codes, system and document names, and the decisions involved.
+- Never introduce a number, date, acronym, name or deadline that does not appear in the discussion points.
+
+4. OWNER AND DEADLINE
+- "owner": the person responsible, only if the discussion names them (prefer "owner_candidates" and "action_owner"). Otherwise exactly "Not specified". Never use someone only because they spoke. Never use vague owners such as "team", "we" or "everyone".
+- "deadline": only if the discussion states a date or timeframe for this task, copied as written. Otherwise exactly "Not specified". Never use meeting timestamps.
+
+5. PRIORITY
+- "high": blocking, decision-driven, time-bound or explicitly urgent.
+- "medium": a clear deliverable without urgency.
+- "low": minor or optional.
+
+Return ONLY a JSON object:
+{"action_points": [{"task": "...", "owner": "Name or Not specified", "deadline": "as stated or Not specified", "source_point_ids": ["id"], "evidence": "short exact quote from the discussion that supports the task", "priority": "high|medium|low", "basis": "decision|commitment|assignment|request"}]}
+If the discussion contains no genuine action point, return {"action_points": []}."""
 #endregion
 
 
@@ -2706,6 +2910,7 @@ RULES:
 - Each output point must be a complete, standalone sentence.
 - Write in formal, professional language.
 - Provide a clear explanation of what you changed and why.
+- Do NOT output any thinking process, reasoning blocks, or <think>...</think> tags. Directly output only the JSON object.
 
 Return your response as a valid JSON object with this exact structure (no markdown, no code fences):
 {{
@@ -2714,6 +2919,36 @@ Return your response as a valid JSON object with this exact structure (no markdo
     ...
   ],
   "explanation": "A clear, concise explanation of all changes made and the reasoning behind them."
+}}"""
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_CONCLUDE_POINTS_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: RomService.conclude_points() (services/rom_service.py)
+# TASK KEY: "rom_conclude_points"
+# ===========================================================================
+#region ROM_CONCLUDE_POINTS_PROMPT
+ROM_CONCLUDE_POINTS_PROMPT = """You are an expert meeting records editor.
+Synthesize and summarize the following selected discussion points from a meeting into ONE clear, unified executive summary of strictly 1 to 3 sentences.
+
+AGENDA CONTEXT: {agenda_context}
+
+SELECTED DISCUSSION POINTS TO SUMMARIZE:
+{selected_points}
+
+REQUIREMENTS:
+1. SUMMARIZE, DO NOT CONCATENATE: You MUST synthesize and summarize the selected points into ONE single, cohesive 1 to 3 sentence summary. Do NOT simply append, paste, or list the points sequentially.
+2. The summary MUST strictly be 1 to 3 sentences long.
+3. Preserve all critical information, decisions, key facts, metrics/numbers, dates, and references in the synthesized summary without repetitive phrasing.
+4. Synthesize the core message smoothly into a professional, high-density executive conclusion.
+5. Write in formal, third-person executive meeting minutes style.
+6. Do NOT output any thinking process, reasoning blocks, or <think>...</think> tags. Directly output only the JSON object.
+7. Return ONLY a valid JSON object with no markdown fences, matching this structure:
+{{
+  "conclusion": "The clear 1 to 3 sentence synthesized summary.",
+  "explanation": "Brief explanation of how the points were synthesized into the summary."
 }}"""
 #endregion
 
@@ -2922,6 +3157,11 @@ INPUT ACTION ITEMS:
 # Shared utilities
 # ══════════════════════════════════════════════════════════════
 
+def is_prompt_configured(key: str) -> bool:
+    """True when the active (custom or default) template for ``key`` is non-empty."""
+    return bool(_get_prompt(key).strip())
+
+
 def _get_prompt(key: str) -> str:
     """
     Return the active AI prompt template for the given key.
@@ -2957,11 +3197,15 @@ def _get_prompt(key: str) -> str:
         "rom_enhance_window": ROM_ENHANCE_WINDOW_PROMPT,
         "rom_enhance_all_together": ROM_ENHANCE_ALL_TOGETHER_PROMPT,
         "rom_enhance_action_points": ROM_ENHANCE_ACTION_POINTS_PROMPT,
+        "rom_action_owner_verify": ROM_ACTION_OWNER_VERIFY_PROMPT,
         "rom_deduplicate": ROM_DEDUPLICATION_PROMPT,
         "rom_agenda": ROM_AGENDA_GENERATION_PROMPT,
         "rom_mom_expansion": ROM_MOM_EXPANSION_PROMPT,
         "rom_agenda_assign_batch": ROM_AGENDA_ASSIGN_BATCH_PROMPT,
         "rom_agenda_doc_points": ROM_AGENDA_DOC_POINTS_PROMPT,
+        "rom_point_classification": ROM_POINT_CLASSIFICATION_PROMPT,
+        "rom_agenda_topic_synthesis": ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT,
+        "rom_agenda_action_points": ROM_AGENDA_ACTION_POINTS_PROMPT,
         "raw_mom_extraction": "",
         "agenda_compress": AGENDA_COMPRESS_PROMPT,
         "agenda_compress_with_context": AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
@@ -2985,6 +3229,7 @@ def _get_prompt(key: str) -> str:
         "rom_version_short":       ROM_VERSION_SHORT_PROMPT,
         "rom_version_medium":      ROM_VERSION_MEDIUM_PROMPT,
         "rom_ai_edit_points":      ROM_AI_EDIT_POINTS_PROMPT,
+        "rom_conclude_points":     ROM_CONCLUDE_POINTS_PROMPT,
         "rom_ai_chat":             ROM_AI_CHAT_PROMPT,
     }
     return _CONSTANT_MAP.get(key, "")
@@ -3454,6 +3699,7 @@ class QwenProvider(AIProvider):
             "rom_windows_per_batch": 5,
             "rom_parallel_window_processing": 2,
             "rom_separate_action_extraction": False,
+            "rom_action_owner_verification": False,
             "rom_action_generation_chunk_size": 10,
             "rom_min_similarity_threshold": 0.80,
             "whisper_batch_size": 8,
@@ -3473,6 +3719,9 @@ class QwenProvider(AIProvider):
             "max_tokens_rom_mom_expansion": 3000,
             "max_tokens_rom_agenda_assign_batch": 4096,
             "max_tokens_rom_agenda_doc_points": 1024,
+            "max_tokens_rom_point_classification": 2048,
+            "max_tokens_rom_agenda_topic_synthesis": 4096,
+            "max_tokens_rom_agenda_action_points": 4096,
             "max_tokens_raw_mom_to_mom": 3000,
             "max_tokens_raw_mom_extraction": 1024,
             "max_tokens_raw_mom_repair": 1024,
@@ -3498,8 +3747,13 @@ class QwenProvider(AIProvider):
                 try:
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM user_settings ORDER BY id DESC LIMIT 1")
+                    cursor.execute(
+                        "SELECT * FROM user_settings WHERE user_id NOT LIKE 'test_%' ORDER BY updated_at DESC LIMIT 1"
+                    )
                     row = cursor.fetchone()
+                    if not row:
+                        cursor.execute("SELECT * FROM user_settings ORDER BY updated_at DESC LIMIT 1")
+                        row = cursor.fetchone()
                 finally:
                     conn.close()
 
@@ -3518,10 +3772,19 @@ class QwenProvider(AIProvider):
                 logger.debug(f"[QwenAI] Failed to read settings from SQLite DB: {db_err}")
 
         # Normalize server_url
+        import urllib.parse
+        import re
         server_url = cfg["ollama_server_url"]
         if not server_url.startswith("http://") and not server_url.startswith("https://"):
             server_url = f"http://{server_url}"
-        cfg["ollama_server_url"] = server_url.rstrip("/")
+        server_url = server_url.rstrip("/")
+        try:
+            parsed = urllib.parse.urlparse(server_url)
+            if not parsed.port and (parsed.hostname in ("localhost", "127.0.0.1") or (parsed.hostname and re.match(r"^\d+\.\d+\.\d+\.\d+$", parsed.hostname))):
+                server_url = f"{server_url}:11434"
+        except Exception:
+            pass
+        cfg["ollama_server_url"] = server_url
 
         return cfg
 
@@ -3545,7 +3808,7 @@ class QwenProvider(AIProvider):
         def get_url_json(url):
             try:
                 req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
                     if resp.status == 200:
                         return json.loads(resp.read().decode('utf-8'))
             except Exception:
@@ -3583,6 +3846,12 @@ class QwenProvider(AIProvider):
             if match:
                 logger.info(f"[QwenAI] Detected installed Ollama model: {match} at {base_url}")
                 return match
+            # Fallback: pick first available non-embedding installed model
+            for m in tags_data["models"]:
+                m_name = m.get("name")
+                if m_name and "embed" not in m_name.lower():
+                    logger.info(f"[QwenAI] No priority match in '{priority_list_str}', falling back to installed model: {m_name} at {base_url}")
+                    return m_name
 
         return None
 
@@ -4640,6 +4909,40 @@ class QwenProvider(AIProvider):
         )
         return None
 
+    @staticmethod
+    def _stage1_previous_context(previous_points_json: Optional[str], previous_transcript: Optional[str]) -> str:
+        parts = []
+        if previous_transcript and previous_transcript.strip():
+            parts.append(
+                "PREVIOUS TRANSCRIPT WINDOW (context only — do NOT extract discussion points or action items from it):\n"
+                f"{previous_transcript.strip()}"
+            )
+        if previous_points_json:
+            parts.append(f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _build_stage1_prompt(
+        prompt_key: str,
+        window_text: str,
+        previous_context: str,
+        video_context_section: str,
+        participants: str = "",
+    ) -> str:
+        """Fill a Stage 1 template. Custom templates without {participants_section}
+        still receive the participant roster, placed right before the transcript."""
+        template = _get_prompt(prompt_key)
+        if "{participants_section}" in template:
+            template = template.replace("{participants_section}", participants or "")
+        elif participants:
+            template = template.replace("{window_text}", f"{participants}\n\n{{window_text}}", 1)
+        return (
+            template
+            .replace("{previous_context}", previous_context)
+            .replace("{video_context_section}", video_context_section)
+            .replace("{window_text}", window_text)
+        )
+
     def extract_rom_discussion_points(
         self,
         window_text: str,
@@ -4647,6 +4950,8 @@ class QwenProvider(AIProvider):
         video_context: str = "",
         skip_action_items: bool = False,
         separate_action_extraction: bool = False,
+        previous_transcript: Optional[str] = None,
+        participants: str = "",
     ) -> Dict:
         """Stage 1: Extract discussion points from a transcript window.
 
@@ -4667,9 +4972,7 @@ class QwenProvider(AIProvider):
             prompt_key = "rom_discussion_embedded"
         orig_max_tokens = cfg.get(f"max_tokens_{prompt_key}") or cfg.get("max_tokens_rom_discussion") or 4096
 
-        prev_context = ""
-        if previous_points_json:
-            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}"
+        prev_context = self._stage1_previous_context(previous_points_json, previous_transcript)
 
         if video_context and video_context.strip():
             video_context_section = (
@@ -4696,12 +4999,7 @@ class QwenProvider(AIProvider):
             video_context_section = ""
 
         # Select prompt: use the no-actions variant when separate action extraction is active
-        prompt = (
-            _get_prompt(prompt_key)
-            .replace("{previous_context}", prev_context)
-            .replace("{video_context_section}", video_context_section)
-            .replace("{window_text}", window_text)
-        )
+        prompt = self._build_stage1_prompt(prompt_key, window_text, prev_context, video_context_section, participants)
         raw = self._infer(prompt, max_new_tokens=orig_max_tokens, task_key=prompt_key)
 
         if not raw or not raw.strip():
@@ -4740,6 +5038,8 @@ class QwenProvider(AIProvider):
         window_text: str,
         previous_points_json: Optional[str] = None,
         video_context: str = "",
+        previous_transcript: Optional[str] = None,
+        participants: str = "",
     ) -> Dict:
         """Stage 1 (separate action extraction): Extract action items only from a transcript window.
 
@@ -4757,9 +5057,7 @@ class QwenProvider(AIProvider):
         cfg = self._get_active_settings()
         orig_max_tokens = cfg.get("max_tokens_rom_action_extraction") or 2048
 
-        prev_context = ""
-        if previous_points_json:
-            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}"
+        prev_context = self._stage1_previous_context(previous_points_json, previous_transcript)
 
         if video_context and video_context.strip():
             video_context_section = (
@@ -4769,11 +5067,8 @@ class QwenProvider(AIProvider):
         else:
             video_context_section = ""
 
-        prompt = (
-            _get_prompt("rom_action_extraction")
-            .replace("{previous_context}", prev_context)
-            .replace("{video_context_section}", video_context_section)
-            .replace("{window_text}", window_text)
+        prompt = self._build_stage1_prompt(
+            "rom_action_extraction", window_text, prev_context, video_context_section, participants
         )
         raw = self._infer(prompt, max_new_tokens=orig_max_tokens, task_key="rom_action_extraction")
 
@@ -4807,6 +5102,22 @@ class QwenProvider(AIProvider):
             f"--- START FINAL RAW LLM RESPONSE ({len(raw)} chars) ---\n{raw}\n--- END FINAL RAW LLM RESPONSE ---"
         )
         return {"action_items": [], "parse_error": True, "error_reason": "Output was not a JSON object"}
+
+    def verify_action_owner(self, task: str, transcript: str, participants: str = "") -> Dict:
+        """Focused closed-set check of one action's owner (rom_action_owner_verification setting).
+
+        Returns {"assignee", "assigner", "basis", "evidence_turn_ids"} or {} when the
+        response cannot be parsed. The caller validates the answer against the turns.
+        """
+        template = _get_prompt("rom_action_owner_verify")
+        if "{participants_section}" in template:
+            template = template.replace("{participants_section}", participants or "")
+        prompt = template.replace("{task}", task or "").replace("{transcript}", transcript or "")
+        raw = self._infer(prompt, max_new_tokens=256, task_key="rom_action_owner_verify", think=False)
+        if not raw or not raw.strip():
+            return {}
+        data = self._parse_json_dict(raw) or self.try_deterministic_json_truncation_recovery(raw)
+        return data if isinstance(data, dict) else {}
 
     def regenerate_mom_action_points(self, window_text: str) -> Dict:
         """Extract action items from a transcript window for MoM Action Point regeneration.
@@ -5147,8 +5458,15 @@ class QwenProvider(AIProvider):
         polished_points: List[Dict],
         chunk_size: Optional[int] = None,
         reasoning_mode: Optional[bool] = None,
+        participants: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Extract action items from enhanced Stage 2 discussion points in chunks.
+
+        Each point is sent with its transcript-validated ``owner_candidates`` and,
+        when available, the ``transcript_excerpt`` of the turns behind it. Every
+        returned owner is then checked deterministically: it must be one of the
+        point's candidates or be supported by the excerpt, otherwise it is dropped
+        (owner=None, owner_confidence="low").
 
         - Disabled: Keep current pipeline unchanged — one normal LLM call (without thinking mode).
         - Enabled: Use 2 LLM calls:
@@ -5166,6 +5484,8 @@ class QwenProvider(AIProvider):
             Returns empty list on parse failure (non-fatal).
         """
         import ast as _ast
+        from services.action_owner_validator import split_owner_names, verify_owner_against_candidates, min_confidence
+        from services.rom_transcript_format import build_roster
 
         if not polished_points:
             return []
@@ -5204,15 +5524,27 @@ class QwenProvider(AIProvider):
             if isinstance(raw_speakers, str):
                 raw_speakers = [s.strip() for s in raw_speakers.split(",") if s.strip()]
 
-            points_input.append({
+            entry = {
                 "id": p.get("id", ""),
                 "enhanced_text": pt_text,
                 "action_owner": str(raw_ao).strip() if raw_ao else None,
                 "speakers": raw_speakers,
-            })
+            }
+            candidates = split_owner_names(raw_ao)
+            if candidates:
+                entry["owner_candidates"] = candidates
+            excerpt = (p.get("owner_transcript_excerpt") or "").strip()
+            if excerpt:
+                entry["transcript_excerpt"] = excerpt
+            points_input.append(entry)
 
         if not points_input:
             return []
+
+        if participants is None:
+            participants = list(dict.fromkeys(spk for e in points_input for spk in e["speakers"] if spk))
+        roster = build_roster([{"speaker_label": name} for name in participants])
+        input_by_id = {e["id"]: e for e in points_input if e["id"]}
 
         all_action_items: List[Dict] = []
         total_points = len(points_input)
@@ -5290,19 +5622,30 @@ class QwenProvider(AIProvider):
             else:
                 logger.info(f"[QwenAI] Action extraction {chunk_info} parse completed with 0 action items.")
 
-        # Build lookup: only keep LLM returned owner, or fallback to src_point["action_owner"]. All other fallbacks removed.
+        # Owner: the LLM's owner if the point's validated candidates or transcript excerpt
+        # support it; otherwise the source point's validated action_owner when the LLM
+        # gave none. Speakers who merely took part are never used as owners.
         point_by_id = {p.get("id"): p for p in polished_points if p.get("id")}
         for act in all_action_items:
             src_id = act.get("source_point_id") or act.get("id")
             src_point = point_by_id.get(src_id) if src_id else None
+            src_input = input_by_id.get(src_id, {}) if src_id else {}
+            candidates = src_input.get("owner_candidates") or []
             curr_owner = act.get("owner") or act.get("assignee") or act.get("action_owner")
             if not curr_owner or str(curr_owner).strip().lower() in ("none", "n/a", "null", "unassigned", "unknown", ""):
                 if src_point and src_point.get("action_owner") and str(src_point.get("action_owner")).strip().lower() not in ("none", "n/a", "null", "unassigned", "unknown", ""):
                     act["owner"] = str(src_point["action_owner"]).strip()
+                    if src_point.get("owner_confidence"):
+                        act["owner_confidence"] = src_point["owner_confidence"]
                 else:
                     act["owner"] = None
             else:
-                act["owner"] = str(curr_owner).strip()
+                owner, confidence = verify_owner_against_candidates(
+                    curr_owner, candidates, src_input.get("transcript_excerpt", ""), roster
+                )
+                act["owner"] = owner
+                if confidence:
+                    act["owner_confidence"] = min_confidence([confidence, (src_point or {}).get("owner_confidence")])
 
             outcome = act.get("expected_outcome") or act.get("goal") or act.get("outcome")
             if outcome and str(outcome).strip().lower() not in ("none", "n/a", "null", ""):
@@ -5358,6 +5701,8 @@ class QwenProvider(AIProvider):
         user_feedback: str = "",
         previous_points_json: Optional[str] = None,
         video_context: str = "",
+        previous_transcript: Optional[str] = None,
+        participants: str = "",
     ) -> Dict:
         """
         Stage 1 Re-run Window: Re-extract discussion points from a single transcript window
@@ -5382,9 +5727,7 @@ class QwenProvider(AIProvider):
                 "=======================================================\n\n"
             )
 
-        prev_context = ""
-        if previous_points_json:
-            prev_context = f"PREVIOUS DISCUSSION POINTS (for continuity context):\n{previous_points_json}"
+        prev_context = self._stage1_previous_context(previous_points_json, previous_transcript)
 
         video_context_section = ""
         if video_context and video_context.strip():
@@ -5393,12 +5736,7 @@ class QwenProvider(AIProvider):
                 f"{video_context.strip()}\n"
             )
 
-        base_prompt = (
-            _get_prompt(prompt_key)
-            .replace("{previous_context}", prev_context)
-            .replace("{video_context_section}", video_context_section)
-            .replace("{window_text}", window_text)
-        )
+        base_prompt = self._build_stage1_prompt(prompt_key, window_text, prev_context, video_context_section, participants)
 
         prompt = feedback_block + base_prompt
         raw = self._infer(prompt, max_new_tokens=orig_max_tokens, task_key=prompt_key)
@@ -5849,18 +6187,27 @@ class QwenProvider(AIProvider):
         agenda_reference_json: str,
         discussion_order_text: Optional[str] = None,
         timeline_guidance_text: Optional[str] = None,
+        similarity_guidance_text: Optional[str] = None,
     ) -> Dict:
         """Phase 4: Batch agenda assignment - LLM assigns each point to one of its candidate agendas.
         Returns assignments list with point_id, assigned_agenda_id, confidence, reason.
         """
         order_sec = f"\nEXPECTED AGENDA DISCUSSION ORDER (guidance only):\n{discussion_order_text}\n" if discussion_order_text else ""
         timeline_sec = f"\nAPPROXIMATE AGENDA TIMELINE (low-priority contextual guidance only):\n{timeline_guidance_text}\n" if timeline_guidance_text else ""
+        similarity_sec = f"\n{similarity_guidance_text}\n" if similarity_guidance_text else ""
 
+        template = _get_prompt("rom_agenda_assign_batch")
+        if "{similarity_guidance}" not in template:
+            # Customized prompts saved before this placeholder existed: keep the guidance
+            # next to the timeline section so the per-point similarity_reference is explained.
+            timeline_sec += similarity_sec
+            similarity_sec = ""
         prompt = (
-            _get_prompt("rom_agenda_assign_batch")
+            template
             .replace("{agenda_reference}", agenda_reference_json)
             .replace("{discussion_order_guidance}", order_sec)
             .replace("{timeline_guidance}", timeline_sec)
+            .replace("{similarity_guidance}", similarity_sec)
             .replace("{batch_json}", batch_json)
         )
         raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_agenda_assign_batch")
@@ -5886,6 +6233,123 @@ class QwenProvider(AIProvider):
                 return {"assignments": []}
 
         return data if isinstance(data, dict) else {"assignments": []}
+
+    def _fill_json_prompt(self, key: str, replacements: Dict[str, str], labels: Dict[str, str]) -> str:
+        """Fill a prompt template; inputs whose placeholder a customized template lacks are appended."""
+        template = _get_prompt(key)
+        prompt = template
+        missing = []
+        for placeholder, value in replacements.items():
+            if placeholder in template:
+                prompt = prompt.replace(placeholder, value)
+            else:
+                missing.append(f"{labels[placeholder]}:\n{value}")
+        if missing:
+            prompt = prompt.rstrip() + "\n\n" + "\n\n".join(missing)
+        return prompt
+
+    def classify_discussion_points(self, points_json: str) -> Optional[Dict]:
+        """Stage 3 discussion analysis: classify points (decision / action item / question / risk / discussion).
+        Returns {"classifications": [...]} or None when the response cannot be parsed."""
+        prompt = self._fill_json_prompt(
+            "rom_point_classification", {"{points_json}": points_json}, {"{points_json}": "DISCUSSION POINTS"},
+        )
+        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_point_classification", think=False)
+        data = self._parse_json_dict(raw) if raw else None
+        if not isinstance(data, dict):
+            logger.warning(f"[ROM S3-Analysis] Point classification returned no parsable JSON: {str(raw or '')[:400]!r}")
+            return None
+        return data
+
+    def synthesize_agenda_topics(self, clusters_json: str) -> Optional[Dict]:
+        """Stage 3 discussion analysis: one titled, evidenced topic per cluster of related points.
+        Returns {"topics": [...]} or None when the response cannot be parsed."""
+        prompt = self._fill_json_prompt(
+            "rom_agenda_topic_synthesis", {"{clusters_json}": clusters_json}, {"{clusters_json}": "CLUSTERS"},
+        )
+        raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_agenda_topic_synthesis", think=False)
+        data = self._parse_json_dict(raw) if raw else None
+        if not isinstance(data, dict):
+            logger.warning(f"[ROM S3-Analysis] Topic synthesis returned no parsable JSON: {str(raw or '')[:400]!r}")
+            return None
+        return data
+
+    def generate_agenda_action_points(self, agenda_json: str, points_json: str, reasoning_mode: Optional[bool] = None) -> Optional[Dict]:
+        """Final ROM: action points of ONE agenda from all of its discussion points.
+
+        With reasoning mode the model first analyses the points (max 2000 tokens), then
+        writes the JSON with that analysis in a REASONING BLOCK (same pattern as
+        extract_actions_from_enhanced_points). Returns {"action_points": [...]} or None
+        when the response cannot be parsed.
+        """
+        cfg = self._get_active_settings()
+        use_reasoning = bool(reasoning_mode) if reasoning_mode is not None else bool(cfg.get("reasoning_mode_action_points", False))
+        prompt = self._fill_json_prompt(
+            "rom_agenda_action_points",
+            {"{agenda_json}": agenda_json, "{points_json}": points_json},
+            {"{agenda_json}": "AGENDA ITEM", "{points_json}": "DISCUSSION POINTS"},
+        )
+        if use_reasoning:
+            reasoning_prompt = (
+                "You are an expert executive meeting analyst.\n\n"
+                "Analyse the discussion points of this agenda item to determine which genuine action points the meeting produced.\n\n"
+                f"AGENDA ITEM:\n{agenda_json}\n\nDISCUSSION POINTS:\n{points_json}\n\n"
+                "REASONING INSTRUCTIONS:\n"
+                "1. For each point, decide whether it records a commitment, assignment, request or decision that requires follow-up work "
+                "after the meeting, or only information, opinion, status, or something already completed in the meeting "
+                "(motions moved, votes taken, approvals given, briefings delivered).\n"
+                "2. Find commitments that are spread over several points and should become one action point.\n"
+                "3. For each genuine action, identify the owner only if the discussion names one, and the deadline only if it is stated.\n"
+                "4. List the exact dates, numbers and acronyms that each action must keep.\n"
+                "5. Note which candidate tasks are vague, minor or repeated and should be excluded.\n\n"
+                "CRITICAL CONSTRAINT: Provide your analysis ONLY. Do NOT write the final JSON."
+            )
+            reasoning_text = strip_thinking(
+                self._infer(reasoning_prompt, max_new_tokens=2000, task_key="rom_agenda_action_points_reasoning")
+            ).strip()
+            prompt = (
+                f"{prompt}\n\n"
+                f"==================================================\n"
+                f"REASONING BLOCK:\n{reasoning_text}\n"
+                f"==================================================\n\n"
+                f"CRITICAL INSTRUCTIONS:\n"
+                f"- Use the REASONING BLOCK above to write the final action points.\n"
+                f"- Do NOT repeat the reasoning or add comments.\n"
+                f"- Return ONLY the JSON object with the 'action_points' key as specified above.\n"
+            )
+        raw = self._infer(prompt, max_new_tokens=4096, task_key="rom_agenda_action_points", think=False)
+        text = re.sub(r'<think>.*?</think>', '', str(raw or ''), flags=re.DOTALL)
+        first_array, first_object = text.find('['), text.find('{')
+        if first_array != -1 and (first_object == -1 or first_array < first_object):
+            # A bare array: parsing it as an object would keep only its first item.
+            items = self._parse_json_list(text)
+            if items is not None:
+                return {"action_points": items}
+        data = self._parse_json_dict(raw) if raw else None
+        if not isinstance(data, dict):
+            logger.warning(
+                f"[ROM Final] Agenda action point generation returned no parsable JSON: {str(raw or '')[:400]!r}"
+            )
+            return None
+        items = data.get("action_points")
+        if items is None:
+            items = data.get("action_items")
+        return {"action_points": items if isinstance(items, list) else []}
+
+    @staticmethod
+    def _parse_json_list(raw: str) -> Optional[List[Dict]]:
+        """A bare JSON array of objects (models sometimes drop the wrapping object)."""
+        text = re.sub(r'<think>.*?</think>', '', str(raw or ''), flags=re.DOTALL)
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if not match:
+            return None
+        try:
+            items = json.loads(match.group(), strict=False)
+        except Exception:
+            return None
+        if isinstance(items, list) and all(isinstance(i, dict) for i in items):
+            return items
+        return None
 
     def generate_agenda_document_points(self, agenda_title: str, agenda_description: str, document_text: str) -> Dict:
         """Extract 2-5 factual agenda-specific points from a supporting document uploaded for an agenda item.
@@ -6355,9 +6819,9 @@ class QwenProvider(AIProvider):
                 logger.error(f"[QwenAI] Single-pass MoM generation failed: {e}", exc_info=True)
                 return _empty_mom(recording_meta)
 
-    def query(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.2) -> str:
+    def query(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.2, task_key: Optional[str] = None, think: Optional[bool] = None) -> str:
         """General text generation interface for QwenProvider."""
-        return self._infer(prompt, max_new_tokens=max_tokens)
+        return self._infer(prompt, max_new_tokens=max_tokens, task_key=task_key, think=think)
 
     def merge_discussion_points(self, points_json: Union[str, list]) -> dict:
         """Merge multiple discussion points into a single consolidated point, strictly preserving chronological order."""
@@ -6374,28 +6838,35 @@ class QwenProvider(AIProvider):
             for i, pt in enumerate(points_list, 1):
                 txt = pt.get("polished_text") or pt.get("discussion_point") or pt.get("text") or str(pt) if isinstance(pt, dict) else str(pt)
                 spk = ", ".join(pt.get("speakers", [])) if isinstance(pt, dict) and pt.get("speakers") else ""
-                formatted_points.append(f"[POINT {i} (MUST APPEAR {i}st/nd/rd/th IN OUTPUT)]\nText: {txt}\nSpeakers: {spk}".strip())
+                formatted_points.append(f"[Point {i}]\nText: {txt}\nSpeakers: {spk}".strip())
             points_input_str = "\n\n".join(formatted_points)
         else:
             points_input_str = str(points_json)
 
         prompt = (
-            "You are a meeting minutes editor. You are given multiple discussion points from the same meeting IN CHRONOLOGICAL ORDER.\n"
-            "Combine them into ONE clear, comprehensive discussion point that:\n"
-            "- CRITICAL CHRONOLOGICAL ORDER REQUIREMENT: You MUST preserve the exact sequence of the points. Information from Point 1 MUST come FIRST in the text, followed by information from Point 2, Point 3, etc. DO NOT swap, invert, re-sequence, or put later points before earlier ones.\n"
-            "- Preserves ALL important information, facts, decisions, numbers, dates, and context from every point\n"
-            "- Combines speakers, action items, technical terms, dates, numbers, and references\n"
-            "- Eliminates duplication while retaining unique details in sequence\n"
-            "- Maintains formal third-person meeting minutes style\n\n"
-            "Return a JSON object with these exact fields:\n"
-            '{"polished_text": "...", "speakers": [...], "technical_terms": [...], '
-            '"dates": [...], "numbers": [...], "references": [...], '
-            '"action_items": [{"task": "...", "assignee": "...", "deadline": "..."}]}\n\n'
-            f"Discussion points to merge (in chronological sequence):\n\n{points_input_str}\n\n"
+            "You are an expert meeting records editor. You are given multiple selected discussion points from a meeting.\n"
+            "Synthesize and summarize these selected discussion points into ONE clear, coherent discussion point of strictly 1 to 3 sentences.\n\n"
+            "CRITICAL REQUIREMENTS:\n"
+            "1. SUMMARIZE, DO NOT CONCATENATE: Do NOT simply paste, concatenate, or list the points sequentially. You MUST synthesize the underlying discussion, decisions, numbers, and outcomes into ONE unified, well-written 1 to 3 sentence summary.\n"
+            "2. LENGTH: The summary MUST strictly be 1 to 3 sentences long.\n"
+            "3. PRESERVE CRITICAL FACTS: Accurately incorporate key facts, decisions, numbers, dates, systems, and action items from the selected points into the summary.\n"
+            "4. Eliminate redundancy and write in formal third-person executive meeting minutes style.\n"
+            "5. Combine all relevant speakers, action items, technical terms, dates, numbers, and references into the metadata arrays.\n\n"
+            "Return ONLY a valid JSON object with no markdown fences matching this exact schema:\n"
+            '{\n'
+            '  "polished_text": "One concise 1 to 3 sentence summary synthesizing the selected points.",\n'
+            '  "speakers": [...],\n'
+            '  "technical_terms": [...],\n'
+            '  "dates": [...],\n'
+            '  "numbers": [...],\n'
+            '  "references": [...],\n'
+            '  "action_items": [{"task": "...", "assignee": "...", "deadline": "..."}]\n'
+            '}\n\n'
+            f"Selected discussion points to summarize and merge:\n\n{points_input_str}\n\n"
             "Respond with ONLY the JSON object, no markdown fences."
         )
         try:
-            raw = self._infer(prompt, task_key="rom_merge_points")
+            raw = self._infer(prompt, task_key="rom_merge_points", think=False)
             logger.info(f"[ROM Merge] Raw LLM response:\n{raw}")
 
             # Step 1: Clean think tags and markdown fences from raw text first
@@ -6441,7 +6912,7 @@ class QwenProvider(AIProvider):
                     logger.warning("[ROM Merge] Parsed dict had empty text value. Attempting regex text extraction...")
 
             # Step 4: Fallback field-level regex extraction from clean_raw
-            field_match = re.search(r'"(?:polished_text|text|discussion_point|summary)"\s*:\s*"((?:[^"\\]|\\.)*)"', clean_raw)
+            field_match = re.search(r'"(?:polished_text|text|discussion_point|summary|conclusion)"\s*:\s*"((?:[^"\\]|\\.)*)"', clean_raw)
             if field_match:
                 try:
                     extracted_str = json.loads(f'"{field_match.group(1)}"')
@@ -6452,10 +6923,23 @@ class QwenProvider(AIProvider):
                     logger.info(f"[ROM Merge] Regex field extraction succeeded (len={len(clean_text)})")
                     return {"polished_text": clean_text}
 
-            # Step 5: Final fallback handling — never return raw JSON string as text
-            logger.warning("[ROM Merge] All JSON parsing attempts failed. Applying fallback handling...")
+            # Step 5: Direct synthesis fallback if JSON parsing failed — NEVER concatenate verbatim!
+            logger.warning("[ROM Merge] JSON parsing attempts failed. Attempting direct plain-text summarization fallback...")
+            try:
+                summary_prompt = (
+                    "You are a meeting editor. Synthesize and summarize the following discussion points into ONE clear 1 to 3 sentence executive summary.\n"
+                    "Do NOT concatenate or list points sequentially. Return ONLY the 1 to 3 sentence summary text:\n\n"
+                    f"{points_input_str}"
+                )
+                direct_summary = self._infer(summary_prompt, max_new_tokens=512, think=False)
+                clean_summary = self._extract_clean_text_value(direct_summary)
+                if clean_summary and not clean_summary.startswith('{'):
+                    logger.info(f"[ROM Merge] Direct summarization fallback succeeded (len={len(clean_summary)})")
+                    return {"polished_text": clean_summary}
+            except Exception as se:
+                logger.warning(f"[ROM Merge] Direct summarization fallback failed: {se}")
+
             if clean_raw and not clean_raw.startswith('{') and not clean_raw.endswith('}'):
-                # Only use clean_raw directly if it is clearly plain text, not JSON
                 return {"polished_text": clean_raw}
 
             return {}

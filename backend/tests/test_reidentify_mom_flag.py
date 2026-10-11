@@ -67,21 +67,27 @@ async def test_rereid_pipeline_never_auto_regenerates_mom_on_speaker_change(tmp_
         )
         await db.commit()
 
-    with patch("tasks.rereid_pipeline.diarize", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]), \
-         patch("tasks.rereid_pipeline.identify_speakers", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "speaker_label": "New Speaker 2", "similarity": 0.9}]), \
-         patch("tasks.rereid_pipeline.refine_transcript_speakers_with_ecapa", side_effect=lambda **kwargs: kwargs.get("speaker_segments", [])), \
-         patch("tasks.rereid_pipeline._regenerate_mom", new_callable=AsyncMock) as mock_regen_mom:
+    try:
+        with patch("tasks.rereid_pipeline.diarize", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]), \
+             patch("tasks.rereid_pipeline.identify_speakers", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "speaker_label": "New Speaker 2", "similarity": 0.9}]), \
+             patch("tasks.rereid_pipeline.refine_transcript_speakers_with_ecapa", side_effect=lambda **kwargs: kwargs.get("speaker_segments", [])), \
+             patch("tasks.rereid_pipeline._regenerate_mom", new_callable=AsyncMock) as mock_regen_mom:
 
-        # Default run_reidentify with regenerate_mom=False (default behavior during speaker re-run)
-        await _run_reidentify_impl(
-            recording_id=recording_id,
-            file_path=str(dummy_audio),
-            user_id=user_id,
-            regenerate_mom=False,
-        )
+            # Default run_reidentify with regenerate_mom=False (default behavior during speaker re-run)
+            await _run_reidentify_impl(
+                recording_id=recording_id,
+                file_path=str(dummy_audio),
+                user_id=user_id,
+                regenerate_mom=False,
+            )
 
-        # MoM regeneration must NEVER have been called!
-        mock_regen_mom.assert_not_called()
+            # MoM regeneration must NEVER have been called!
+            mock_regen_mom.assert_not_called()
+    finally:
+        async with get_db_context() as db:
+            await db.execute(text("DELETE FROM user_settings WHERE user_id = :uid"), {"uid": user_id})
+            await db.execute(text("DELETE FROM recordings WHERE id = :rid"), {"rid": recording_id})
+            await db.commit()
 
 
 @pytest.mark.asyncio
@@ -122,17 +128,22 @@ async def test_rereid_pipeline_triggers_mom_only_when_explicitly_requested(tmp_p
         )
         await db.commit()
 
-    with patch("tasks.rereid_pipeline.diarize", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]), \
-         patch("tasks.rereid_pipeline.identify_speakers", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "speaker_label": "New Speaker 2", "similarity": 0.9}]), \
-         patch("tasks.rereid_pipeline.refine_transcript_speakers_with_ecapa", side_effect=lambda **kwargs: kwargs.get("speaker_segments", [])), \
-         patch("tasks.rereid_pipeline.asyncio.create_task") as mock_create_task:
+    try:
+        with patch("tasks.rereid_pipeline.diarize", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]), \
+             patch("tasks.rereid_pipeline.identify_speakers", return_value=[{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "speaker_label": "New Speaker 2", "similarity": 0.9}]), \
+             patch("tasks.rereid_pipeline.refine_transcript_speakers_with_ecapa", side_effect=lambda **kwargs: kwargs.get("speaker_segments", [])), \
+             patch("tasks.rereid_pipeline.asyncio.create_task") as mock_create_task:
 
-        # Run reidentify with explicit regenerate_mom=True
-        await _run_reidentify_impl(
-            recording_id=recording_id,
-            file_path=str(dummy_audio),
-            user_id=user_id,
-            regenerate_mom=True,
-        )
+            # Run reidentify with explicit regenerate_mom=True
+            await _run_reidentify_impl(
+                recording_id=recording_id,
+                file_path=str(dummy_audio),
+                user_id=user_id,
+                regenerate_mom=True,
+            )
 
-        assert mock_create_task.called
+            assert mock_create_task.called
+    finally:
+        async with get_db_context() as db:
+            await db.execute(text("DELETE FROM recordings WHERE id = :rid"), {"rid": recording_id})
+            await db.commit()

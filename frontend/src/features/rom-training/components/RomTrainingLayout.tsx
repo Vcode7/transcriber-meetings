@@ -1,16 +1,18 @@
 import { useState } from 'react';
-import { BookMarked, Database, Brain, History, Sparkles } from 'lucide-react';
+import { BookMarked, Database, Brain, History, Sparkles, FlaskConical } from 'lucide-react';
 import DataCreationTab from './DataCreationTab';
 import DatabaseTab from './DatabaseTab';
 import TrainingTab from './TrainingTab';
+import TestTab from './TestTab';
 import HistoryTab from './HistoryTab';
 
-type ActiveTab = 'data-creation' | 'database' | 'training' | 'history';
+type ActiveTab = 'data-creation' | 'database' | 'training' | 'test' | 'history';
 
 const TABS: { id: ActiveTab; label: string; icon: React.ElementType }[] = [
   { id: 'data-creation', label: 'Data Creation', icon: BookMarked },
   { id: 'database', label: 'Database', icon: Database },
   { id: 'training', label: 'Training', icon: Brain },
+  { id: 'test', label: 'Test Evaluation', icon: FlaskConical },
   { id: 'history', label: 'History', icon: History },
 ];
 
@@ -97,6 +99,7 @@ export default function RomTrainingLayout() {
         {activeTab === 'data-creation' && <DataCreationTab />}
         {activeTab === 'database' && <DatabaseTab />}
         {activeTab === 'training' && <TrainingTab />}
+        {activeTab === 'test' && <TestTab />}
         {activeTab === 'history' && <HistoryTab />}
       </div>
     </div>

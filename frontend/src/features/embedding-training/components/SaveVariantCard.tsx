@@ -162,6 +162,29 @@ export default function SaveVariantCard({
             . The original base model is never overwritten and your raw ADA documents remain in the vector store for retrieval.
           </div>
         </div>
+
+        {/* Post-training verification (variant reloaded through the RAG embedding loader) */}
+        {jobStatus.verification && jobStatus.verification.status === 'ok' && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: '10px',
+            background: jobStatus.verification.differs_from_base ? 'hsl(150 75% 45% / 0.08)' : 'hsl(35 90% 50% / 0.1)',
+            borderRadius: '10px', padding: '0.85rem 1rem',
+            border: `1px solid ${jobStatus.verification.differs_from_base ? 'hsl(150 75% 45% / 0.3)' : 'hsl(35 90% 50% / 0.35)'}`,
+          }}>
+            {jobStatus.verification.differs_from_base
+              ? <CheckCircle2 size={18} style={{ color: 'hsl(150 75% 45%)', flexShrink: 0, marginTop: '2px' }} />
+              : <AlertTriangle size={18} style={{ color: 'hsl(35 90% 50%)', flexShrink: 0, marginTop: '2px' }} />}
+            <div style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))', lineHeight: 1.45 }}>
+              <strong style={{ color: 'hsl(var(--foreground))' }}>Verified:</strong> the trained variant reloads through the RAG embedding
+              loader ({jobStatus.verification.embedding_dim}-d) and shifts embeddings by{' '}
+              <strong style={{ color: 'hsl(var(--foreground))' }}>{jobStatus.verification.embedding_shift}</strong>{' '}
+              (mean cosine to base {jobStatus.verification.mean_cosine_to_base} over {jobStatus.verification.probe_passages} corpus passages).
+              {!jobStatus.verification.differs_from_base && ' The variant is nearly identical to the base model — consider more epochs or a larger corpus.'}
+              <br />
+              After activating, reindex existing ChromaDB data (Settings → RAG) so stored vectors use this variant.
+            </div>
+          </div>
+        )}
       </div>
 
       {error && (

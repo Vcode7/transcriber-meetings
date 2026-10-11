@@ -74,6 +74,7 @@ class UserSettings(BaseModel):
     rom_windows_per_batch: int = Field(default=5, ge=1, le=20)
     rom_parallel_window_processing: int = Field(default=2, ge=1, le=5)
     rom_separate_action_extraction: bool = False
+    rom_action_owner_verification: bool = False  # extra LLM check of low/medium-confidence action owners
     rom_action_generation_chunk_size: int = Field(default=10, ge=1, le=100)
     rom_stage2_process_all_together: bool = False
     rom_min_similarity_threshold: float | None = Field(default=0.80, ge=0.0, le=1.0)
@@ -208,6 +209,7 @@ class UserSettingsUpdate(BaseModel):
     rom_windows_per_batch: int | None = Field(default=None, ge=1, le=20)
     rom_parallel_window_processing: int | None = Field(default=None, ge=1, le=5)
     rom_separate_action_extraction: bool | None = None
+    rom_action_owner_verification: bool | None = None
     rom_action_generation_chunk_size: int | None = Field(default=None, ge=1, le=100)
     rom_stage2_process_all_together: bool | None = None
     rom_min_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)

@@ -359,7 +359,9 @@ export default function TrainingProgressView({
                 <span style={{ color: 'hsl(var(--foreground))' }}>
                   {jobStatus.status === 'completed'
                     ? 'Training Complete'
-                    : `Epoch ${jobStatus.current_epoch} of ${jobStatus.total_epochs} (Step ${jobStatus.current_step}/${jobStatus.total_steps})`}
+                    : jobStatus.status === 'verifying'
+                      ? 'Verifying trained variant (reloading it through the RAG embedding loader)...'
+                      : `Epoch ${jobStatus.current_epoch} of ${jobStatus.total_epochs} (Step ${jobStatus.current_step}/${jobStatus.total_steps})`}
                 </span>
                 <span style={{ color: 'hsl(var(--accent))' }}>
                   {jobStatus.progress_percent}%

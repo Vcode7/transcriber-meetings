@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { History, Trash2, Loader, ChevronDown, ChevronUp, Check, AlertCircle, Brain, RotateCcw } from 'lucide-react';
+import { History, Trash2, Loader, ChevronDown, ChevronUp, Check, AlertCircle, Brain, RotateCcw, Maximize2 } from 'lucide-react';
 import { listVariants, deleteVariant, rerunVariantTest } from '../api/romTrainingApi';
 import type { RomVariant, TestResult } from '../types/romTrainingTypes';
+import TestComparisonModal from './TestComparisonModal';
 
 export default function HistoryTab() {
   const [variants, setVariants] = useState<RomVariant[]>([]);
@@ -10,6 +11,20 @@ export default function HistoryTab() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [retestingId, setRetestingId] = useState<string | null>(null);
   const [retestMsg, setRetestMsg] = useState<{ id: string; msg: string; isError?: boolean } | null>(null);
+  const [disableThinking, setDisableThinking] = useState(true);
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    results: TestResult[];
+    initialIndex: number;
+    variantName: string;
+    accuracy: string | null;
+  }>({
+    isOpen: false,
+    results: [],
+    initialIndex: 0,
+    variantName: '',
+    accuracy: null,
+  });
 
   const load = () => {
     setLoading(true);
@@ -25,7 +40,7 @@ export default function HistoryTab() {
     setRetestingId(id);
     setRetestMsg(null);
     try {
-      const res = await rerunVariantTest(id);
+      const res = await rerunVariantTest(id, undefined, disableThinking);
       setVariants(prev => prev.map(v => v.id === id ? {
         ...v,
         test_results: res.test_results,
@@ -66,14 +81,36 @@ export default function HistoryTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <History size={18} style={{ color: 'hsl(var(--accent))' }} />
           <span style={{ fontWeight: 700, fontSize: '1rem' }}>Training History</span>
         </div>
-        <span style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))' }}>
-          {variants.length} variant{variants.length !== 1 ? 's' : ''}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <label
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: '0.74rem', cursor: 'pointer',
+              userSelect: 'none', color: 'hsl(var(--foreground))',
+              background: 'hsl(var(--muted) / .35)',
+              padding: '0.25rem 0.65rem', borderRadius: 6,
+              border: '1px solid hsl(var(--border))',
+              fontWeight: 500,
+            }}
+            title="When checked, suppresses <think> reasoning tokens during test evaluation for clean, direct MoM output"
+          >
+            <input
+              type="checkbox"
+              checked={disableThinking}
+              onChange={e => setDisableThinking(e.target.checked)}
+              style={{ cursor: 'pointer', accentColor: 'hsl(var(--accent))' }}
+            />
+            <span>Disable Thinking</span>
+          </label>
+          <span style={{ fontSize: '0.78rem', color: 'hsl(var(--muted-foreground))' }}>
+            {variants.length} variant{variants.length !== 1 ? 's' : ''}
+          </span>
+        </div>
       </div>
 
       {loading && (
@@ -126,7 +163,7 @@ export default function HistoryTab() {
                 {v.status === 'training' && <Loader size={10} className="spin" style={{ verticalAlign: 'middle', marginRight: 3 }} />}
                 {v.status.toUpperCase()}
               </span>
-              {v.has_checkpoint && (
+              {v.has_checkpoint ? (
                 <button
                   style={{
                     display: 'flex', alignItems: 'center', gap: 4,
@@ -143,7 +180,14 @@ export default function HistoryTab() {
                   {retestingId === v.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
                   {retestingId === v.id ? 'Testing…' : 'Rerun Test'}
                 </button>
-              )}
+              ) : v.status === 'done' ? (
+                <span
+                  style={{ fontSize: '0.68rem', color: 'hsl(var(--muted-foreground))', fontStyle: 'italic', padding: '0.2rem 0.4rem' }}
+                  title="Checkpoint adapter files not found on disk"
+                >
+                  (No checkpoint on disk)
+                </span>
+              ) : null}
               <button
                 style={{
                   display: 'flex', alignItems: 'center', gap: 4,
@@ -236,29 +280,35 @@ export default function HistoryTab() {
                 </div>
               )}
 
-              {/* If checkpoint exists but no test results yet */}
-              {v.test_results.length === 0 && v.has_checkpoint && (
+              {/* If no test results recorded */}
+              {v.test_results.length === 0 && (
                 <div style={{
                   marginTop: '0.75rem', padding: '0.75rem', borderRadius: 8,
                   background: 'hsl(var(--muted) / .3)', border: '1px solid hsl(var(--border))',
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                 }}>
                   <span style={{ fontSize: '0.75rem', color: 'hsl(var(--muted-foreground))' }}>
-                    Checkpoint adapter is saved, but no test results are recorded yet.
+                    {v.has_checkpoint
+                      ? 'Checkpoint adapter is saved, but no test results are recorded yet.'
+                      : v.status === 'done'
+                        ? 'Checkpoint adapter not found on disk at configured path.'
+                        : 'Training failed before a checkpoint could be saved.'}
                   </span>
-                  <button
-                    style={{
-                      padding: '0.35rem 0.75rem', borderRadius: 6, border: 'none',
-                      background: 'hsl(var(--accent))', color: '#fff',
-                      fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', gap: 4,
-                    }}
-                    onClick={() => handleRerunTest(v.id)}
-                    disabled={retestingId === v.id}
-                  >
-                    {retestingId === v.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
-                    Run Test Inference
-                  </button>
+                  {v.has_checkpoint && (
+                    <button
+                      style={{
+                        padding: '0.35rem 0.75rem', borderRadius: 6, border: 'none',
+                        background: 'hsl(var(--accent))', color: '#fff',
+                        fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 4,
+                      }}
+                      onClick={() => handleRerunTest(v.id)}
+                      disabled={retestingId === v.id}
+                    >
+                      {retestingId === v.id ? <Loader size={11} className="spin" /> : <RotateCcw size={11} />}
+                      Run Test Inference
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -267,42 +317,139 @@ export default function HistoryTab() {
                 <div style={{ marginTop: '0.75rem' }}>
                   <div style={{
                     fontSize: '0.7rem', fontWeight: 700, color: 'hsl(var(--muted-foreground))',
-                    marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    marginBottom: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    flexWrap: 'wrap', gap: 6,
                   }}>
-                    <span>TEST RESULTS ({v.test_results.length} samples)</span>
-                    {v.has_checkpoint && (
+                    <span>TEST RESULTS ({v.test_results.length} sample{v.test_results.length !== 1 ? 's' : ''})</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <button
+                        type="button"
                         style={{
-                          border: 'none', background: 'transparent',
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          padding: '0.28rem 0.65rem', borderRadius: 6,
+                          border: '1px solid hsl(var(--accent) / .4)',
+                          background: 'hsl(var(--accent) / .12)',
                           color: 'hsl(var(--accent))', cursor: 'pointer',
-                          fontSize: '0.7rem', fontWeight: 600,
-                          display: 'flex', alignItems: 'center', gap: 4,
+                          fontSize: '0.7rem', fontWeight: 700,
+                          transition: 'all 0.15s ease',
                         }}
-                        onClick={() => handleRerunTest(v.id)}
-                        disabled={retestingId === v.id}
+                        onClick={() => setModalState({
+                          isOpen: true,
+                          results: v.test_results,
+                          initialIndex: 0,
+                          variantName: v.name,
+                          accuracy: v.accuracy,
+                        })}
+                        title="Open full-screen side-by-side comparison modal with complete untruncated outputs"
                       >
-                        <RotateCcw size={10} /> Rerun evaluation
+                        <Maximize2 size={11} /> View Full Comparison
                       </button>
-                    )}
+                      {v.has_checkpoint && (
+                        <button
+                          style={{
+                            border: 'none', background: 'transparent',
+                            color: 'hsl(var(--accent))', cursor: 'pointer',
+                            fontSize: '0.7rem', fontWeight: 600,
+                            display: 'flex', alignItems: 'center', gap: 4,
+                          }}
+                          onClick={() => handleRerunTest(v.id)}
+                          disabled={retestingId === v.id}
+                        >
+                          <RotateCcw size={10} /> Rerun evaluation
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {v.test_results.map((r, i) => (
                     <div key={i} style={{
-                      marginBottom: 8, padding: '0.6rem 0.85rem', borderRadius: 8,
+                      marginBottom: 8, padding: '0.65rem 0.85rem', borderRadius: 8,
                       border: '1px solid hsl(var(--border))', fontSize: '0.72rem',
+                      background: 'hsl(var(--card))',
                     }}>
-                      <div style={{ fontWeight: 700, marginBottom: 6 }}>{r.agenda_title || `Sample ${i + 1}`}</div>
+                      <div style={{
+                        fontWeight: 700, marginBottom: 6,
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        gap: 8,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
+                          <span style={{
+                            padding: '1px 6px', borderRadius: 4,
+                            background: 'hsl(var(--muted))',
+                            fontSize: '0.65rem', color: 'hsl(var(--muted-foreground))',
+                            fontFamily: 'monospace',
+                          }}>
+                            #{i + 1}
+                          </span>
+                          <span style={{ textOverflow: 'ellipsis', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+                            {r.agenda_title || `Sample ${i + 1}`}
+                          </span>
+                          {r.recording_title && (
+                            <span style={{ fontSize: '0.68rem', fontWeight: 400, color: 'hsl(var(--muted-foreground))' }}>
+                              ({r.recording_title})
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          style={{
+                            border: '1px solid hsl(var(--border))',
+                            background: 'hsl(var(--muted) / .5)',
+                            color: 'hsl(var(--foreground))',
+                            borderRadius: 5,
+                            padding: '2px 8px',
+                            cursor: 'pointer',
+                            fontSize: '0.68rem',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            flexShrink: 0,
+                          }}
+                          onClick={() => setModalState({
+                            isOpen: true,
+                            results: v.test_results,
+                            initialIndex: i,
+                            variantName: v.name,
+                            accuracy: v.accuracy,
+                          })}
+                          title="Open this sample in the full comparison modal"
+                        >
+                          <Maximize2 size={10} /> Full View
+                        </button>
+                      </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-                        <div>
+                        <div style={{
+                          background: 'hsl(var(--muted) / .25)',
+                          padding: '0.45rem',
+                          borderRadius: 6,
+                          border: '1px solid hsl(var(--border) / .6)',
+                        }}>
                           <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(0 0% 50%)' }}>BEFORE (Base)</div>
-                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.before ? (r.before.slice(0, 300) + (r.before.length > 300 ? '…' : '')) : 'N/A'}</div>
+                          <div style={{ marginTop: 3, whiteSpace: 'pre-wrap', lineHeight: 1.4, color: 'hsl(var(--muted-foreground))' }}>
+                            {r.before ? (r.before.slice(0, 260) + (r.before.length > 260 ? '…' : '')) : 'N/A'}
+                          </div>
                         </div>
-                        <div>
+                        <div style={{
+                          background: 'hsl(142 70% 45% / .04)',
+                          padding: '0.45rem',
+                          borderRadius: 6,
+                          border: '1px solid hsl(142 70% 45% / .2)',
+                        }}>
                           <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(142 70% 35%)' }}>AFTER (Trained)</div>
-                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.after ? (r.after.slice(0, 300) + (r.after.length > 300 ? '…' : '')) : 'N/A'}</div>
+                          <div style={{ marginTop: 3, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                            {r.after ? (r.after.slice(0, 260) + (r.after.length > 260 ? '…' : '')) : 'N/A'}
+                          </div>
                         </div>
-                        <div>
+                        <div style={{
+                          background: 'hsl(280 80% 55% / .04)',
+                          padding: '0.45rem',
+                          borderRadius: 6,
+                          border: '1px solid hsl(280 80% 55% / .2)',
+                        }}>
                           <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'hsl(280 80% 55%)' }}>MANUAL (Target)</div>
-                          <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{r.manual ? (r.manual.slice(0, 300) + (r.manual.length > 300 ? '…' : '')) : 'N/A'}</div>
+                          <div style={{ marginTop: 3, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                            {r.manual ? (r.manual.slice(0, 260) + (r.manual.length > 260 ? '…' : '')) : 'N/A'}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -313,6 +460,16 @@ export default function HistoryTab() {
           )}
         </div>
       ))}
+
+      {/* Full Comparison Modal */}
+      <TestComparisonModal
+        isOpen={modalState.isOpen}
+        onClose={() => setModalState(prev => ({ ...prev, isOpen: false }))}
+        results={modalState.results}
+        initialIndex={modalState.initialIndex}
+        variantName={modalState.variantName}
+        accuracySummary={modalState.accuracy}
+      />
     </div>
   );
 }

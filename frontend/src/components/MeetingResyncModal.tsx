@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import {
   RotateCcw, RefreshCw, CheckCircle2, AlertCircle, Clock,
-  Search, X, Check, ArrowRight, Database, FileText, ChevronDown,
-  Layers, ShieldAlert, Sparkles, Filter, Loader2,
+  Search, X, Check, Database, FileText,
+  ShieldAlert, Sparkles, Loader2,
 } from 'lucide-react'
 import type { SyncableMeeting, ResyncResult } from '../types/recording'
 import { getSyncableMeetings, resyncMeeting } from '../api/aiChat'
@@ -24,7 +24,7 @@ export default function MeetingResyncModal({
   const [syncingId, setSyncingId] = useState<string | null>(null)
   const [syncAllRunning, setSyncAllRunning] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [filterMode, setFilterMode] = useState<'all' | 'needs_sync' | 'synced'>('all')
+  const [filterMode, setFilterMode] = useState<'all' | 'needs_sync' | 'missing_final_rom' | 'synced'>('all')
   const [lastResults, setLastResults] = useState<Record<string, ResyncResult>>({})
 
   // Load syncable meetings from backend
@@ -61,10 +61,17 @@ export default function MeetingResyncModal({
       setMeetings(prev =>
         prev.map(m => {
           if (m.id === mid) {
-            const newIndexed = (m.indexed_points_count || 0) + res.newly_indexed
+            const finalNewly = res.final_rom_result?.newly_indexed ?? 0
+            const s2Newly = res.stage2_result?.newly_indexed ?? 0
+            const newFinalIndexed = Math.max((m.indexed_final_rom_count ?? 0) + finalNewly, m.final_rom_points_count)
+            const newS2Indexed = Math.max((m.indexed_stage2_count ?? 0) + s2Newly, m.stage2_points_count)
             return {
               ...m,
-              indexed_points_count: Math.max(newIndexed, m.stage2_points_count),
+              indexed_final_rom_count: newFinalIndexed,
+              indexed_stage2_count: newS2Indexed,
+              indexed_points_count: newS2Indexed,
+              final_rom_sync_status: m.has_final_rom ? 'synced' : 'not_generated',
+              stage2_sync_status: m.has_stage2 ? 'synced' : 'not_generated',
               needs_sync: false,
               sync_status: 'synced',
             }
@@ -100,10 +107,17 @@ export default function MeetingResyncModal({
         setMeetings(prev =>
           prev.map(item => {
             if (item.id === m.id) {
-              const newIndexed = (item.indexed_points_count || 0) + res.newly_indexed
+              const finalNewly = res.final_rom_result?.newly_indexed ?? 0
+              const s2Newly = res.stage2_result?.newly_indexed ?? 0
+              const newFinalIndexed = Math.max((item.indexed_final_rom_count ?? 0) + finalNewly, item.final_rom_points_count)
+              const newS2Indexed = Math.max((item.indexed_stage2_count ?? 0) + s2Newly, item.stage2_points_count)
               return {
                 ...item,
-                indexed_points_count: Math.max(newIndexed, item.stage2_points_count),
+                indexed_final_rom_count: newFinalIndexed,
+                indexed_stage2_count: newS2Indexed,
+                indexed_points_count: newS2Indexed,
+                final_rom_sync_status: item.has_final_rom ? 'synced' : 'not_generated',
+                stage2_sync_status: item.has_stage2 ? 'synced' : 'not_generated',
                 needs_sync: false,
                 sync_status: 'synced',
               }
@@ -128,6 +142,7 @@ export default function MeetingResyncModal({
     return meetings.filter(m => {
       // Filter tab
       if (filterMode === 'needs_sync' && !m.needs_sync) return false
+      if (filterMode === 'missing_final_rom' && m.final_rom_sync_status !== 'not_generated') return false
       if (filterMode === 'synced' && m.needs_sync) return false
 
       // Search query
@@ -144,6 +159,7 @@ export default function MeetingResyncModal({
   // Aggregate stats
   const totalCount = meetings.length
   const needsSyncCount = useMemo(() => meetings.filter(m => m.needs_sync).length, [meetings])
+  const missingFinalRomCount = useMemo(() => meetings.filter(m => m.final_rom_sync_status === 'not_generated').length, [meetings])
   const syncedCount = totalCount - needsSyncCount
 
   const fmtDate = (d: string) => {
@@ -186,7 +202,7 @@ export default function MeetingResyncModal({
       <div
         style={{
           width: '100%',
-          maxWidth: '740px',
+          maxWidth: '1000px',
           maxHeight: '90vh',
           background: 'hsl(var(--card))',
           borderRadius: '16px',
@@ -230,7 +246,7 @@ export default function MeetingResyncModal({
                 Resync Meeting Context
               </h2>
               <p style={{ fontSize: '.8rem', color: 'hsl(var(--pencil))', margin: '2px 0 0' }}>
-                Re-index Stage 2 discussion points into ChromaDB vector store for AI Chat retrieval
+                Re-index Final ROM and Stage 2 discussion points into ChromaDB vector stores for AI Chat retrieval
               </p>
             </div>
           </div>
@@ -262,7 +278,7 @@ export default function MeetingResyncModal({
             gap: '.75rem',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', flexWrap: 'wrap' }}>
             <div
               style={{
                 padding: '.35rem .75rem',
@@ -276,7 +292,7 @@ export default function MeetingResyncModal({
               }}
             >
               <Database size={13} style={{ color: 'hsl(var(--pencil))' }} />
-              <span style={{ color: 'hsl(var(--pencil))' }}>Total with Stage 2:</span>
+              <span style={{ color: 'hsl(var(--pencil))' }}>Total Meetings:</span>
               <strong style={{ color: 'hsl(var(--ink))' }}>{totalCount}</strong>
             </div>
 
@@ -296,6 +312,24 @@ export default function MeetingResyncModal({
               <AlertCircle size={13} />
               <span>Needs Sync:</span>
               <strong>{needsSyncCount}</strong>
+            </div>
+
+            <div
+              style={{
+                padding: '.35rem .75rem',
+                borderRadius: '8px',
+                background: missingFinalRomCount > 0 ? 'hsl(0 84% 60% / .1)' : 'hsl(var(--card))',
+                border: missingFinalRomCount > 0 ? '1px solid hsl(0 84% 60% / .25)' : '1px solid hsl(var(--border) / .2)',
+                fontSize: '.78rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '.4rem',
+                color: missingFinalRomCount > 0 ? 'hsl(0 84% 45%)' : 'hsl(var(--pencil))',
+              }}
+            >
+              <AlertCircle size={13} />
+              <span>Final ROM Missing:</span>
+              <strong>{missingFinalRomCount}</strong>
             </div>
 
             <div
@@ -474,6 +508,22 @@ export default function MeetingResyncModal({
               Needs Sync ({needsSyncCount})
             </button>
             <button
+              onClick={() => setFilterMode('missing_final_rom')}
+              style={{
+                padding: '.3rem .65rem',
+                borderRadius: '6px',
+                fontSize: '.74rem',
+                fontWeight: filterMode === 'missing_final_rom' ? 600 : 500,
+                border: 'none',
+                background: filterMode === 'missing_final_rom' ? 'hsl(var(--card))' : 'transparent',
+                color: filterMode === 'missing_final_rom' ? 'hsl(0 84% 45%)' : 'hsl(var(--pencil))',
+                cursor: 'pointer',
+                boxShadow: filterMode === 'missing_final_rom' ? '0 1px 4px hsl(var(--ink) / .08)' : 'none',
+              }}
+            >
+              Final ROM Missing ({missingFinalRomCount})
+            </button>
+            <button
               onClick={() => setFilterMode('synced')}
               style={{
                 padding: '.3rem .65rem',
@@ -535,7 +585,7 @@ export default function MeetingResyncModal({
               }}
             >
               <Loader2 size={24} className="animate-spin" style={{ color: 'hsl(var(--accent))' }} />
-              <span style={{ fontSize: '.84rem' }}>Detecting meetings with Stage 2 points...</span>
+              <span style={{ fontSize: '.84rem' }}>Scanning meetings for Final ROM & Stage 2 points...</span>
             </div>
           ) : filteredMeetings.length === 0 ? (
             <div
@@ -548,12 +598,12 @@ export default function MeetingResyncModal({
               <Database size={36} style={{ opacity: 0.35, margin: '0 auto .75rem' }} />
               <p style={{ fontWeight: 600, fontSize: '.92rem', margin: '0 0 .25rem', color: 'hsl(var(--ink))' }}>
                 {totalCount === 0
-                  ? 'No meetings with Stage 2 points found'
+                  ? 'No meetings found'
                   : 'No matching meetings found'}
               </p>
               <p style={{ fontSize: '.78rem', margin: 0, opacity: 0.8 }}>
                 {totalCount === 0
-                  ? 'Generate Stage 2 discussion points for meetings in History first.'
+                  ? 'Record or process meetings in History first.'
                   : 'Try clearing your search or switching filters.'}
               </p>
             </div>
@@ -561,7 +611,7 @@ export default function MeetingResyncModal({
             filteredMeetings.map((m) => {
               const isSyncing = syncingId === m.id
               const lastResult = lastResults[m.id]
-              const isFullySynced = !m.needs_sync
+              const hasAnyPoints = m.has_final_rom || m.has_stage2
 
               return (
                 <div
@@ -629,7 +679,7 @@ export default function MeetingResyncModal({
                           style={{
                             display: 'flex',
                             alignItems: 'center',
-                            gap: '.75rem',
+                            gap: '.5rem',
                             marginTop: '3px',
                             fontSize: '.74rem',
                             color: 'hsl(var(--pencil))',
@@ -639,33 +689,56 @@ export default function MeetingResyncModal({
                           {m.date && <span>{fmtDate(m.date)}</span>}
                           <span>•</span>
                           <span style={{ fontWeight: 500 }}>
-                            {m.stage2_points_count} Stage 2 points in ROM
+                            {m.has_final_rom ? `${m.final_rom_points_count} Final ROM pts` : 'No Final ROM'}
+                          </span>
+                          <span>•</span>
+                          <span style={{ fontWeight: 500 }}>
+                            {m.has_stage2 ? `${m.stage2_points_count} Stage 2 pts` : 'No Stage 2'}
                           </span>
                         </div>
                       </div>
                     </div>
 
-                    {/* Status & Action Button */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '.75rem', flexShrink: 0 }}>
-                      {/* Status badge */}
-                      {isFullySynced ? (
+                    {/* Status Badges & Action Button */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {/* Final ROM status badge */}
+                      {m.final_rom_sync_status === 'not_generated' ? (
                         <span
+                          title="Final ROM discussion points have not been generated yet for this meeting"
                           style={{
                             fontSize: '.72rem',
                             fontWeight: 600,
                             padding: '3px 8px',
                             borderRadius: '6px',
-                            background: 'hsl(142 70% 45% / .14)',
-                            color: 'hsl(142 70% 32%)',
+                            background: 'hsl(0 84% 60% / .12)',
+                            color: 'hsl(0 84% 45%)',
                             display: 'flex',
                             alignItems: 'center',
                             gap: '.3rem',
                           }}
                         >
-                          <CheckCircle2 size={12} />
-                          {m.indexed_points_count}/{m.stage2_points_count} Indexed
+                          <AlertCircle size={12} />
+                          Final ROM Point Missing
                         </span>
-                      ) : m.indexed_points_count > 0 ? (
+                      ) : m.final_rom_sync_status === 'not_indexed' ? (
+                        <span
+                          title="Final ROM points exist but ChromaDB embeddings are missing"
+                          style={{
+                            fontSize: '.72rem',
+                            fontWeight: 600,
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            background: 'hsl(38 92% 50% / .14)',
+                            color: 'hsl(38 92% 35%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '.3rem',
+                          }}
+                        >
+                          <AlertCircle size={12} />
+                          Final ROM Embedding Missing (0/{m.final_rom_points_count})
+                        </span>
+                      ) : m.final_rom_sync_status === 'partial' ? (
                         <span
                           style={{
                             fontSize: '.72rem',
@@ -680,7 +753,7 @@ export default function MeetingResyncModal({
                           }}
                         >
                           <AlertCircle size={12} />
-                          {m.indexed_points_count}/{m.stage2_points_count} ({m.stage2_points_count - m.indexed_points_count} missing)
+                          Final ROM {m.indexed_final_rom_count || 0}/{m.final_rom_points_count}
                         </span>
                       ) : (
                         <span
@@ -689,28 +762,108 @@ export default function MeetingResyncModal({
                             fontWeight: 600,
                             padding: '3px 8px',
                             borderRadius: '6px',
-                            background: 'hsl(0 84% 60% / .12)',
-                            color: 'hsl(0 84% 45%)',
+                            background: 'hsl(142 70% 45% / .14)',
+                            color: 'hsl(142 70% 32%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '.3rem',
+                          }}
+                        >
+                          <CheckCircle2 size={12} />
+                          Final ROM Indexed ({m.final_rom_points_count})
+                        </span>
+                      )}
+
+                      {/* Stage 2 status badge */}
+                      {m.stage2_sync_status === 'not_generated' ? (
+                        <span
+                          title="Stage 2 points have not been generated yet for this meeting"
+                          style={{
+                            fontSize: '.72rem',
+                            fontWeight: 600,
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            background: 'hsl(var(--paper-deep) / .8)',
+                            color: 'hsl(var(--pencil))',
                             display: 'flex',
                             alignItems: 'center',
                             gap: '.3rem',
                           }}
                         >
                           <AlertCircle size={12} />
-                          0/{m.stage2_points_count} Indexed
+                          Stage 2 Point Missing
+                        </span>
+                      ) : m.stage2_sync_status === 'not_indexed' ? (
+                        <span
+                          title="Stage 2 points exist but ChromaDB embeddings are missing"
+                          style={{
+                            fontSize: '.72rem',
+                            fontWeight: 600,
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            background: 'hsl(38 92% 50% / .14)',
+                            color: 'hsl(38 92% 35%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '.3rem',
+                          }}
+                        >
+                          <AlertCircle size={12} />
+                          Stage 2 Embedding Missing (0/{m.stage2_points_count})
+                        </span>
+                      ) : m.stage2_sync_status === 'partial' ? (
+                        <span
+                          style={{
+                            fontSize: '.72rem',
+                            fontWeight: 600,
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            background: 'hsl(38 92% 50% / .14)',
+                            color: 'hsl(38 92% 35%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '.3rem',
+                          }}
+                        >
+                          <AlertCircle size={12} />
+                          Stage 2 {m.indexed_stage2_count || 0}/{m.stage2_points_count}
+                        </span>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: '.72rem',
+                            fontWeight: 600,
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            background: 'hsl(142 70% 45% / .14)',
+                            color: 'hsl(142 70% 32%)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '.3rem',
+                          }}
+                        >
+                          <CheckCircle2 size={12} />
+                          Stage 2 Indexed ({m.stage2_points_count})
                         </span>
                       )}
 
                       {/* Action Button */}
                       <button
                         onClick={() => handleSyncMeeting(m.id, false)}
-                        disabled={isSyncing || syncAllRunning}
+                        disabled={isSyncing || syncAllRunning || !hasAnyPoints}
+                        title={
+                          !hasAnyPoints
+                            ? 'Neither Final ROM nor Stage 2 points generated yet'
+                            : m.needs_sync
+                            ? 'Embed missing discussion points into ChromaDB'
+                            : 'Re-sync all discussion points'
+                        }
                         style={{
                           padding: '.4rem .85rem',
                           borderRadius: '8px',
                           fontSize: '.76rem',
                           fontWeight: 600,
-                          cursor: isSyncing || syncAllRunning ? 'not-allowed' : 'pointer',
+                          cursor: isSyncing || syncAllRunning || !hasAnyPoints ? 'not-allowed' : 'pointer',
                           display: 'flex',
                           alignItems: 'center',
                           gap: '.35rem',
@@ -722,16 +875,24 @@ export default function MeetingResyncModal({
                             : 'hsl(var(--paper))',
                           color: m.needs_sync
                             ? 'white'
-                            : 'hsl(var(--ink))',
+                            : hasAnyPoints
+                            ? 'hsl(var(--ink))'
+                            : 'hsl(var(--pencil))',
                           boxShadow: m.needs_sync
                             ? '0 2px 6px hsl(var(--accent) / .25)'
                             : 'none',
+                          opacity: !hasAnyPoints ? 0.6 : 1,
                         }}
                       >
                         {isSyncing ? (
                           <>
                             <Loader2 size={12} className="animate-spin" />
                             Indexing...
+                          </>
+                        ) : !hasAnyPoints ? (
+                          <>
+                            <AlertCircle size={12} />
+                            No Points
                           </>
                         ) : m.needs_sync ? (
                           <>
@@ -762,16 +923,18 @@ export default function MeetingResyncModal({
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: '.4rem',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '.4rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '.4rem', flexWrap: 'wrap' }}>
                         <Check size={13} style={{ color: 'hsl(142 70% 35%)' }} />
                         <span>
-                          <strong>Sync report:</strong> {lastResult.total_found} found •{' '}
+                          <strong>Sync report:</strong> {lastResult.total_found} points processed •{' '}
                           <span style={{ color: 'hsl(142 70% 35%)', fontWeight: 600 }}>
                             +{lastResult.newly_indexed} newly indexed
                           </span>{' '}
-                          • {lastResult.already_indexed} already indexed
+                          • {lastResult.already_indexed} verified
                           {lastResult.skipped_failed > 0 && (
                             <span style={{ color: 'hsl(0 84% 45%)' }}>
                               {' '}• {lastResult.skipped_failed} skipped
@@ -780,7 +943,7 @@ export default function MeetingResyncModal({
                         </span>
                       </div>
                       <span style={{ fontSize: '.7rem', color: 'hsl(142 70% 35%)', fontWeight: 600 }}>
-                        Ready for AI Chat
+                        Ready for AI Chat (Final ROM Priority)
                       </span>
                     </div>
                   )}
@@ -802,7 +965,7 @@ export default function MeetingResyncModal({
           }}
         >
           <p style={{ fontSize: '.76rem', color: 'hsl(var(--pencil))', margin: 0 }}>
-            Syncing embeds discussion points using the existing Qwen3 embedding model without modifying points.
+            Syncing embeds discussion points into isolated collections (Final ROM and Stage 2) using text embeddings without modifying points.
           </p>
           <button
             onClick={onClose}

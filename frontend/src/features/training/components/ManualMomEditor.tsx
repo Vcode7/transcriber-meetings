@@ -38,7 +38,7 @@ export default function ManualMomEditor() {
   };
 
   const handleExtractPointsLLM = async () => {
-    if (!manualMom || !manualMom.strip ? false : manualMom.trim().length === 0) {
+    if (!manualMom || manualMom.trim().length === 0) {
       toast.error('Please upload a file or enter Manual MoM text first.');
       return;
     }
@@ -110,7 +110,7 @@ export default function ManualMomEditor() {
           </span>
         </div>
         <div style={{ fontSize: '0.72rem', color: 'hsl(var(--muted-foreground))', marginTop: '4px' }}>
-          Supports scanned PDFs and image-based documents via RapidOCR pipeline
+          Supports scanned PDFs and image-based documents via PP-OCRv6 pipeline
         </div>
       </div>
 

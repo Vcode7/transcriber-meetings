@@ -116,7 +116,7 @@ def get_loaded_models() -> list:
         if "services.ocr_engine" in sys.modules:
             from services.ocr_engine import _OCR_ENGINE
             if _OCR_ENGINE is not None:
-                loaded.append("RapidOCR")
+                loaded.append("PPOCRv6")
     except Exception:
         pass
 

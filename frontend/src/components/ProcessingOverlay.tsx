@@ -184,7 +184,7 @@ function ProgressRing({ step, total }: { step: number; total: number }) {
 interface Props {
   stage: ProcessingStage
   startedAt: number | null
-  source: 'record' | 'upload' | 'tab-audio' | null
+  source: 'record' | 'upload' | 'tab-audio' | 'video-upload' | null
   onCancel?: () => void
 }
 
@@ -326,7 +326,7 @@ export default function ProcessingOverlay({ stage, startedAt, source, onCancel }
               color: 'hsl(var(--pencil))',
               margin: '4px 0 0',
             }}>
-              {source === 'upload' ? 'Uploaded file' : source === 'tab-audio' ? 'Tab recording' : 'Live recording'} · {fmtElapsed(elapsed)} elapsed
+              {source === 'upload' ? 'Uploaded file' : source === 'video-upload' ? 'Video upload' : source === 'tab-audio' ? 'Tab recording' : 'Live recording'} · {fmtElapsed(elapsed)} elapsed
             </p>
           )}
         </div>

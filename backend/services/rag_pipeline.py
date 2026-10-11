@@ -34,6 +34,54 @@ def _get_dim() -> int:
     return _get_embedder().embedding_dim()
 
 
+# ── Embedding-input builders ──────────────────────────────────────────────────
+# The text that is embedded differs from the text that is stored (documents get
+# contextual headers + dictionary expansion; transcripts drop timeline headers).
+# These helpers are shared with services/embedding_reindex.py so a ChromaDB
+# reindex reproduces exactly the inputs that the original indexing embedded.
+
+def build_contextual_embedding_input(embedding_context: str, expanded_text: str) -> str:
+    """Embedding input for a global/meeting context document chunk."""
+    return f"{embedding_context}\n{expanded_text}"
+
+
+_TIMELINE_HEADER_RE = None
+
+
+def clean_transcript_text_for_embedding(text: str) -> str:
+    """
+    Strip timeline headers and speaker labels from a transcript chunk.
+
+    Chunk text is formatted as:
+      [HH:MM:SS - HH:MM:SS] Speaker Name
+      Transcript text...
+
+    Only the transcript text lines are kept so embedding vectors capture semantic
+    content without positional noise.
+    """
+    global _TIMELINE_HEADER_RE
+    if _TIMELINE_HEADER_RE is None:
+        import re as _re
+        _TIMELINE_HEADER_RE = _re.compile(
+            r'^\[\d{2}:\d{2}:\d{2}\s*-\s*\d{2}:\d{2}:\d{2}\]\s*.+$'
+        )
+    cleaned_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip timeline header lines
+        if _TIMELINE_HEADER_RE.match(stripped):
+            continue
+        # Skip legacy "Speaker: text" header lines (backward compat)
+        parts = stripped.split(": ", 1)
+        if len(parts) > 1 and not stripped.startswith("["):
+            cleaned_lines.append(parts[1])
+        else:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
 def _get_rag_settings(user_id: Optional[str] = None):
     """Retrieve RAG settings synchronously from SQLite or fall back to default settings."""
     from config import settings
@@ -70,9 +118,17 @@ def _get_rag_settings(user_id: Optional[str] = None):
                     cursor.execute(
                         "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
                         "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
-                        "FROM user_settings ORDER BY id DESC LIMIT 1"
+                        "FROM user_settings WHERE user_id NOT LIKE 'test_%' ORDER BY updated_at DESC LIMIT 1"
                     )
-                row = cursor.fetchone()
+                    row = cursor.fetchone()
+                    if not row:
+                        cursor.execute(
+                            "SELECT rag_chunk_size, rag_chunk_overlap, rag_retrieval_k_global, "
+                            "rag_retrieval_k_meeting, rag_retrieval_k_transcript, rag_relative_score_cutoff "
+                            "FROM user_settings ORDER BY updated_at DESC LIMIT 1"
+                        )
+                if not row:
+                    row = cursor.fetchone()
             finally:
                 conn.close()
             if row:
@@ -178,7 +234,7 @@ def embed_global_context_doc(
 
     text = extract_text_from_file(file_path, filename)
 
-    # Immediately unload RapidOCR from memory before loading embedding model
+    # Immediately unload PP-OCRv6 from memory before loading embedding model
     try:
         from services.ocr_engine import unload_ocr_engine
         unload_ocr_engine()
@@ -229,7 +285,9 @@ def embed_global_context_doc(
     from services.dictionary_service import expand_terms_in_chunks
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
     import numpy as np
-    embeddings = embedder.encode_batch([f"{ctx}\n{exp}" for ctx, exp in zip(contextual_texts, expanded_texts)])
+    embeddings = embedder.encode_batch([
+        build_contextual_embedding_input(ctx, exp) for ctx, exp in zip(contextual_texts, expanded_texts)
+    ])
 
     texts = [c["text"] for c in chunks]
 
@@ -394,7 +452,9 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
 
         texts = [c["text"] for c in chunks]
-        embeddings = embedder.encode_batch([f"{ctx}\n{exp}" for ctx, exp in zip(contextual_texts, expanded_texts)])
+        embeddings = embedder.encode_batch([
+            build_contextual_embedding_input(ctx, exp) for ctx, exp in zip(contextual_texts, expanded_texts)
+        ])
 
         metadatas = [
             {
@@ -445,7 +505,7 @@ def embed_meeting_context(recording_id: str, user_id: str) -> int:
         total_added += added
         logger.info(f"[RAG] Meeting context: added {added} structure-aware chunks from {att['filename']}")
 
-    # Immediately unload RapidOCR and Text Embedder from memory after task completes
+    # Immediately unload PP-OCRv6 and Text Embedder from memory after task completes
     try:
         from services.ocr_engine import unload_ocr_engine
         unload_ocr_engine()
@@ -514,33 +574,7 @@ def embed_transcript(recording_id: str, transcript: List[Dict], user_id: str) ->
     expanded_texts = expand_terms_in_chunks(chunks, shortcuts)
 
     # Strip timeline headers and speaker labels from the text used to generate embeddings.
-    # Chunk text is now formatted as:
-    #   [HH:MM:SS - HH:MM:SS] Speaker Name
-    #   Transcript text...
-    #
-    # We keep only the transcript text lines (not the header lines) so that
-    # embedding vectors capture semantic content without positional noise.
-    import re as _re
-    _timeline_header_re = _re.compile(
-        r'^\[\d{2}:\d{2}:\d{2}\s*-\s*\d{2}:\d{2}:\d{2}\]\s*.+$'
-    )
-    cleaned_expanded_texts = []
-    for text in expanded_texts:
-        cleaned_lines = []
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Skip timeline header lines
-            if _timeline_header_re.match(stripped):
-                continue
-            # Skip legacy "Speaker: text" header lines (backward compat)
-            parts = stripped.split(": ", 1)
-            if len(parts) > 1 and not stripped.startswith("["):
-                cleaned_lines.append(parts[1])
-            else:
-                cleaned_lines.append(line)
-        cleaned_expanded_texts.append("\n".join(cleaned_lines))
+    cleaned_expanded_texts = [clean_transcript_text_for_embedding(text) for text in expanded_texts]
 
     texts = [c["text"] for c in chunks]
     embeddings = embedder.encode_batch(cleaned_expanded_texts)

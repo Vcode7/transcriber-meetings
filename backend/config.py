@@ -57,17 +57,36 @@ class Settings(BaseSettings):
     # Backward-compatible model name. Automatically synchronized with EMBEDDING_MODEL in __init__.
     QWEN_EMBEDDING_MODEL_NAME: Optional[str] = None
 
-    @property
-    def QWEN_EMBEDDING_MODEL_DIR(self) -> str:
+    def embedding_model_dir(self, model_name: Optional[str] = None) -> str:
         """
-        Resolved path to the embedding model directory.
+        Resolved path to an embedding model (or trained variant) directory.
         Checks Application/runtime/embeddings/<model_name>/ first, then falls back
-        to <runtime_dir>/embeddings/<model_name>/.
+        to <runtime_dir>/embeddings/<model_name>/. Defaults to the active EMBEDDING_MODEL.
         """
-        dev_path = BASE_DIR.parent / "Application" / "runtime" / "embeddings" / self.EMBEDDING_MODEL
+        name = model_name or self.EMBEDDING_MODEL
+        dev_path = BASE_DIR.parent / "Application" / "runtime" / "embeddings" / name
         if dev_path.is_dir() and not getattr(sys, "frozen", False):
             return str(dev_path)
-        return str(RUNTIME_DIR / "embeddings" / self.EMBEDDING_MODEL)
+        return str(RUNTIME_DIR / "embeddings" / name)
+
+    @property
+    def QWEN_EMBEDDING_MODEL_DIR(self) -> str:
+        """Resolved path to the active embedding model directory."""
+        return self.embedding_model_dir()
+
+    @property
+    def PADDLEOCR_MODEL_DIR(self) -> str:
+        """
+        Resolved path to the PaddleOCR model directory.
+        Prioritizes RUNTIME_DIR / 'paddleocr', falling back to download/ppocrv6.
+        """
+        runtime_path = RUNTIME_DIR / "paddleocr"
+        if runtime_path.is_dir():
+            return str(runtime_path)
+        dev_download = BASE_DIR.parent / "download" / "ppocrv6"
+        if dev_download.is_dir():
+            return str(dev_download)
+        return str(runtime_path)
 
     # FAISS vector store base directory (legacy — kept for migration detection)
     VECTOR_STORE_DIR: str = str(RUNTIME_DIR / "vector_store")
@@ -135,9 +154,13 @@ class Settings(BaseSettings):
     SPEAKER_SIMILARITY_THRESHOLD_ECAPA_TDNN: float = 0.72  # model-specific default
     SPEAKER_SIMILARITY_THRESHOLD_ERES2NET: float = 0.55   # ERes2Net-Large default (different score distribution)
 
-    MIN_SEGMENT_DURATION: float = 1.5  # seconds
+    MIN_SEGMENT_DURATION: float = 1.5  # seconds — minimum turn length used for speaker embeddings
+    # Pyannote turns down to this length are kept for word→speaker assignment, so short
+    # replies ("Yes, I'll do it") keep their own speaker instead of inheriting a neighbour's.
+    DIARIZATION_ASSIGN_MIN_DURATION: float = 0.3  # seconds
 
     speaker_refinement_margin: float = 0.30  # margins/similarity difference for refinement
+    speaker_refinement_min_seg_sec: float = 1.2  # segments shorter than this are never re-labelled by refinement
     speaker_refinement_high_threshold: float = 0.82  # absolute confidence threshold for ECAPA refinement override
     speaker_refinement_min_threshold: float = 0.20   # minimum similarity floor for ECAPA margin-based override
     speaker_refinement_high_threshold_eres2net: float = 0.70  # absolute confidence threshold for ERes2Net refinement override
@@ -211,6 +234,15 @@ class Settings(BaseSettings):
     RECOVERY_ENERGY_THRESHOLD: float = -45.0
     RECOVERY_MIN_DURATION_MS: int = 300
     MISSING_SEGMENT_MIN_DURATION_SEC: float = 2.0
+
+    # --- Standalone AI Chat Direct Ollama Configuration ---
+    # Bypasses SQLite user_settings table to prevent multi-client settings overwrite
+    AI_CHAT_USE_OLLAMA: bool = True
+    AI_CHAT_OLLAMA_URL: str = "http://localhost:11434"
+    AI_CHAT_OLLAMA_MODEL_PRIORITY: str = "hf.co/prithivMLmods/gemma-4-E4B-it-qat-GGUF:Q3_K_S,qwen2.5:7b,qwen2.5:14b,llama3.1:8b,mistral:7b"
+    AI_CHAT_OLLAMA_DYNAMIC_CTX: bool = True
+    AI_CHAT_OLLAMA_NUM_CTX: int = 32768
+    AI_CHAT_OLLAMA_TEMPERATURE: float = 0.2
 
 
     def __init__(self, **values):

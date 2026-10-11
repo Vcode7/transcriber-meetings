@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List
 
@@ -199,7 +199,7 @@ async def _run_synchronized_video_pipeline(
       3. Start Video OCR timeline extraction in parallel while Whisper continues transcribing.
       4. Both pipelines run concurrently and synchronize via asyncio.gather().
       5. After transcription finishes, explicitly unload Whisper model and free VRAM/RAM.
-      6. After Video OCR finishes, explicitly unload RapidOCR / ONNX Runtime engine and free resources.
+      6. After Video OCR finishes, explicitly unload PP-OCRv6 / ONNX Runtime engine and free resources.
       7. Both pipelines synchronize before completing.
     """
     _ocr_status[recording_id] = "pending"
@@ -334,6 +334,33 @@ async def upload_video(
     """
     user_id = current_user["id"]
     logger.info(f"[Video] Upload request from user={user_id}, filename={file.filename}")
+
+    # ── Deduplication check ────────────────────────────────────────────────
+    # If the user submitted the exact same filename within the last 20 seconds
+    # and that recording is still active (pending/processing/transcript_ready),
+    # return the existing recording ID to prevent double-submissions/duplicate history entries.
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
+    existing_res = await db.execute(
+        text("""
+            SELECT id, status, progress
+            FROM recordings
+            WHERE user_id = :user_id
+              AND filename = :filename
+              AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
+              AND created_at >= :cutoff
+            ORDER BY created_at DESC
+            LIMIT 1
+        """),
+        {"user_id": user_id, "filename": file.filename, "cutoff": dt_to_str(cutoff)},
+    )
+    existing_row = existing_res.mappings().first()
+    if existing_row:
+        logger.info(f"[Video] Deduplicating upload: reusing active recording {existing_row['id']} for {file.filename}")
+        return {
+            "recording_id": existing_row["id"],
+            "status": existing_row["status"],
+            "message": "Reusing existing active recording. Processing already in progress.",
+        }
 
     # Validate format
     if not is_supported_video(file.filename or "", file.content_type or ""):
@@ -556,7 +583,7 @@ async def rerun_video_ocr(
     """
     Re-run the Video OCR timeline extraction and merging pipeline for an existing recording.
 
-    - Only re-runs frame extraction, AI super-res preprocessing, RapidOCR, timeline generation, and block merging.
+    - Only re-runs frame extraction, AI super-res preprocessing, PP-OCRv6, timeline generation, and block merging.
     - Does NOT re-run audio extraction, speech transcription, diarization, speaker ID, MoM generation, or AI insights.
     - Overwrites the `video_transcript` column in the database upon completion.
     """

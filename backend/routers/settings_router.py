@@ -1,13 +1,19 @@
 """Settings router — get/update user threshold settings."""
+import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
 
 from database import get_db, get_db_context, dt_to_str
 from routers.auth import get_current_user
 from pydantic import BaseModel
 from models.settings import UserSettingsUpdate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -18,13 +24,24 @@ def normalize_ollama_url(url: str) -> str:
     - Trim whitespace
     - Ensure protocol (http:// or https://)
     - Remove trailing slash(es)
+    - Ensure default port 11434 if no port is specified on localhost or IP address
     """
+    import urllib.parse
+    import re
+
     if not url:
         return "http://localhost:11434"
     u = url.strip()
     if not u.startswith("http://") and not u.startswith("https://"):
         u = f"http://{u}"
-    return u.rstrip("/")
+    u = u.rstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(u)
+        if not parsed.port and (parsed.hostname in ("localhost", "127.0.0.1") or (parsed.hostname and re.match(r"^\d+\.\d+\.\d+\.\d+$", parsed.hostname))):
+            u = f"{u}:11434"
+    except Exception:
+        pass
+    return u
 
 
 class TestOllamaRequest(BaseModel):
@@ -120,6 +137,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rom_parallel_window_processing": 2,
 
         "rom_separate_action_extraction": False,
+        "rom_action_owner_verification": False,
         "rom_action_generation_chunk_size": 10,
         "rom_stage2_process_all_together": False,
         "rom_pipeline_mode": "base",
@@ -167,6 +185,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["enable_low_volume_recovery"] = bool(res["enable_low_volume_recovery"])
     res["enable_audio_validation"] = bool(res["enable_audio_validation"])
     res["rom_separate_action_extraction"] = bool(res.get("rom_separate_action_extraction", 0))
+    res["rom_action_owner_verification"] = bool(res.get("rom_action_owner_verification", 0))
     res["rom_action_generation_chunk_size"] = int(res.get("rom_action_generation_chunk_size") or 10)
     res["rom_stage2_process_all_together"] = bool(res.get("rom_stage2_process_all_together", 0))
     res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
@@ -177,10 +196,20 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["reasoning_mode_action_points"] = bool(res.get("reasoning_mode_action_points", 0))
 
     if res.get("embedding_model"):
-        from config import settings
-        if settings.EMBEDDING_MODEL != res["embedding_model"]:
-            settings.EMBEDDING_MODEL = res["embedding_model"]
-            settings.QWEN_EMBEDDING_MODEL_NAME = res["embedding_model"]
+        # Keep the runtime model in sync with this user's selection — through the
+        # validated setter, which also unloads the cached embedder on change.
+        from services.text_embedding_service import (
+            EmbeddingModelLockedError,
+            get_active_embedding_model,
+            set_active_embedding_model,
+        )
+        try:
+            set_active_embedding_model(res["embedding_model"], source="settings load")
+        except EmbeddingModelLockedError:
+            pass  # a reindex pins the model; it will be applied on the next load
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"[Settings] Persisted embedding model '{res['embedding_model']}' unavailable: {e}")
+        res["active_embedding_model"] = get_active_embedding_model()
 
     # Sync speaker embedding model with embedding router
     if res.get("speaker_embedding_model"):
@@ -238,6 +267,8 @@ async def update_settings(
         patch["enable_audio_validation"] = 1 if patch["enable_audio_validation"] else 0
     if "rom_separate_action_extraction" in patch:
         patch["rom_separate_action_extraction"] = 1 if patch["rom_separate_action_extraction"] else 0
+    if "rom_action_owner_verification" in patch:
+        patch["rom_action_owner_verification"] = 1 if patch["rom_action_owner_verification"] else 0
     if "reasoning_mode_short_rom" in patch:
         patch["reasoning_mode_short_rom"] = 1 if patch["reasoning_mode_short_rom"] else 0
     if "reasoning_mode_action_points" in patch:
@@ -264,18 +295,27 @@ async def update_settings(
             patch["missing_segment_min_duration_sec"] = 2.0
 
     # Sync embedding model setting with runtime config & unload existing text embedder if changed
+    embedding_model_changed = False
     if "embedding_model" in patch and patch["embedding_model"]:
         new_model = str(patch["embedding_model"]).strip()
-        if new_model:
-            from config import settings
-            if settings.EMBEDDING_MODEL != new_model:
-                settings.EMBEDDING_MODEL = new_model
-                settings.QWEN_EMBEDDING_MODEL_NAME = new_model
-                try:
-                    from services.text_embedding_service import unload_text_embedder
-                    unload_text_embedder()
-                except Exception:
-                    pass
+        patch["embedding_model"] = new_model
+        from services.text_embedding_service import EmbeddingModelLockedError, set_active_embedding_model
+        try:
+            embedding_model_changed = set_active_embedding_model(new_model, source=f"settings update by {user_id}")
+        except EmbeddingModelLockedError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except (FileNotFoundError, ValueError) as e:
+            async with get_db_context() as db:
+                r = await db.execute(
+                    text("SELECT embedding_model FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                row = r.fetchone()
+            if row and row[0] == new_model:
+                # Unchanged value whose files are currently missing: don't block saving other settings.
+                logger.warning(f"[Settings] Embedding model '{new_model}' unavailable, left unchanged: {e}")
+            else:
+                raise HTTPException(status_code=400, detail=f"Embedding model '{new_model}' is not available: {e}")
 
     # Validate and sync speaker_embedding_model setting
     if "speaker_embedding_model" in patch and patch["speaker_embedding_model"]:
@@ -400,6 +440,13 @@ async def update_settings(
             )
         await db.commit()
 
+    if embedding_model_changed:
+        from services.embedding_training.variant_manager import sync_variant_active_flags
+        try:
+            await sync_variant_active_flags(patch["embedding_model"])
+        except Exception as e:
+            logger.warning(f"[Settings] Could not sync embedding variant flags: {e}")
+
     # Convert back to bool for response representation
     if "use_ollama" in patch:
         patch["use_ollama"] = bool(patch["use_ollama"])
@@ -412,7 +459,10 @@ async def update_settings(
     if "reasoning_mode_action_points" in patch:
         patch["reasoning_mode_action_points"] = bool(patch["reasoning_mode_action_points"])
 
-    return {"message": "Settings updated.", **patch}
+    response = {"message": "Settings updated.", **patch}
+    if embedding_model_changed:
+        response["embedding_model_changed"] = True
+    return response
 
 
 
@@ -520,12 +570,34 @@ async def get_embedding_models(current_user: dict = Depends(get_current_user)):
         RUNTIME_DIR / "embeddings",
     ]
 
+    from services.text_embedding_service import validate_embedding_model_dir
+
+    # Only directories that actually contain a loadable model are "installed".
     installed_map = {}
     for d in search_dirs:
         if d.exists() and d.is_dir():
             for child in d.iterdir():
-                if child.is_dir() and any(child.iterdir()):
-                    installed_map[child.name] = str(child)
+                if child.name.startswith((".", "_")):
+                    continue  # hidden/in-progress directories (e.g. a variant being saved)
+                if child.name not in installed_map and child.is_dir() and not validate_embedding_model_dir(child):
+                    installed_map[child.name] = child
+
+    def _model_details(path: Path) -> dict:
+        details = {"dim": None, "is_trained_variant": False, "base_model": None}
+        try:
+            with open(path / "config.json", "r", encoding="utf-8") as f:
+                details["dim"] = json.load(f).get("hidden_size")
+        except Exception:
+            pass
+        meta_path = path / "variant_meta.json"
+        if meta_path.is_file():
+            details["is_trained_variant"] = True
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    details["base_model"] = json.load(f).get("base_model")
+            except Exception:
+                pass
+        return details
 
     models_res = []
     seen_ids = set()
@@ -536,26 +608,116 @@ async def get_embedding_models(current_user: dict = Depends(get_current_user)):
         installed = mid in installed_map
         models_res.append({
             **km,
+            "is_trained_variant": False,
+            "base_model": None,
             "installed": installed,
-            "path": installed_map.get(mid),
+            "path": str(installed_map[mid]) if installed else None,
         })
 
     for name, path in installed_map.items():
         if name not in seen_ids:
+            details = _model_details(path)
+            if details["is_trained_variant"]:
+                description = f"Trained variant of {details['base_model'] or 'a base model'}"
+            else:
+                description = "Custom local embedding model"
             models_res.append({
                 "id": name,
                 "name": name,
-                "description": "Custom local embedding model",
-                "dim": None,
+                "description": description,
                 "quantization": "unknown",
                 "installed": True,
-                "path": path,
+                "path": str(path),
+                **details,
             })
 
+    active = settings.EMBEDDING_MODEL
+    active_entry = next((m for m in models_res if m["id"] == active), None)
     return {
-        "active_model": settings.EMBEDDING_MODEL,
+        "active_model": active,
+        "active_model_is_trained_variant": bool(active_entry and active_entry.get("is_trained_variant")),
         "models": models_res,
     }
+
+
+# ── ChromaDB reindex with the active (trained) embedding model ────────────────
+
+class ReindexRequest(BaseModel):
+    force: bool = False
+
+
+def _active_model_info() -> dict:
+    from config import settings
+    from services.text_embedding_service import get_active_embedding_model, validate_embedding_model_dir
+
+    name = get_active_embedding_model()
+    path = Path(settings.embedding_model_dir(name))
+    info = {
+        "name": name,
+        "available": validate_embedding_model_dir(path) is None,
+        "is_trained_variant": False,
+        "base_model": None,
+    }
+    meta_path = path / "variant_meta.json"
+    if meta_path.is_file():
+        info["is_trained_variant"] = True
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                info["base_model"] = json.load(f).get("base_model")
+        except Exception:
+            pass
+    return info
+
+
+@router.get("/embedding-index/status")
+async def get_embedding_index_status(current_user: dict = Depends(get_current_user)):
+    """Which embedding model every ChromaDB collection was embedded with vs. the active model."""
+    from services.embedding_reindex import get_index_status, get_reindex_status
+    from services.text_embedding_service import get_embedding_model_switch_lock
+
+    try:
+        status = await run_in_threadpool(get_index_status)
+    except Exception as e:
+        logger.exception("[Settings] Failed to read ChromaDB index status")
+        raise HTTPException(status_code=500, detail=f"Could not read ChromaDB index status: {e}")
+    return {
+        **status,
+        "active_model_info": _active_model_info(),
+        "model_switch_locked": get_embedding_model_switch_lock(),
+        "reindex_job": get_reindex_status(),
+    }
+
+
+@router.post("/embedding-index/reindex")
+async def start_embedding_reindex(body: ReindexRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Re-embed all existing ChromaDB data with the active embedding model (normally the
+    selected trained variant). Runs in the background; poll /embedding-index/reindex/status.
+    """
+    from services.embedding_reindex import ReindexAlreadyRunningError, start_reindex_job
+
+    try:
+        return start_reindex_job(force=body.force, requested_by=current_user["id"])
+    except ReindexAlreadyRunningError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=f"Active embedding model is not available: {e}")
+
+
+@router.get("/embedding-index/reindex/status")
+async def get_embedding_reindex_status(current_user: dict = Depends(get_current_user)):
+    from services.embedding_reindex import get_reindex_status
+
+    return get_reindex_status() or {"status": "idle"}
+
+
+@router.post("/embedding-index/reindex/cancel")
+async def cancel_embedding_reindex(current_user: dict = Depends(get_current_user)):
+    from services.embedding_reindex import cancel_reindex
+
+    if not cancel_reindex():
+        raise HTTPException(status_code=409, detail="No ChromaDB reindex is running.")
+    return {"status": "cancelling"}
 
 
 

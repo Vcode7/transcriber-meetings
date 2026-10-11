@@ -103,51 +103,39 @@ async def get_recording_rom_data(recording_id: str, user_id: str, db) -> dict:
     return {}
 
 def get_sliding_windows(transcript: Any, window_minutes: float) -> List[List[Dict]]:
-    windows = []
+    """Stage 1 windows exactly as the ROM pipeline builds them: speaker turns
+    (consecutive same-speaker segments merged, recording-global turn IDs) split by time.
+    Each turn has speaker / start / end / text / turn_id keys."""
+    from services.rom_transcript_format import build_turns, split_turns_into_windows
+
     if not transcript or not isinstance(transcript, list):
-        return windows
-
+        return []
     clean_segments = [s for s in transcript if isinstance(s, dict)]
-    if not clean_segments:
-        return windows
-
-    current_window = []
-    current_start_time = clean_segments[0].get('start', 0.0)
-    window_seconds = window_minutes * 60.0
-    
-    for segment in clean_segments:
-        seg_start = segment.get('start', 0.0)
-        if current_window and (seg_start - current_start_time) >= window_seconds:
-            windows.append(current_window)
-            current_window = [segment]
-            current_start_time = seg_start
-        else:
-            current_window.append(segment)
-            
-    if current_window:
-        windows.append(current_window)
-        
-    return windows
+    return split_turns_into_windows(build_turns(clean_segments), window_minutes)
 
 def format_window_text(window: List[Dict]) -> str:
-    window_text = ""
-    if not window or not isinstance(window, list):
-        return window_text
-    for seg in window:
-        if not isinstance(seg, dict):
-            continue
-        speaker = seg.get('speaker_label') or seg.get('speaker') or 'Unknown'
-        start = seg.get('start', 0.0)
-        end = seg.get('end', 0.0)
-        text_content = seg.get('text', '').strip()
-        window_text += f"[{start:.1f}-{end:.1f}] {speaker}: {text_content}\n"
-    return window_text
+    """Render a window of speaker turns exactly as ROM Stage 1 does ("[T12 | mm:ss-mm:ss] Speaker: text")."""
+    from services.rom_transcript_format import render_window
+    turns = [t for t in (window or []) if isinstance(t, dict) and t.get("turn_id")]
+    return render_window(turns) + "\n" if turns else ""
 
 def normalize_ollama_url(url: str) -> str:
-    url = url.strip()
-    if not url.startswith("http"):
-        url = "http://" + url
-    return url.rstrip("/")
+    import urllib.parse
+    import re
+
+    if not url:
+        return "http://localhost:11434"
+    u = url.strip()
+    if not u.startswith("http"):
+        u = "http://" + u
+    u = u.rstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(u)
+        if not parsed.port and (parsed.hostname in ("localhost", "127.0.0.1") or (parsed.hostname and re.match(r"^\d+\.\d+\.\d+\.\d+$", parsed.hostname))):
+            u = f"{u}:11434"
+    except Exception:
+        pass
+    return u
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -416,10 +404,13 @@ async def test_arena_prompt(
         "end": window[-1].get('end', 0.0) if window and isinstance(window[-1], dict) else 0.0
     }
     window_text = format_window_text(window)
-    previous_context = (
-        "PREVIOUS TRANSCRIPT WINDOW:\n" + format_window_text(windows[idx-1])
-        if idx > 0 and len(windows) > idx - 1 else ""
+    # Same previous-window header and participant roster the ROM Stage 1 pipeline sends.
+    from services.ai_provider import QwenProvider
+    from services.rom_transcript_format import build_roster, format_roster_block
+    previous_context = QwenProvider._stage1_previous_context(
+        None, format_window_text(windows[idx - 1]) if idx > 0 and len(windows) > idx - 1 else None
     )
+    participants_section = format_roster_block(build_roster(transcript_segments))
     video_context_section = (
         "VIDEO OCR TRANSCRIPT (supplementary — audio transcript is primary):\n[Placeholder for OCR]"
         if video_transcript else ""
@@ -597,8 +588,10 @@ async def test_arena_prompt(
     # ── 4. Stage dependency checks ──────────────────────────────────────────────
     stage1_keys = ["rom_discussion_embedded", "rom_discussion", "rom_discussion_no_actions", "rom_action_extraction", "stage1_json_repair"]
     stage2_keys = ["rom_enhance_window", "rom_enhance_all_together", "rom_deduplicate", "rom_polish"]
-    stage3_keys = ["rom_agenda", "rom_agenda_assign_batch", "rom_mom_expansion", "rom_agenda_doc_points"]
-    final_rom_keys = ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_ai_chat"]
+    stage3_keys = ["rom_agenda", "rom_agenda_assign_batch", "rom_mom_expansion", "rom_agenda_doc_points",
+                   "rom_point_classification", "rom_agenda_topic_synthesis"]
+    final_rom_keys = ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat",
+                      "rom_agenda_action_points"]
     mom_keys = ["mom", "mom_extract_actions", "mom_merge", "mom_action_dedup", "mom_action_regen"]
 
     if body.prompt_key in stage1_keys:
@@ -669,6 +662,11 @@ async def test_arena_prompt(
         # Stage 1 variables
         "{window_text}": window_text,
         "{previous_context}": previous_context,
+        "{participants_section}": participants_section,
+        "{task}": next(
+            (str(a.get("task")) for a in extracted_actions if isinstance(a, dict) and a.get("task")),
+            "Prepare the follow-up report discussed in the meeting",
+        ),
         "{video_context_section}": video_context_section,
         "{invalid_json}": (
             json.dumps({"discussion_points": clean_pts[:2]}, indent=2)[:-15]
@@ -694,8 +692,23 @@ async def test_arena_prompt(
         "{agenda_reference}": json.dumps(agendas_simple, indent=2),
         "{discussion_order_guidance}": "Process discussion points in chronological order of appearance.",
         "{timeline_guidance}": "Group discussion items by meeting timeline and topic transitions.",
+        "{similarity_guidance}": (
+            "SEMANTIC SIMILARITY REFERENCE (secondary evidence only): each discussion point includes "
+            "\"similarity_reference\" — top agenda candidates ranked by embedding similarity to all agenda details. "
+            "Use as a tie-breaker; follow clear discussion content over the scores."
+        ),
         "{batch_json}": json.dumps(clean_pts[:15], indent=2),
         "{document_text}": transcript_raw_text[:1200],
+        "{clusters_json}": json.dumps([
+            {"cluster_id": "C1", "points": [
+                {"id": p.get("id"), "text": p.get("discussion_point", ""), "type": "discussion"} for p in clean_pts[:8]
+            ]},
+        ], indent=2),
+        "{agenda_json}": json.dumps({
+            "agenda_id": first_agenda.get("agenda_id", "A1"),
+            "title": first_agenda.get("title", "General Discussion"),
+            "description": first_agenda.get("description", "General meeting discussion topics and decisions"),
+        }, indent=2),
 
         # MoM variables
         "{transcript}": full_transcript_text or transcript_raw_text,
@@ -1057,8 +1070,8 @@ async def get_prompt_groups(current_user: dict = Depends(get_current_user)):
     GROUPS = [
         {"group": "Stage 1", "keys": ["rom_discussion_embedded", "rom_discussion", "rom_discussion_no_actions", "rom_action_extraction", "stage1_json_repair"]},
         {"group": "Stage 2", "keys": ["rom_enhance_window", "rom_enhance_all_together", "rom_deduplicate", "rom_polish"]},
-        {"group": "Stage 3", "keys": ["rom_agenda", "rom_mom_expansion", "rom_agenda_assign_batch", "rom_agenda_doc_points"]},
-        {"group": "Final ROM", "keys": ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_ai_chat"]},
+        {"group": "Stage 3", "keys": ["rom_point_classification", "rom_agenda_topic_synthesis", "rom_agenda", "rom_mom_expansion", "rom_agenda_assign_batch", "rom_agenda_doc_points"]},
+        {"group": "Final ROM", "keys": ["rom_agenda_action_points", "rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat"]},
         {"group": "Action Point from Enhanced Point", "keys": ["mom_extract_actions"]},
         {"group": "MoM", "keys": ["mom", "mom_merge", "mom_action_dedup", "mom_action_regen"]},
         {"group": "Summaries", "keys": ["executive_summary", "short_summary", "detailed_summary", "chunk_summary"]},

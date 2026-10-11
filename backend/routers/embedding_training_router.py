@@ -30,6 +30,7 @@ from services.embedding_training.variant_manager import (
     select_variant,
     delete_variant,
 )
+from services.text_embedding_service import EmbeddingModelLockedError
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,9 @@ class StartTrainingRequest(BaseModel):
     batch_size: int = Field(default=4, ge=1, le=32)
     learning_rate: float = Field(default=2e-5, ge=1e-6, le=1e-3)
     temperature: float = Field(default=0.05, ge=0.01, le=1.0)
+    # Number of top transformer layers to fine-tune (0 = all layers). Lower layers and
+    # token embeddings stay frozen, which keeps fp32 training within consumer-GPU VRAM.
+    trainable_layers: int = Field(default=8, ge=0, le=128)
 
 
 class SaveVariantRequest(BaseModel):
@@ -145,6 +149,7 @@ async def trigger_training(
             batch_size=req.batch_size,
             learning_rate=req.learning_rate,
             temperature=req.temperature,
+            trainable_layers=req.trainable_layers,
         )
         return {
             "status": "started",
@@ -203,7 +208,7 @@ async def save_variant(
             metrics=req.metrics,
         )
         return result
-    except ValueError as val_err:
+    except (ValueError, FileNotFoundError) as val_err:
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as exc:
         logger.exception(f"[EmbeddingTrainingRouter] Failed to save variant: {exc}")
@@ -230,6 +235,8 @@ async def select_active_variant(
         return result
     except FileNotFoundError as fnf:
         raise HTTPException(status_code=404, detail=str(fnf))
+    except EmbeddingModelLockedError as locked:
+        raise HTTPException(status_code=409, detail=str(locked))
     except Exception as exc:
         logger.exception(f"[EmbeddingTrainingRouter] Error selecting variant: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not select variant: {exc}")
@@ -247,6 +254,8 @@ async def delete_saved_variant(
         return result
     except FileNotFoundError as fnf:
         raise HTTPException(status_code=404, detail=str(fnf))
+    except EmbeddingModelLockedError as locked:
+        raise HTTPException(status_code=409, detail=str(locked))
     except Exception as exc:
         logger.exception(f"[EmbeddingTrainingRouter] Error deleting variant: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not delete variant: {exc}")

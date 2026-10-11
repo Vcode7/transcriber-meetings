@@ -18,6 +18,7 @@ export interface OverlapRegion {
 }
 
 export interface Segment {
+  seg_id?: string;
   speaker_label: string;
   start: number;
   end: number;

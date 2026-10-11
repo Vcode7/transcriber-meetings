@@ -1351,11 +1351,16 @@ async def get_sample_audio(
 
     user_id = current_user["id"]
 
-    # Security: ensure the requested path is within this user's directory
+    # Security: ensure the requested path is within this user's directory. A plain prefix
+    # check would also accept a sibling directory such as "<uploads>/user10" for "user1".
     user_dir = str(get_user_dir(user_id).resolve())
     requested = str(os.path.realpath(file_path))
 
-    if not requested.startswith(user_dir):
+    try:
+        inside = os.path.commonpath([os.path.normcase(requested), os.path.normcase(user_dir)]) == os.path.normcase(user_dir)
+    except ValueError:  # different drives on Windows
+        inside = False
+    if not inside:
         raise HTTPException(status_code=403, detail="Access denied.")
 
     if not os.path.exists(requested):
