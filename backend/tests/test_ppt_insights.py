@@ -338,3 +338,22 @@ def test_group_by_project_merges_name_variants():
     names = [g["name"] for g in groups]
     assert names == ["Project Atlas", "General"]
     assert groups[0]["slides"] == [4, 8] and groups[0]["overall_status"] == "delayed"
+
+
+def test_every_project_lists_its_insight_ids_even_with_a_single_insight():
+    slides = [
+        Slide(1, "Review", "Review"),
+        Slide(2, "Atlas status", "Atlas status\nData migration dry-run 2 delayed to 30-Oct-2026 due to vendor data"),
+    ]
+
+    def infer(prompt, max_tokens):
+        if "SLIDE 2 —" in prompt:
+            return json.dumps({"project": "Atlas", "insights": [{
+                "type": "delay", "status": "delayed", "headline": "Data migration dry-run 2 delayed",
+                "summary": "Dry-run 2 delayed to 30-Oct-2026 due to vendor data issues.", "dates": ["30-Oct-2026"]}]})
+        return "{}"
+
+    result = analyze_presentation(slides, meeting=MEETING_DATE, infer=infer)
+    assert len(result["projects"]) == 1
+    project = result["projects"][0]
+    assert project["insight_ids"] == [i["id"] for i in result["insights"]]

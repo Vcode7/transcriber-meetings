@@ -130,7 +130,7 @@ async def delete_recording(recording_id: str, current_user: dict = Depends(get_c
     user_id = current_user["id"]
     async with get_db_context() as db:
         r = await db.execute(
-            text("SELECT file_path FROM recordings WHERE id = :id AND user_id = :uid"),
+            text("SELECT file_path, audio_edit FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
         )
         rec = r.mappings().fetchone()
@@ -139,6 +139,9 @@ async def delete_recording(recording_id: str, current_user: dict = Depends(get_c
 
         if rec.get("file_path"):
             delete_file(rec["file_path"])
+        edited_audio = _edited_audio_path(rec.get("audio_edit"))
+        if edited_audio and edited_audio != rec.get("file_path"):
+            delete_file(edited_audio)
 
         # Remove from any collections
         await db.execute(
@@ -155,13 +158,21 @@ async def delete_recording(recording_id: str, current_user: dict = Depends(get_c
     return {"message": "Recording deleted."}
 
 
+def _edited_audio_path(audio_edit_json) -> Optional[str]:
+    """The trimmed WAV recorded in recordings.audio_edit, if any."""
+    try:
+        return (from_json(audio_edit_json, {}) or {}).get("audio_path") if audio_edit_json else None
+    except Exception:
+        return None
+
+
 @router.get("/{recording_id}/audio")
 async def stream_audio(recording_id: str, current_user: dict = Depends(get_current_user)):
     """Return file path for audio playback (frontend fetches with auth)."""
     user_id = current_user["id"]
     async with get_db_context() as db:
         r = await db.execute(
-            text("SELECT file_path FROM recordings WHERE id = :id AND user_id = :uid"),
+            text("SELECT file_path, source_type, audio_edit FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
         )
         rec = r.mappings().fetchone()
@@ -174,6 +185,11 @@ async def stream_audio(recording_id: str, current_user: dict = Depends(get_curre
     import os
 
     fp = rec.get("file_path", "")
+    # A trimmed video keeps the whole video as file_path (for OCR), but its
+    # transcript timestamps follow the trimmed audio — play that instead.
+    edited_audio = _edited_audio_path(rec.get("audio_edit")) if rec.get("source_type") == "video" else None
+    if edited_audio and Path(edited_audio).exists():
+        fp = edited_audio
     if not fp:
         raise HTTPException(status_code=404, detail="Audio file not found on disk.")
 
@@ -688,7 +704,7 @@ async def rerun_recording_pipeline(
             text("""
                 SELECT id, filename, file_path, duration, meeting_prompt,
                        participant_voice_ids, use_vocabulary, speaker_summary,
-                       source_type
+                       source_type, audio_edit
                 FROM recordings
                 WHERE id = :id AND user_id = :uid
             """),
@@ -768,10 +784,18 @@ async def rerun_recording_pipeline(
         from routers.video_router import _run_synchronized_video_pipeline
         from services.video_processing_service import is_supported_video, extract_audio_from_video
 
+        from routers.audio import keep_ranges_of
+        from utils.audio_utils import render_keep_ranges
+
         video_path = file_path
         wav_path = file_path
+        # A trimmed upload must be re-run on the same trimmed audio, with OCR remapped.
+        keep_ranges = keep_ranges_of(rec.get("audio_edit"))
+        edited_audio = _edited_audio_path(rec.get("audio_edit"))
 
-        if is_supported_video(file_path):
+        if keep_ranges and edited_audio and os.path.exists(edited_audio):
+            wav_path = edited_audio
+        elif is_supported_video(file_path):
             base = file_path.rsplit(".", 1)[0]
             candidate_wav = base + "_audio.wav"
             if os.path.exists(candidate_wav):
@@ -782,6 +806,12 @@ async def rerun_recording_pipeline(
                 except Exception as ve:
                     logger.warning(f"[HistoryRerun] Audio extraction from video failed: {ve}")
                     wav_path = file_path
+            if keep_ranges and wav_path != file_path:
+                try:
+                    wav_path = render_keep_ranges(wav_path, keep_ranges, edited_audio or base + "_audio_edited.wav")
+                except Exception as ee:
+                    logger.warning(f"[HistoryRerun] Re-applying trim failed; re-running on untrimmed audio: {ee}")
+                    keep_ranges = None
 
         task = _asyncio.create_task(
             _run_synchronized_video_pipeline(
@@ -794,13 +824,14 @@ async def rerun_recording_pipeline(
                 participant_voice_ids=participant_voice_ids,
                 use_vocabulary=use_vocabulary,
                 speaker_summary=speaker_summary,
+                keep_ranges=keep_ranges,
             )
         )
     elif duration > UPLOAD_CHUNK_THRESHOLD_SEC:
         task = _asyncio.create_task(
             run_upload_chunk_pipeline(
                 recording_id=recording_id,
-                file_path=file_path,
+                full_wav_path=file_path,
                 user_id=user_id,
                 meeting_prompt=meeting_prompt,
                 participant_voice_ids=participant_voice_ids,

@@ -16,6 +16,7 @@ from sqlalchemy import text
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from services.llm import generate_mom, analyze_writing_style, rewrite_section_content, summarize_long_points
+from services.action_importance import carry_importance, format_importance, load_min_importance, passes_importance
 from config import settings
 from tasks.pipeline import _filter_high_confidence_segments
 from xml.sax.saxutils import escape
@@ -28,6 +29,11 @@ class ActionItem(BaseModel):
     task: str = ""
     owner: str = ""
     deadline: str = ""
+    # Importance score (40-100%) from services/action_importance.py, kept through edits.
+    importance: Optional[int] = None
+    importance_source: Optional[str] = None
+    importance_reason: Optional[str] = None
+    importance_adjusted: Optional[str] = None
 
 
 class MoMData(BaseModel):
@@ -71,7 +77,7 @@ class SummarizeLongPointsRequest(BaseModel):
 
 
 def _normalize_action_items(items: list) -> list:
-    """Ensure each action item is a {task, owner, deadline} dict."""
+    """Ensure each action item is a {task, owner, deadline} dict (plus its importance score, if any)."""
     result = []
     vague_owners = {"my team", "our team", "you", "they", "everyone", "we", "someone", "somebody", "anybody", "team", "us"}
     for item in items:
@@ -79,11 +85,11 @@ def _normalize_action_items(items: list) -> list:
             owner_val = str(item.get("owner", "Unassigned") or "Unassigned").strip()
             if owner_val.lower() in vague_owners:
                 owner_val = "Unassigned"
-            result.append({
+            result.append(carry_importance(item, {
                 "task": str(item.get("task", "") or ""),
                 "owner": owner_val or "Unassigned",
                 "deadline": str(item.get("deadline", "ASAP") or "ASAP"),
-            })
+            }))
         elif isinstance(item, str) and item.strip():
             result.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP"})
     return result
@@ -405,7 +411,7 @@ async def update_mom(recording_id: str, data: MoMData, current_user: dict = Depe
             raise HTTPException(status_code=404, detail="MoM not found")
 
         now = datetime.now(timezone.utc)
-        update_data = data.dict()
+        update_data = data.dict(exclude_none=True)  # unscored action items carry no importance keys
 
         # Version tracking: push a version if last version is older than 5 min
         versions = from_json(mom["versions"], [])
@@ -493,7 +499,7 @@ async def save_mom_version(
 
         now = datetime.now(timezone.utc)
         if data:
-            update_data = data.dict()
+            update_data = data.dict(exclude_none=True)
         else:
             update_data = _mom_row_to_dict(mom)
 
@@ -894,17 +900,23 @@ async def download_mom_docx(
             else:
                 doc.add_paragraph(f"• {str(pt)}")
 
-    actions = mom.get("action_items", [])
+    # Action items below the user's minimum importance are left out.
+    async with get_db_context() as db_session:
+        min_importance = await load_min_importance(db_session, user_id)
+    actions = [a for a in mom.get("action_items", []) if passes_importance(a, min_importance)]
     if actions:
         h3 = doc.add_heading("3. Action Items", level=1)
         for r in h3.runs: r.bold = True
-        tbl = doc.add_table(rows=1, cols=4)
+        show_importance = any(format_importance(a) for a in actions)
+        tbl = doc.add_table(rows=1, cols=5 if show_importance else 4)
         tbl.style = 'Table Grid'
         hdr = tbl.rows[0].cells
         hdr[0].text = "#"
         hdr[1].text = "Action Item"
         hdr[2].text = "Owner"
         hdr[3].text = "Deadline"
+        if show_importance:
+            hdr[4].text = "Importance"
         for cell in hdr:
             for para in cell.paragraphs:
                 for run in para.runs:
@@ -920,6 +932,8 @@ async def download_mom_docx(
                 owner = f"{owner} (?)"
             r_cells[2].text = owner or "Unassigned"
             r_cells[3].text = act.get("deadline") or "ASAP"
+            if show_importance:
+                r_cells[4].text = format_importance(act) or "-"
 
     if mom.get("conclusion"):
         h4 = doc.add_heading("4. Conclusion", level=1)
@@ -1483,11 +1497,11 @@ async def rewrite_mom_section(
                     items = []
                     for x in req.content:
                         if isinstance(x, dict):
-                            items.append({
+                            items.append(carry_importance(x, {
                                 "task": str(x.get("task", "") or ""),
                                 "owner": str(x.get("owner", "Unassigned") or "Unassigned"),
                                 "deadline": str(x.get("deadline", "ASAP") or "ASAP"),
-                            })
+                            }))
                         elif isinstance(x, str):
                             items.append(_parse_action_item_str(x))
                 else:
@@ -1537,19 +1551,20 @@ async def rewrite_mom_section(
 
                 if section == "discussion_points":
                     rewritten_items.extend(parsed)
-                else:  # action_items: pair rewritten task texts with ORIGINAL owner and deadline!
+                else:  # action_items: pair rewritten task texts with ORIGINAL owner, deadline and importance!
                     for idx, task_text in enumerate(parsed):
+                        original = chunk[idx] if idx < len(chunk) else None
                         if idx < len(chunk):
                             orig_owner = chunk[idx]["owner"] if isinstance(chunk[idx], dict) else "Unassigned"
                             orig_deadline = chunk[idx]["deadline"] if isinstance(chunk[idx], dict) else "ASAP"
                         else:
                             orig_owner = "Unassigned"
                             orig_deadline = "ASAP"
-                        rewritten_items.append({
+                        rewritten_items.append(carry_importance(original, {
                             "task": task_text,
                             "owner": orig_owner,
                             "deadline": orig_deadline,
-                        })
+                        }))
 
             if section == "discussion_points":
                 orig_pts = mom_dict.get("points_discussed", [])

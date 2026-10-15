@@ -119,6 +119,38 @@ def format_window_text(window: List[Dict]) -> str:
     turns = [t for t in (window or []) if isinstance(t, dict) and t.get("turn_id")]
     return render_window(turns) + "\n" if turns else ""
 
+def arena_condensed_point(rom_data: dict, fallback_points: List[Dict]) -> Dict[str, str]:
+    """Inputs of the Short/Medium point prompts (explanation, Expand Point): the meeting's first
+    condensed point with its original points (as the condense call labelled them) and notes;
+    without a Short/Medium version, a sentence of the first point and the agenda's first points."""
+    from services.fact_grounding import split_sentences
+    from services.rom_condense import format_condense_notes, format_points_for_condense
+
+    versions = rom_data.get("final_rom_versions") or {}
+    for version in ("short", "medium"):
+        for agenda in (versions.get(version) or {}).get("agendas") or []:
+            by_id = {s.get("id"): s for s in agenda.get("condense_sources") or [] if isinstance(s, dict)}
+            for point in agenda.get("discussion_points") or []:
+                sources = [by_id[sid] for sid in point.get("source_point_ids") or [] if sid in by_id]
+                if sources and point.get("text"):
+                    return {
+                        "{version}": version.capitalize(),
+                        "{point_text}": point["text"],
+                        "{source_points}": format_points_for_condense(
+                            sources, labels=[s.get("label") or f"P{i}" for i, s in enumerate(sources, 1)]),
+                        "{notes_section}": format_condense_notes(point.get("condense_notes") or [])
+                        or format_condense_notes(["No changes were made after the model wrote the point."]),
+                    }
+    sources = fallback_points[:3]
+    first = (sources[0].get("discussion_point") if sources else "") or "The team reviewed the project status."
+    return {
+        "{version}": "Short",
+        "{point_text}": (split_sentences(first) or [first])[0],
+        "{source_points}": format_points_for_condense(sources) if sources else f"[P1] Type=discussion\n{first}",
+        "{notes_section}": format_condense_notes(["No changes were made after the model wrote the point."]),
+    }
+
+
 def normalize_ollama_url(url: str) -> str:
     import urllib.parse
     import re
@@ -591,7 +623,8 @@ async def test_arena_prompt(
     stage3_keys = ["rom_agenda", "rom_agenda_assign_batch", "rom_mom_expansion", "rom_agenda_doc_points",
                    "rom_point_classification", "rom_agenda_topic_synthesis"]
     final_rom_keys = ["rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat",
-                      "rom_agenda_action_points"]
+                      "rom_agenda_action_points", "rom_action_importance", "rom_explain_condensed_point",
+                      "rom_expand_condensed_point"]
     mom_keys = ["mom", "mom_extract_actions", "mom_merge", "mom_action_dedup", "mom_action_regen"]
 
     if body.prompt_key in stage1_keys:
@@ -643,6 +676,7 @@ async def test_arena_prompt(
     else:
         mandatory_section_str = ""
     version_points_str = json.dumps(clean_pts, indent=2)
+    from services.action_importance import SCORE_BATCH_SIZE, scoring_views
 
     variables = {
         # Final ROM & Rewrite variables
@@ -658,6 +692,8 @@ async def test_arena_prompt(
         "{rom_context}": json.dumps(clean_pts[:10], indent=2),
         "{chat_history}": "[]",
         "{user_message}": "Summary of key decisions made.",
+        # Short/Medium point explanation and Expand Point
+        **arena_condensed_point(rom_data, clean_pts),
 
         # Stage 1 variables
         "{window_text}": window_text,
@@ -685,6 +721,7 @@ async def test_arena_prompt(
 
         # Stage 3 variables
         "{agenda_input}": "\n".join([f"- {p.get('discussion_point', '')}" for p in clean_pts[:10]]),
+        "{extraction_rules}": "",
         "{context}": f"[Meeting Context: {filename}]\n{transcript_raw_text[:400]}",
         "{previous_mom}": "[Previous MoM: Reviewed preliminary project plan and confirmed milestone roadmap.]",
         "{previous_mom_docs}": "[Previous MoM Documents: Summary of prior commitments, decisions, and sign-offs.]",
@@ -715,6 +752,12 @@ async def test_arena_prompt(
         "{agenda_section}": "\n".join([f"- {a.get('title', 'General Discussion')}" for a in agendas_simple]),
         "{reference_section}": "Enterprise Meeting Standards: Action items require an explicit owner and deadline.",
         "{action_items_json}": json.dumps(extracted_actions, indent=2),
+        "{action_points_json}": json.dumps(scoring_views(
+            [a if isinstance(a, dict) else {"task": str(a)} for a in extracted_actions[:SCORE_BATCH_SIZE]],
+            [{"agenda": first_agenda.get("title", "General Discussion"),
+              "source_discussion": " ".join(p.get("discussion_point", "") for p in clean_pts[:3])}]
+            * min(len(extracted_actions), SCORE_BATCH_SIZE),
+        ), ensure_ascii=False, indent=2),
         "{partial_moms_json}": json.dumps([
             {
                 "title": first_agenda.get("title", "General Discussion"),
@@ -1071,7 +1114,7 @@ async def get_prompt_groups(current_user: dict = Depends(get_current_user)):
         {"group": "Stage 1", "keys": ["rom_discussion_embedded", "rom_discussion", "rom_discussion_no_actions", "rom_action_extraction", "stage1_json_repair"]},
         {"group": "Stage 2", "keys": ["rom_enhance_window", "rom_enhance_all_together", "rom_deduplicate", "rom_polish"]},
         {"group": "Stage 3", "keys": ["rom_point_classification", "rom_agenda_topic_synthesis", "rom_agenda", "rom_mom_expansion", "rom_agenda_assign_batch", "rom_agenda_doc_points"]},
-        {"group": "Final ROM", "keys": ["rom_agenda_action_points", "rom_version_short", "rom_version_medium", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat"]},
+        {"group": "Final ROM", "keys": ["rom_agenda_action_points", "rom_action_importance", "rom_version_short", "rom_version_medium", "rom_explain_condensed_point", "rom_expand_condensed_point", "rom_ai_edit_points", "rom_conclude_points", "rom_ai_chat"]},
         {"group": "Action Point from Enhanced Point", "keys": ["mom_extract_actions"]},
         {"group": "MoM", "keys": ["mom", "mom_merge", "mom_action_dedup", "mom_action_regen"]},
         {"group": "Summaries", "keys": ["executive_summary", "short_summary", "detailed_summary", "chunk_summary"]},

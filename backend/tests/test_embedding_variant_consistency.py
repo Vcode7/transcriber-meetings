@@ -494,6 +494,19 @@ def test_mapping_passes_similarity_and_full_agenda_details_to_llm(monkeypatch):
     assert a1["assigned_agenda_id"] == "A1" and a1["similarity_top_agenda_id"] == "A1"
 
 
+def test_mapping_sends_short_ids_and_maps_answers_back(monkeypatch):
+    # The LLM sees P1/P2 (small models copy these reliably) and answers with them.
+    result, provider = _run_mapping(monkeypatch, [
+        {"point_id": "P2", "assigned_agenda_id": "A2", "confidence": "high", "reason": "radar"},
+        {"point_id": "1", "assigned_agenda_id": "A1", "confidence": "high", "reason": "cost"},
+    ])
+    items = json.loads(provider.assign_agenda_batch.call_args.kwargs["batch_json"])
+    assert [i["point_id"] for i in items] == ["P1", "P2"]
+    by_pid = {a["point_id"]: a for a in result["batch_assignments"]}
+    assert by_pid["p1"]["assigned_agenda_id"] == "A1" and by_pid["p1"]["is_probable"] is False
+    assert by_pid["p2"]["assigned_agenda_id"] == "A2" and by_pid["p2"]["reason"] == "radar"
+
+
 def test_invalid_llm_answer_falls_back_to_most_similar_agenda(monkeypatch):
     result, _ = _run_mapping(monkeypatch, [
         {"point_id": "p2", "assigned_agenda_id": "A99", "confidence": "high", "reason": "?"},

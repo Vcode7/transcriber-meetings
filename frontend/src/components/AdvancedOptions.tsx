@@ -73,11 +73,12 @@ export default function AdvancedOptions({ onChange, defaults }: Props) {
 
   return (
     <div
-      className="animate-slide-up sketch-border"
+      className="animate-slide-up"
       style={{
         borderRadius: '12px',
         background: 'hsl(var(--card))',
-        border: '1.5px solid hsl(var(--ink) / .1)',
+        border: '1px solid hsl(var(--border) / .35)',
+        boxShadow: '0 4px 18px -4px rgba(0, 0, 0, 0.05)',
         overflow: 'hidden',
         marginTop: '1rem',
       }}
@@ -219,6 +220,10 @@ export default function AdvancedOptions({ onChange, defaults }: Props) {
                 />
               </div>
             </div>
+            <p style={{ fontSize: '.75rem', color: 'hsl(var(--pencil))', margin: '-.5rem 0 .85rem', fontFamily: 'Inter, sans-serif' }}>
+              Set only if you know exactly how many people speak — it fixes the diarization speaker count.
+              Selected profiles below are used as a minimum when left on Auto.
+            </p>
 
             {/* Voice profile selector */}
             <div style={{

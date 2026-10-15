@@ -346,12 +346,14 @@ def test_ollama_dynamic_ctx_toggle():
             pass
 
     captured_options = {}
+    captured_timeout = []
 
-    def mock_urlopen(req):
+    def mock_urlopen(req, timeout=None):
         import json
         payload = json.loads(req.data.decode("utf-8"))
         nonlocal captured_options
         captured_options = payload.get("options", {})
+        captured_timeout.append(timeout)
         return MockResponse({"message": {"role": "assistant", "content": "Test response"}})
 
     # 1. When dynamic context is ON (default)
@@ -391,6 +393,72 @@ def test_ollama_dynamic_ctx_toggle():
         assert res == "Test response"
         # Should use exact manual setting 16384
         assert captured_options["num_ctx"] == 16384
+
+    # Every request is bounded by a timeout (the default when the setting is absent)
+    from services.ai_provider import DEFAULT_OLLAMA_REQUEST_TIMEOUT
+    assert captured_timeout == [DEFAULT_OLLAMA_REQUEST_TIMEOUT, DEFAULT_OLLAMA_REQUEST_TIMEOUT]
+
+
+def test_structured_tasks_cap_the_repeat_penalty():
+    from services.ai_provider import STRUCTURED_REPEAT_PENALTY, repeat_penalty_for
+    assert repeat_penalty_for("rom_enhance_window", 1.15) == STRUCTURED_REPEAT_PENALTY == 1.05
+    assert repeat_penalty_for("stage1_json_repair", 1.15) == 1.05
+    assert repeat_penalty_for("mom_extract_actions", 1.15) == 1.05
+    assert repeat_penalty_for("rom_agenda_assign_batch", 1.0) == 1.0     # a lower setting is kept
+    assert repeat_penalty_for(None, 1.15) == 1.15                       # no task key: configured value
+    assert repeat_penalty_for("executive_summary", 1.15) == 1.15        # prose task
+
+    provider = QwenProvider()
+    cfg = {"use_ollama": True, "ollama_server_url": "http://localhost:11434", "ollama_port": 11434,
+           "ollama_model_priority": "gemma", "ollama_repeat_penalty": 1.15}
+    calls = []
+    QwenProvider._cached_ollama_server_url = cfg["ollama_server_url"]
+    QwenProvider._cached_ollama_port = cfg["ollama_port"]
+    QwenProvider._cached_ollama_priority = cfg["ollama_model_priority"]
+    QwenProvider._cached_ollama_model = "gemma2:9b"
+    try:
+        with patch.object(QwenProvider, "_get_active_settings", return_value=cfg), \
+             patch.object(QwenProvider, "_call_ollama", side_effect=lambda *a, **k: calls.append(k) or "ok"):
+            provider._infer("p", max_new_tokens=5, task_key="rom_enhance_window")
+            provider._infer("p", max_new_tokens=5)
+    finally:
+        QwenProvider._cached_ollama_model = None
+    assert [c["repeat_penalty"] for c in calls] == [1.05, 1.15]
+
+
+def test_ollama_timeout_returns_empty_without_local_fallback():
+    """A hung Ollama request ends with an empty result; the local model is not loaded."""
+    provider = QwenProvider()
+    QwenProvider._cached_ollama_model = None
+
+    def side_effect(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        if "/api/chat" in url:
+            raise TimeoutError("timed out")
+        import json
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return json.dumps({"models": [{"name": "gemma2:9b", "model": "gemma2:9b"}]}).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+        return _Resp()
+
+    with patch("config.settings.DATABASE_URL", "sqlite:///dummy.db"), \
+         patch("sqlite3.connect", side_effect=Exception("No DB file")), \
+         patch("urllib.request.urlopen", side_effect=side_effect), \
+         patch.object(QwenProvider, "_get_pipeline") as mock_get_pipeline:
+        res = provider._infer("Hello", max_new_tokens=10)
+
+    assert res == ""
+    mock_get_pipeline.assert_not_called()
+    QwenProvider._cached_ollama_model = None
 
 
 

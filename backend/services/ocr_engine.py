@@ -10,7 +10,10 @@ production-ready universal OCR model family. It features:
 
 Pipeline Architecture:
   Input Image → Preprocessing → Text Detection → Page Orientation / Deskew →
-  Crop & Text-line Orientation → Batched Text Recognition → Reading Order → Final OCR Result
+  Crop & Text-line Orientation → Batched Text Recognition → Reading Order / Layout → Final OCR Result
+
+With structured output on (services/ocr_layout.py) the final text keeps tables as Markdown
+rows and columns, wide gaps inside a line as a tab and paragraph breaks as a blank line.
 
 Every stage follows the official PaddleX PP-OCRv6 pipeline (DetResizeForTest, DBPostProcess,
 get_rotate_crop_image, OCRReisizeNormImg, CTCLabelDecode, sorted_boxes) and is driven by the
@@ -204,6 +207,27 @@ def _unclip(box: np.ndarray, unclip_ratio: float) -> Optional[np.ndarray]:
     return np.concatenate([np.array(p) for p in expanded], axis=0)
 
 
+def pad_box(box: np.ndarray, ratio: float, width: int, height: int) -> np.ndarray:
+    """
+    Grow an ordered quad by `ratio` × its line height on every side, along the box's own
+    axes, clipped to the image. Detected boxes hug the glyphs; the recognizer keeps word
+    boundaries better with a little margin around the line.
+    """
+    if ratio <= 0:
+        return box
+    b = np.asarray(box, dtype=np.float32)
+    u, v = b[1] - b[0], b[3] - b[0]
+    len_u, len_v = float(np.linalg.norm(u)), float(np.linalg.norm(v))
+    if len_u < 1 or len_v < 1:
+        return box
+    margin = ratio * min(len_u, len_v)
+    du, dv = u / len_u * margin, v / len_v * margin
+    out = np.array([b[0] - du - dv, b[1] + du - dv, b[2] + du + dv, b[3] - du + dv], dtype=np.float32)
+    out[:, 0] = np.clip(out[:, 0], 0, width)
+    out[:, 1] = np.clip(out[:, 1], 0, height)
+    return out
+
+
 def get_rotate_crop_image(img: np.ndarray, points: np.ndarray) -> Optional[np.ndarray]:
     """Perspective-rectify a text box; tall crops (h/w ≥ 1.5) are rotated 90° CCW (official)."""
     points = points.astype(np.float32)
@@ -383,6 +407,7 @@ class OcrResult:
     det_input_size: Tuple[int, int] = (0, 0)      # (w, h) fed to the detector
     rotation: int = 0                              # page rotation applied (degrees CCW)
     skew_angle: float = 0.0                        # deskew rotation applied (degrees)
+    table_count: int = 0                           # tables rebuilt by the structured layout
     applied_steps: List[str] = field(default_factory=list)
     timings_ms: Dict[str, float] = field(default_factory=dict)
     image: Optional[np.ndarray] = None             # processed RGB image (only when requested)
@@ -602,7 +627,8 @@ class PPOCRv6Engine:
     ) -> Optional[np.ndarray]:
         """Extract a rectified text crop and correct 180° rotation (single crop)."""
         cfg = cfg or get_ocr_settings()
-        crop = get_rotate_crop_image(bgr_img, box)
+        h, w = bgr_img.shape[:2]
+        crop = get_rotate_crop_image(bgr_img, pad_box(box, cfg.rec_crop_padding, w, h))
         if crop is None or not cfg.use_textline_orientation:
             return crop
         return self.apply_textline_orientation([crop], cfg)[0][0]
@@ -777,7 +803,12 @@ class PPOCRv6Engine:
         result.timings_ms["detection"] = (time.perf_counter() - t1) * 1000
 
         t2 = time.perf_counter()
-        crops = [get_rotate_crop_image(bgr, box) for box, _ in boxes]
+
+        def _crops() -> List[Optional[np.ndarray]]:
+            h, w = bgr.shape[:2]
+            return [get_rotate_crop_image(bgr, pad_box(box, cfg.rec_crop_padding, w, h)) for box, _ in boxes]
+
+        crops = _crops()
         labels: Optional[List[Tuple[int, float]]] = None
         if (cfg.use_textline_orientation or cfg.auto_orient) and self.cls_session is not None:
             valid = [c for c in crops if c is not None]
@@ -790,19 +821,26 @@ class PPOCRv6Engine:
                     bgr = cv2.rotate(bgr, cv2.ROTATE_180)
                     result.rotation = (result.rotation + 180) % 360
                     boxes, det_size = self._detect(bgr, cfg)
-                    crops = [get_rotate_crop_image(bgr, box) for box, _ in boxes]
+                    crops = _crops()
                     valid = [c for c in crops if c is not None]
                     it = iter(self.classify_orientation(valid))
                     labels = [next(it) if c is not None else (0, 1.0) for c in crops]
+        # Lines the classifier calls upside down. It sees long lines squeezed to 192 px and
+        # sometimes flags upright text with high confidence, so each flip is checked below.
+        flagged: List[int] = []
         if cfg.use_textline_orientation and labels is not None:
-            for i, crop in enumerate(crops):
-                label, score = labels[i]
-                if crop is not None and label == 1 and score > cfg.cls_thresh:
-                    crops[i] = cv2.rotate(crop, cv2.ROTATE_180)
+            flagged = [i for i, crop in enumerate(crops)
+                       if crop is not None and labels[i][0] == 1 and labels[i][1] > cfg.cls_thresh]
         result.timings_ms["orientation"] = (time.perf_counter() - t2) * 1000
 
         t3 = time.perf_counter()
         recognised = self.recognize_batch(crops, cfg)
+        if flagged:
+            # Keep whichever orientation the recognizer reads more confidently.
+            flipped_crops = [cv2.rotate(crops[i], cv2.ROTATE_180) for i in flagged]
+            for i, crop, (text, score) in zip(flagged, flipped_crops, self.recognize_batch(flipped_crops, cfg)):
+                if text and score > recognised[i][1]:
+                    crops[i], recognised[i] = crop, (text, score)
         result.timings_ms["recognition"] = (time.perf_counter() - t3) * 1000
 
         items: List[OcrLine] = []
@@ -811,12 +849,22 @@ class PPOCRv6Engine:
                 continue
             items.append(OcrLine(box=box.tolist(), text=text, score=score))
 
-        result.lines = order_lines(items, cfg)
-        raw_text = "\n".join(line.text for line in result.lines)
-        result.text = _clean_ocr_text(raw_text) if cfg.text_cleanup else _normalise_text(raw_text)
+        if cfg.structured_output:
+            try:  # lazy: ocr_layout imports this module
+                from services.ocr_layout import build_layout
+            except ImportError:
+                from backend.services.ocr_layout import build_layout  # type: ignore[no-redef]
+            layout = build_layout(items, cfg)
+            result.lines, result.text, plain_text = layout.lines, layout.text, layout.plain_text
+            result.table_count = layout.table_count
+        else:
+            result.lines = order_lines(items, cfg)
+            raw_text = "\n".join(line.text for line in result.lines)
+            result.text = _clean_ocr_text(raw_text) if cfg.text_cleanup else _normalise_text(raw_text)
+            plain_text = result.text
         result.avg_conf = float(np.mean([it.score for it in items])) if items else 0.0
-        result.word_count = len(re.findall(r"\S+", result.text))
-        result.char_count = sum(1 for ch in result.text if ch.isalnum())
+        result.word_count = len(re.findall(r"\S+", plain_text))
+        result.char_count = sum(1 for ch in plain_text if ch.isalnum())
         result.box_count = len(boxes)
         result.image_size = (bgr.shape[1], bgr.shape[0])
         result.det_input_size = det_size
@@ -1067,15 +1115,27 @@ def _parse_ppocr_result(
     return full_text, avg_conf, word_count, char_count
 
 
+# Runs of 3+ identical separator characters, optionally spaced: dot leaders ("....", ". . ."),
+# rules ("___", "- - -") and borders read as text ("|||"). They stand between words or fields,
+# so they become a tab rather than vanishing ("Agenda.....10:00" must not read "Agenda10:00").
+SEPARATOR_RUN = re.compile(r"([|~_=\-^\\/@#$%*+.·•])(?: ?\1){2,}")
+
+
+def squash_spaces(text: str) -> str:
+    """Collapse runs of spaces; a tab (wide gap between fields) absorbs the spaces around it."""
+    text = re.sub(r" *\t[ \t]*", "\t", text)
+    return re.sub(r" {2,}", " ", text).strip()
+
+
 def _normalise_text(raw: str) -> str:
-    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in (raw or "").splitlines()]
+    lines = [squash_spaces(ln) for ln in (raw or "").splitlines()]
     return "\n".join(ln for ln in lines if ln).strip()
 
 
 def _clean_ocr_text(raw: str) -> str:
     """
     Post-process raw OCR output to remove noise.
-    Removes short garbage lines, excessive punctuation, and consecutive duplicates.
+    Removes short garbage lines, separator runs and consecutive duplicates.
     Letter/digit checks are Unicode-aware so non-Latin scripts are kept.
     """
     if not raw:
@@ -1088,8 +1148,7 @@ def _clean_ocr_text(raw: str) -> str:
         s = line.strip()
         if not s:
             continue
-        # Remove long runs of repeated punctuation
-        s = re.sub(r"([\|~_=\-\^\\\/@#\$%\*\+\.])\1{2,}", "", s).strip()
+        s = SEPARATOR_RUN.sub("\t", s).strip()
         if not s:
             continue
         alpha = sum(1 for ch in s if ch.isalnum())
@@ -1100,9 +1159,7 @@ def _clean_ocr_text(raw: str) -> str:
             continue
         if non_sp > 0 and alpha / non_sp < 0.35:
             continue
-        # Normalise internal whitespace
-        s = re.sub(r"[ \t]+", " ", s)
-        cleaned.append(s)
+        cleaned.append(squash_spaces(s))
 
     # Deduplicate consecutive identical lines
     deduped: List[str] = []

@@ -7,7 +7,7 @@ Deterministic checks that generated text only uses facts found in its sources.
 token it contains also appears in the source discussion points.
 """
 import re
-from typing import Any, Iterable, List, Set
+from typing import Any, Iterable, List, Set, Tuple
 
 # Digit groups joined by "-" or "/" (ordinance numbers, dates, codes) form one number, so
 # "2026-0108" and "20260108" are the same fact.
@@ -112,3 +112,11 @@ def mentions(text: Any, needle: Any) -> bool:
 def split_sentences(text: Any) -> List[str]:
     parts = re.split(r"(?<=[.!?])\s+", str(text or "").strip())
     return [p.strip() for p in parts if p.strip()]
+
+
+def drop_unsupported_sentences(text: Any, facts: Set[str]) -> Tuple[str, List[str]]:
+    """(text without the sentences that state a fact missing from ``facts``, removed sentences)."""
+    kept, removed = [], []
+    for sentence in split_sentences(text):
+        (removed if unsupported_facts(sentence, facts) else kept).append(sentence)
+    return " ".join(kept), removed

@@ -10,6 +10,9 @@ import {
 import api from '../api/client'
 import MomSection from '../components/MomSection'
 import ActionItemsTable, { ActionItem } from '../components/ActionItemsTable'
+import { ImportanceThresholdSelect } from '../components/AgendaActionPoints'
+import { useImportanceThreshold } from '../hooks/useImportanceThreshold'
+import { passesImportance } from '../lib/actionPoints'
 import TagInput from '../components/TagInput'
 import { getApiErrorDetail } from '../lib/errors'
 
@@ -91,11 +94,19 @@ function normalizeMom(raw: Partial<MomData> | null | undefined): MomData | null 
       ? raw.action_items.map((a: unknown) => {
         if (a && typeof a === 'object' && !Array.isArray(a)) {
           const obj = a as Record<string, unknown>
-          return {
+          const item: ActionItem = {
             task: String(obj.task ?? obj.item ?? obj.description ?? ''),
             owner: String(obj.owner ?? 'Unassigned'),
             deadline: String(obj.deadline ?? 'ASAP'),
           }
+          // Keep the importance score so autosave does not drop it.
+          if (typeof obj.importance === 'number') {
+            item.importance = obj.importance
+            if (obj.importance_source === 'llm' || obj.importance_source === 'heuristic') item.importance_source = obj.importance_source
+            if (typeof obj.importance_reason === 'string') item.importance_reason = obj.importance_reason
+            if (typeof obj.importance_adjusted === 'string') item.importance_adjusted = obj.importance_adjusted
+          }
+          return item
         }
         return { task: String(a ?? ''), owner: 'Unassigned', deadline: 'ASAP' }
       })
@@ -190,9 +201,11 @@ function EditableList({
 function ActionPointsSection({
   items,
   onChange,
+  minImportance,
 }: {
   items: ActionItem[]
   onChange: (items: ActionItem[]) => void
+  minImportance: number
 }) {
   // Group
   const speakerItems = items.filter(a => a.owner && a.owner !== 'Unassigned')
@@ -211,13 +224,13 @@ function ActionPointsSection({
               By Speaker
             </span>
           </div>
-          <ActionItemsTable items={items} onChange={onChange} />
+          <ActionItemsTable items={items} onChange={onChange} minImportance={minImportance} />
         </div>
       )}
 
       {/* If no speakers yet, just show the table */}
       {speakers.length === 0 && (
-        <ActionItemsTable items={items} onChange={onChange} />
+        <ActionItemsTable items={items} onChange={onChange} minImportance={minImportance} />
       )}
 
       {/* General hint */}
@@ -253,6 +266,8 @@ export default function MomPage() {
 
   const [pageState, setPageState] = useState<PageState>('loading')
   const [saveState, setSaveState] = useState<SaveState>('saved')
+  // Action items scored below this importance are hidden and left out of the DOCX (0 = show all)
+  const [minImportance, setMinImportance] = useImportanceThreshold()
   const [mom, setMom] = useState<MomData | null>(null)
   const [recording, setRecording] = useState<RecordingSummary | null>(null)
   const [versions, setVersions] = useState<VersionEntry[]>([])
@@ -741,22 +756,24 @@ export default function MomPage() {
   const handleCopy = async () => {
     if (!mom) return
 
-    // Action items grouped
-    const speakerAI = mom.action_items.filter(a => a.owner && a.owner !== 'Unassigned')
-    const generalAI = mom.action_items.filter(a => !a.owner || a.owner === 'Unassigned')
+    // Action items grouped (like the DOCX, items below the minimum importance are left out)
+    const shownAI = mom.action_items.filter(a => passesImportance(a, minImportance))
+    const speakerAI = shownAI.filter(a => a.owner && a.owner !== 'Unassigned')
+    const generalAI = shownAI.filter(a => !a.owner || a.owner === 'Unassigned')
     const speakers = [...new Set(speakerAI.map(a => a.owner))].sort()
+    const importanceText = (a: ActionItem) => (typeof a.importance === 'number' ? ` (Importance: ${a.importance}%)` : '')
 
     const aiLines: string[] = []
     for (const sp of speakers) {
       aiLines.push(`  ${sp}:`)
       for (const a of speakerAI.filter(x => x.owner === sp)) {
-        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}`)
+        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}${importanceText(a)}`)
       }
     }
     if (generalAI.length > 0) {
       aiLines.push('  General:')
       for (const a of generalAI) {
-        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}`)
+        aiLines.push(`    \u2022 ${a.task} \u2014 Due: ${a.deadline}${importanceText(a)}`)
       }
     }
 
@@ -1153,6 +1170,9 @@ export default function MomPage() {
                     General and speaker-based action items. Set <strong>Owner</strong> to a speaker name for speaker-based items.
                   </p>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0, marginLeft: '12px' }}>
+                    {mom.action_items.some(a => typeof a.importance === 'number') && (
+                      <ImportanceThresholdSelect value={minImportance} onChange={setMinImportance} />
+                    )}
                     <button
                       className="btn btn-ghost"
                       onClick={() => {
@@ -1250,7 +1270,7 @@ export default function MomPage() {
                   </div>
                 )}
 
-                <ActionPointsSection items={mom.action_items} onChange={items => update('action_items', items)} />
+                <ActionPointsSection items={mom.action_items} onChange={items => update('action_items', items)} minImportance={minImportance} />
               </MomSection>
 
               {/* ── 9. Conclusion ────────────────────────────────── */}

@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
 
@@ -25,7 +25,8 @@ from sqlalchemy import text
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file, get_user_dir
-from utils.audio_utils import validate_audio, convert_to_wav, get_duration, trim_audio, process_audio_edit
+from utils.audio_utils import validate_audio, convert_to_wav, get_duration
+from utils.audio_edit import remap_time_blocks
 from tasks.pipeline import run_pipeline, register_task
 from tasks.upload_chunk_pipeline import run_upload_chunk_pipeline, UPLOAD_CHUNK_THRESHOLD_SEC
 from services.video_processing_service import (
@@ -77,8 +78,11 @@ async def _create_video_recording(
     participant_voice_ids: Optional[List[str]] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    expected_speakers: Optional[int] = None,
+    audio_edit: Optional[dict] = None,
 ) -> str:
     """Insert a recording row for a video source and return the recording_id."""
+    from routers.audio import _clean_expected_speakers
     recording_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     pv_json = to_json(participant_voice_ids or [])
@@ -91,13 +95,13 @@ async def _create_video_recording(
                     transcript, raw_text, summary, key_points, action_items, speakers_detected,
                     language, error_message, created_at, processed_at,
                     meeting_prompt, participant_voice_ids, use_vocabulary,
-                    source_type
+                    source_type, expected_speakers, audio_edit
                 )
                 VALUES (
                     :id, :user_id, :filename, :file_path, :duration, 'pending', 'queued',
                     '[]', NULL, NULL, '[]', '[]', '[]', 'en', NULL, :created_at, NULL,
                     :meeting_prompt, :participant_voice_ids, :use_vocabulary,
-                    'video'
+                    'video', :expected_speakers, :audio_edit
                 )
             """),
             {
@@ -110,6 +114,8 @@ async def _create_video_recording(
                 "meeting_prompt": meeting_prompt or "",
                 "participant_voice_ids": pv_json,
                 "use_vocabulary": 1 if use_vocabulary else 0,
+                "expected_speakers": _clean_expected_speakers(expected_speakers),
+                "audio_edit": to_json(audio_edit) if audio_edit else None,
             },
         )
         await db.commit()
@@ -118,13 +124,29 @@ async def _create_video_recording(
     return recording_id
 
 
+def _build_ocr_timeline(raw_ocr: list, video_path: str, duration: float, keep_ranges=None) -> list:
+    """
+    Merge raw OCR frames into blocks and, for a trimmed upload, move them onto
+    the trimmed audio timeline.  OCR always runs on the untrimmed video, so its
+    timestamps are on the video's own timeline; the transcript is on the
+    trimmed one.  ``duration`` is the (possibly trimmed) audio duration.
+    """
+    if not keep_ranges:
+        return merge_ocr_results(raw_ocr, video_duration=duration)
+    video_duration = get_video_duration(video_path) or keep_ranges[-1][1]
+    merged = merge_ocr_results(raw_ocr, video_duration=video_duration)
+    remapped = remap_time_blocks(merged, keep_ranges)
+    logger.info(f"[VideoOCR] Remapped {len(merged)} OCR blocks onto trimmed audio → {len(remapped)} kept")
+    return remapped
+
+
 import os
 
 # Configurable delay (in seconds) between starting Whisper transcription and starting Video OCR
 VIDEO_OCR_START_DELAY_SEC: float = float(os.environ.get("VIDEO_OCR_START_DELAY_SEC", "3.0"))
 
 
-async def _run_ocr_task(recording_id: str, video_path: str, duration: float):
+async def _run_ocr_task(recording_id: str, video_path: str, duration: float, keep_ranges=None):
     """
     Async OCR task — runs in a thread executor to avoid blocking the event loop.
     Writes the merged video_transcript JSON to the DB when done.
@@ -149,7 +171,7 @@ async def _run_ocr_task(recording_id: str, video_path: str, duration: float):
         # Merge consecutive identical blocks
         merged = await loop.run_in_executor(
             None,
-            lambda: merge_ocr_results(raw_ocr, video_duration=duration),
+            lambda: _build_ocr_timeline(raw_ocr, video_path, duration, keep_ranges),
         )
 
         # Persist to DB
@@ -191,6 +213,7 @@ async def _run_synchronized_video_pipeline(
     participant_voice_ids: Optional[List[str]] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    keep_ranges=None,
 ):
     """
     Synchronized Video Pipeline Orchestration:
@@ -259,7 +282,7 @@ async def _run_synchronized_video_pipeline(
 
             merged = await loop.run_in_executor(
                 None,
-                lambda: merge_ocr_results(raw_ocr, video_duration=duration),
+                lambda: _build_ocr_timeline(raw_ocr, video_path, duration, keep_ranges),
             )
 
             async with get_db_context() as db:
@@ -313,10 +336,12 @@ async def upload_video(
     participant_voice_ids: Optional[str] = Form(default="[]"),
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    expected_speakers: Optional[int] = Form(default=None),  # known speaker count → pyannote num_speakers
     trim_start_sec: Optional[float] = Form(default=None),
     trim_end_sec: Optional[float] = Form(default=None),
     cut_start_sec: Optional[float] = Form(default=None),
     cut_end_sec: Optional[float] = Form(default=None),
+    source_duration_sec: Optional[float] = Form(default=None),  # duration the browser trimmer saw
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -327,33 +352,22 @@ async def upload_video(
       1. Save the video file to disk.
       2. Validate the video format.
       3. Extract audio track to WAV using ffmpeg.
-      4. Optionally trim/cut audio track if requested.
+      4. Optionally trim/cut audio track if requested (the video itself is kept
+         whole; OCR timestamps are remapped onto the trimmed audio timeline).
       5. Validate the extracted audio.
       6. Create a recording row (source_type='video').
       7. Schedule synchronized audio transcription & parallel OCR pipeline.
     """
+    from routers.audio import build_edit_request, apply_edit_request, find_duplicate_upload
     user_id = current_user["id"]
     logger.info(f"[Video] Upload request from user={user_id}, filename={file.filename}")
+    edit_request = build_edit_request(trim_start_sec, trim_end_sec, cut_start_sec, cut_end_sec, source_duration_sec)
 
     # ── Deduplication check ────────────────────────────────────────────────
-    # If the user submitted the exact same filename within the last 20 seconds
-    # and that recording is still active (pending/processing/transcript_ready),
-    # return the existing recording ID to prevent double-submissions/duplicate history entries.
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
-    existing_res = await db.execute(
-        text("""
-            SELECT id, status, progress
-            FROM recordings
-            WHERE user_id = :user_id
-              AND filename = :filename
-              AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
-              AND created_at >= :cutoff
-            ORDER BY created_at DESC
-            LIMIT 1
-        """),
-        {"user_id": user_id, "filename": file.filename, "cutoff": dt_to_str(cutoff)},
-    )
-    existing_row = existing_res.mappings().first()
+    # If the user submitted the exact same filename with the same trim selection
+    # within the last 20 seconds and that recording is still active, return the
+    # existing recording ID to prevent double-submissions/duplicate history entries.
+    existing_row = await find_duplicate_upload(db, user_id, file.filename, edit_request)
     if existing_row:
         logger.info(f"[Video] Deduplicating upload: reusing active recording {existing_row['id']} for {file.filename}")
         return {
@@ -391,22 +405,20 @@ async def upload_video(
         raise HTTPException(status_code=422, detail=f"Audio extraction from video failed: {e}")
 
     # ── Optional trim / middle-cut ────────────────────────────────────────
-    has_edit = (trim_start_sec is not None and trim_end_sec is not None) or (cut_start_sec is not None and cut_end_sec is not None)
-    if has_edit:
-        try:
-            edited_path = process_audio_edit(
-                wav_path,
-                start_sec=trim_start_sec,
-                end_sec=trim_end_sec,
-                cut_start_sec=cut_start_sec,
-                cut_end_sec=cut_end_sec,
-            )
-            if edited_path != wav_path:
-                delete_file(wav_path)
-                wav_path = edited_path
-                logger.info(f"[Video] Edited extracted audio (trim: {trim_start_sec}-{trim_end_sec}, cut: {cut_start_sec}-{cut_end_sec}) → {wav_path}")
-        except Exception as edit_err:
-            logger.warning(f"[Video] Audio edit failed (non-fatal): {edit_err}; using original audio.")
+    # The browser trimmer showed the video's own timeline, so that is the
+    # reference for detecting a mis-estimated browser duration.
+    try:
+        wav_path, audio_edit = apply_edit_request(
+            wav_path,
+            edit_request,
+            reference_duration=get_video_duration(video_path) if edit_request else None,
+            log_tag="[Video]",
+        )
+    except HTTPException:
+        delete_file(video_path)
+        delete_file(wav_path)
+        raise
+    keep_ranges = (audio_edit or {}).get("keep_ranges")
 
     # ── 3. Validate extracted audio ───────────────────────────────────────────
     valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
@@ -434,6 +446,8 @@ async def upload_video(
         participant_voice_ids=pv_ids,
         use_vocabulary=use_vocabulary or False,
         speaker_summary=speaker_summary or False,
+        expected_speakers=expected_speakers,
+        audio_edit=audio_edit,
     )
 
     # ── 6. Schedule synchronized video pipeline ────────────────────────────────
@@ -448,6 +462,7 @@ async def upload_video(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            keep_ranges=keep_ranges,
         )
     )
     register_task(recording_id, task)
@@ -591,7 +606,7 @@ async def rerun_video_ocr(
 
     async with get_db_context() as db:
         r = await db.execute(
-            text("SELECT id, source_type, file_path, duration FROM recordings WHERE id = :id AND user_id = :uid"),
+            text("SELECT id, source_type, file_path, duration, audio_edit FROM recordings WHERE id = :id AND user_id = :uid"),
             {"id": recording_id, "uid": user_id},
         )
         rec = r.mappings().fetchone()
@@ -613,9 +628,11 @@ async def rerun_video_ocr(
         )
 
     duration = rec.get("duration", 0.0) or get_video_duration(video_path) or 0.0
+    from routers.audio import keep_ranges_of
+    keep_ranges = keep_ranges_of(rec.get("audio_edit"))
 
     _ocr_status[recording_id] = "pending"
-    asyncio.create_task(_run_ocr_task(recording_id, video_path, duration))
+    asyncio.create_task(_run_ocr_task(recording_id, video_path, duration, keep_ranges))
     logger.info(f"[VideoOCR] Re-run OCR task queued for recording={recording_id}")
 
     return {

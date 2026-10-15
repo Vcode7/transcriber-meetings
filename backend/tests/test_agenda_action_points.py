@@ -356,6 +356,69 @@ def test_source_agendas_add_mapped_points_missing_from_an_overwritten_long_versi
     assert sources == {"A1": ["p1", "p4"], "A2": ["A2-SHORT-1", "p3"]}
 
 
+class ScoringScriptedProvider(ScriptedProvider):
+    def __init__(self, by_agenda=None, scores=None):
+        super().__init__(by_agenda)
+        self.scores = scores or {}
+        self.score_calls = []
+
+    def score_action_point_importance(self, action_points_json):
+        views = json.loads(action_points_json)
+        self.score_calls.append(views)
+        return {"scores": [{"id": v["id"], "importance": self.scores[v["task"]], "reason": "scripted"}
+                           for v in views if v["task"] in self.scores]}
+
+
+def _two_agendas():
+    return [
+        {"agenda_id": "A1", "title": "Budget", "discussion_points": [
+            {"id": "p1", "text": "Ravi will send the revised budget sheet to finance by Friday."}]},
+        {"agenda_id": "A2", "title": "Hiring", "discussion_points": [
+            {"id": "p2", "text": "Meena will open two analyst requisitions in the HR portal."}]},
+    ]
+
+
+_TWO_PROPOSALS = {
+    "A1": [{"task": "Send the revised budget sheet to finance", "owner": "Ravi", "deadline": "Friday", "source_point_ids": ["p1"]}],
+    "A2": [{"task": "Open two analyst requisitions in the HR portal", "owner": "Meena", "source_point_ids": ["p2"]}],
+}
+
+
+def test_kept_action_points_are_scored_in_one_pass_over_all_agendas():
+    agendas = _two_agendas()
+    provider = ScoringScriptedProvider(_TWO_PROPOSALS, {"Send the revised budget sheet to finance": 85,
+                                                         "Open two analyst requisitions in the HR portal": 65})
+    audits = populate_agenda_action_points(agendas, [], [], provider=provider)
+
+    assert len(provider.score_calls) == 1
+    views = {v["task"]: v for v in provider.score_calls[0]}
+    assert views["Send the revised budget sheet to finance"]["agenda"] == "Budget"
+    assert "by Friday" in views["Send the revised budget sheet to finance"]["source_discussion"]
+    assert views["Open two analyst requisitions in the HR portal"]["agenda"] == "Hiring"
+    budget_ap, hiring_ap = agendas[0]["action_points"][0], agendas[1]["action_points"][0]
+    assert (budget_ap["importance"], budget_ap["importance_source"], budget_ap["importance_reason"]) == (85, "llm", "scripted")
+    assert hiring_ap["importance"] == 65
+    assert audits["A1"]["importance"]["source"] == "llm" and agendas[1]["action_point_audit"]["importance"]["scored"] == 1
+    assert not provider.unloaded
+
+
+def test_provider_without_scoring_gives_heuristic_importance():
+    agendas = _two_agendas()
+    populate_agenda_action_points(agendas, [], [], provider=ScriptedProvider(_TWO_PROPOSALS))
+    for agenda in agendas:
+        ap = agenda["action_points"][0]
+        assert ap["importance_source"] == "heuristic" and 40 <= ap["importance"] <= 100
+        assert agenda["action_point_audit"]["importance"]["source"] == "heuristic"
+
+
+def test_no_kept_action_points_means_no_scoring_call():
+    agendas = _two_agendas()
+    provider = ScoringScriptedProvider({}, {})
+    populate_agenda_action_points(agendas, [], [], provider=provider)
+    assert provider.score_calls == []
+    assert "importance" not in agendas[0]["action_point_audit"]
+
+
 def test_regenerate_false_keeps_existing_agenda_lists():
     agendas = [{"agenda_id": "A1", "title": "Budget", "include_action_points": True, "action_points_mode": "agenda",
                 "action_points": [{"task": "Existing", "assignee": NOT_SPECIFIED, "deadline": NOT_SPECIFIED}],
@@ -364,6 +427,145 @@ def test_regenerate_false_keeps_existing_agenda_lists():
     assert populate_agenda_action_points(agendas, [], [], provider=provider, regenerate=False) == {}
     assert provider.calls == []
     assert agendas[0]["action_points"][0]["task"] == "Existing"
+
+
+# ── Flagged points in groups of 5 ────────────────────────────────────────────
+
+class GroupProvider:
+    """Answers each group with ``respond(points)``; records the points sent per call."""
+
+    def __init__(self, respond=None, fail=False):
+        self.respond = respond or (lambda points: [])
+        self.fail = fail
+        self.calls = []
+
+    def generate_agenda_action_points(self, agenda_json, points_json, reasoning_mode=None):
+        points = json.loads(points_json)
+        self.calls.append(points)
+        if self.fail:
+            raise RuntimeError("LLM unavailable")
+        return {"action_points": copy.deepcopy(self.respond(points))}
+
+    def unload_model(self):
+        pass
+
+
+def _flagged_agenda(n, flagged, texts=None):
+    texts = texts or {}
+    return {"agenda_id": "A1", "title": "Ops", "discussion_points": [
+        {"id": f"p{i}", "text": texts.get(i, f"Point {i} covered routine operations item number {i}."),
+         "timeline_start": float(i), "include_action_point": i in flagged}
+        for i in range(n)
+    ]}
+
+
+def test_groups_of_five_skip_unflagged_groups_and_add_neighbours():
+    entries = [_entry(f"p{i}", f"text {i}", include_action_point=i in (2, 11)) for i in range(12)]
+    plan = aap.plan_action_requests(entries)
+    assert plan["mode"] == "flagged_groups" and plan["groups"] == 3 and plan["flagged_points"] == 2
+    assert [b["target_ids"] for b in plan["batches"]] == [["p2"], ["p11"]]
+    assert [e["id"] for e in plan["batches"][0]["entries"]] == ["p0", "p1", "p2", "p3", "p4", "p5"]
+    assert [e["id"] for e in plan["batches"][1]["entries"]] == ["p9", "p10", "p11"]
+
+
+def test_unflagged_points_keep_the_all_points_path():
+    plan = aap.plan_action_requests([_entry("p1", "a"), _entry("p2", "b")])
+    assert plan["mode"] == "all_points" and [b["target_ids"] for b in plan["batches"]] == [None]
+
+
+def test_only_groups_with_flagged_points_are_sent_with_roles():
+    agenda = _flagged_agenda(12, {2, 11})
+    agenda["discussion_points"][3]["action_items"] = [{"task": "Context-only hint", "assignee": "Ravi"}]
+    provider = GroupProvider()
+    audits = populate_agenda_action_points([agenda], [], [], provider=provider)
+
+    assert len(provider.calls) == 2
+    roles = {p["id"]: p["role"] for p in provider.calls[0]}
+    assert roles["p2"] == "target" and {r for pid, r in roles.items() if pid != "p2"} == {"context"}
+    context = next(p for p in provider.calls[0] if p["id"] == "p3")
+    assert "candidate_actions" not in context and "include_action_point" not in context
+    audit = audits["A1"]
+    assert (audit["mode"], audit["groups"], audit["groups_called"], audit["flagged_points"]) == ("flagged_groups", 3, 2, 2)
+
+
+def test_task_supported_only_by_a_context_point_is_rejected():
+    agenda = _flagged_agenda(3, {0}, {
+        0: "Ravi agreed to circulate the revised vendor scorecard.",
+        1: "Meena will book the training room for the onboarding session.",
+    })
+    provider = GroupProvider(lambda points: [
+        {"task": "Book the training room for the onboarding session", "owner": "Meena", "source_point_ids": ["p1"]},
+        {"task": "Circulate the revised vendor scorecard", "owner": "Ravi", "source_point_ids": ["p0"]},
+    ])
+    audits = populate_agenda_action_points([agenda], [], [], provider=provider)
+    assert [ap["task"] for ap in agenda["action_points"]] == ["Circulate the revised vendor scorecard"]
+    assert audits["A1"]["rejected"][0]["reason"] == "not supported by a point flagged as containing an action"
+
+
+def test_context_point_supplies_a_detail_of_a_target_action():
+    agenda = _flagged_agenda(2, {0}, {
+        0: "Ravi agreed to send the revised quotation to the client.",
+        1: "The client asked to receive it by 24 October.",
+    })
+    provider = GroupProvider(lambda points: [{
+        "task": "Send the revised quotation to the client by 24 October", "owner": "Ravi", "deadline": "24 October",
+        "source_point_ids": ["p0"],
+    }])
+    populate_agenda_action_points([agenda], [], [], provider=provider)
+    ap = agenda["action_points"][0]
+    assert ap["source_point_ids"] == ["p0", "p1"] and ap["deadline"] == "24 October"
+
+
+def test_work_completed_in_the_meeting_is_not_a_task():
+    entries = [_entry("p1", "The committee approved the revised budget for the expansion.")]
+    result = validate_action_points([{"task": "Approved the revised budget for the expansion", "source_point_ids": ["p1"]}], entries)
+    assert result["kept"] == [] and result["rejected"][0]["reason"].startswith("describes work completed")
+
+
+def test_no_flagged_point_means_no_call_and_no_actions():
+    agenda = _flagged_agenda(4, set())
+    provider = GroupProvider()
+    audits = populate_agenda_action_points([agenda], [], [], provider=provider)
+    assert provider.calls == [] and agenda["action_points"] == []
+    assert audits["A1"]["source"] == "no_flagged_points"
+
+
+def test_same_task_from_two_groups_is_kept_once():
+    texts = {2: "Ravi will send the revised budget sheet to finance.", 7: "Again, Ravi will send the revised budget sheet to finance."}
+    agenda = _flagged_agenda(10, {2, 7}, texts)
+    provider = GroupProvider(lambda points: [{
+        "task": "Send the revised budget sheet to finance", "owner": "Ravi",
+        "source_point_ids": [p["id"] for p in points if p["role"] == "target"],
+    }])
+    populate_agenda_action_points([agenda], [], [], provider=provider)
+    assert len(provider.calls) == 2
+    assert len(agenda["action_points"]) == 1
+    assert agenda["action_points"][0]["source_point_ids"] == ["p2", "p7"]
+
+
+def test_llm_failure_falls_back_to_target_points_only():
+    agenda = _flagged_agenda(2, {0}, {0: "Ravi will issue the purchase order.", 1: "Meena will update the asset register."})
+    agenda["discussion_points"][0]["action_items"] = [{"task": "Issue the purchase order", "assignee": "Ravi"}]
+    agenda["discussion_points"][1]["action_items"] = [{"task": "Update the asset register", "assignee": "Meena"}]
+    agenda["discussion_points"][1]["include_action_point"] = False
+    audits = populate_agenda_action_points([agenda], [], [], provider=GroupProvider(fail=True))
+    assert [ap["task"] for ap in agenda["action_points"]] == ["Issue the purchase order"]
+    assert audits["A1"]["source"] == "fallback_stage_items"
+
+
+def test_stage2_flag_overrides_the_final_rom_copy():
+    """A flag corrected on the Stage 2 point applies without rebuilding the Final ROM."""
+    agenda = {"agenda_id": "A1", "discussion_points": [{"id": "p1", "text": "Point.", "include_action_point": False}]}
+    polished_by_id = {"p1": {"id": "p1", "polished_text": "Point.", "include_action_point": True, "type": "decision"}}
+    entry = build_agenda_action_input(agenda, polished_by_id, {})[0]
+    assert entry["include_action_point"] is True and entry["type"] == "decision"
+
+
+def test_condensed_point_resolves_to_all_of_its_originals():
+    agenda = {"agenda_id": "A1", "discussion_points": [
+        {"id": "A1-SHORT-1", "text": "Merged.", "original_point_id": "p1", "original_point_ids": ["p1", "p2"]}]}
+    polished_by_id = {"p1": {"id": "p1", "polished_text": "First."}, "p2": {"id": "p2", "polished_text": "Second."}}
+    assert [e["id"] for e in build_agenda_action_input(agenda, polished_by_id, {})] == ["p1", "p2"]
 
 
 def test_include_flag_and_legacy_fallback():
@@ -540,13 +742,13 @@ async def test_generate_final_rom_keeps_individual_selections():
 
 # ── DOCX ─────────────────────────────────────────────────────────────────────
 
-async def _docx_rows(rom_data, include_action_points=None):
+async def _docx_rows(rom_data, include_action_points=None, min_importance=None):
     from routers.rom_router import download_final_docx
 
     with patch("routers.rom_router._get_rom_data", AsyncMock(return_value=rom_data)), \
          patch("routers.rom_router._validate_user_id", return_value="test-user"):
         response = await download_final_docx(recording_id="rec-1", version=None, include_action_points=include_action_points,
-                                             current_user={}, db=MagicMock())
+                                             min_importance=min_importance, current_user={}, db=MagicMock())
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
@@ -586,3 +788,25 @@ async def test_docx_legacy_rom_follows_global_flag():
     assert row[-1] == "Staff [Due: 2026-10-01]"
     hidden = await _docx_rows({"final_rom": {"include_action_points": False, "agendas": copy.deepcopy(legacy_agendas)}})
     assert "Brief the council" not in " ".join(" ".join(r) for r in hidden)
+
+
+@pytest.mark.asyncio
+async def test_docx_leaves_out_action_points_below_min_importance_and_shows_scores():
+    rom = {"final_rom": {"agendas": [
+        {"agenda_id": "A1", "title": "Budget", "include_action_points": True, "action_points_mode": "agenda",
+         "action_points": [
+             {"task": "Submit the budget to the council", "assignee": "Ravi", "deadline": "Friday", "importance": 85},
+             {"task": "Circulate the meeting photos", "assignee": NOT_SPECIFIED, "deadline": NOT_SPECIFIED, "importance": 45},
+             {"task": "Older unscored item", "assignee": NOT_SPECIFIED, "deadline": NOT_SPECIFIED},
+         ],
+         "discussion_points": [{"id": "p1", "text": "Budget discussion."}]},
+    ]}}
+    rows = await _docx_rows(rom, min_importance=70)
+    flat = " | ".join(" ".join(r) for r in rows)
+    assert "Circulate the meeting photos" not in flat
+    assert "Older unscored item" in flat
+    row = next(r for r in rows if "Submit the budget to the council" in " ".join(r))
+    assert row[-1] == "Ravi [Due: Friday] [Importance: 85%]"
+
+    all_rows = await _docx_rows(copy.deepcopy(rom))  # no query, no saved threshold: everything is shown
+    assert "Circulate the meeting photos" in " ".join(" ".join(r) for r in all_rows)

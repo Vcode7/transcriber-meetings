@@ -42,6 +42,7 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
   const [maxContext, setMaxContext] = useState(10)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesScrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -65,7 +66,9 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
 
   // Auto-scroll on new messages or streaming
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Scroll only the messages pane; scrollIntoView() would also scroll the page layout
+    const el = messagesScrollRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [messages, streamedText])
 
   const handleCopy = useCallback((text: string, id: string) => {
@@ -467,7 +470,7 @@ export default function CollectionAIChat({ collectionId, meetings, onClose }: Co
       </div>
 
       {/* ═══════ Messages Area ═══════ */}
-      <div style={{
+      <div ref={messagesScrollRef} style={{
         flex: 1, overflowY: 'auto', padding: '1rem 1rem',
         display: 'flex', flexDirection: 'column', gap: '.75rem',
         minHeight: 0,

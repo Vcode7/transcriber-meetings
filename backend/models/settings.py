@@ -25,6 +25,7 @@ class UserSettings(BaseModel):
     embedding_model: str = "Qwen3-Embedding-0.6B"
     speaker_embedding_model: str = "ecapa"  # "ecapa" | "eres2net_large"
     restrict_reassignment_to_meeting_speakers: bool = Field(default=False)
+    overlap_separation_enabled: bool | None = None  # None → global OVERLAP_SEPARATION_ENABLED
     
     # New Ollama specific settings
     ollama_num_ctx: int = Field(default=32768, ge=512, le=131072)
@@ -76,8 +77,10 @@ class UserSettings(BaseModel):
     rom_separate_action_extraction: bool = False
     rom_action_owner_verification: bool = False  # extra LLM check of low/medium-confidence action owners
     rom_action_generation_chunk_size: int = Field(default=10, ge=1, le=100)
+    # Action points scored below this importance (%) are hidden and left out of exports; 0 = show all
+    action_point_min_importance: int = Field(default=0, ge=0, le=100)
     rom_stage2_process_all_together: bool = False
-    rom_min_similarity_threshold: float | None = Field(default=0.80, ge=0.0, le=1.0)
+    rom_min_similarity_threshold: float | None = Field(default=0.60, ge=0.0, le=1.0)
     # "base" = always use default prompts; "dspy" = use trained DSPy variants when available
     rom_pipeline_mode: str = "base"
     rom_short_model_mode: str = "base"
@@ -159,6 +162,7 @@ class UserSettingsUpdate(BaseModel):
     embedding_model: str | None = None
     speaker_embedding_model: str | None = None  # "ecapa" | "eres2net_large"
     restrict_reassignment_to_meeting_speakers: bool | None = None
+    overlap_separation_enabled: bool | None = None
     
     # New Ollama settings
     ollama_num_ctx: int | None = Field(default=None, ge=512, le=131072)
@@ -211,6 +215,7 @@ class UserSettingsUpdate(BaseModel):
     rom_separate_action_extraction: bool | None = None
     rom_action_owner_verification: bool | None = None
     rom_action_generation_chunk_size: int | None = Field(default=None, ge=1, le=100)
+    action_point_min_importance: int | None = Field(default=None, ge=0, le=100)
     rom_stage2_process_all_together: bool | None = None
     rom_min_similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     rom_pipeline_mode: str | None = None

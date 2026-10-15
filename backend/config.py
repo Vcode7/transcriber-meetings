@@ -159,6 +159,53 @@ class Settings(BaseSettings):
     # replies ("Yes, I'll do it") keep their own speaker instead of inheriting a neighbour's.
     DIARIZATION_ASSIGN_MIN_DURATION: float = 0.3  # seconds
 
+    # --- Diarization speaker-count hints & hyper-parameters ---
+    # Selected participant profiles become pyannote min_speakers (guests may add more).
+    DIARIZATION_USE_PARTICIPANT_COUNT: bool = True
+    # community-1 hyper-parameter overrides; None keeps the snapshot's tuned value.
+    DIARIZATION_CLUSTERING_THRESHOLD: Optional[float] = None  # VBx AHC threshold, 0.5–0.8 (lower → more speakers)
+    DIARIZATION_VBX_FA: Optional[float] = None                # VBx Fa, 0.01–0.5
+    DIARIZATION_VBX_FB: Optional[float] = None                # VBx Fb, 0.01–15
+    DIARIZATION_SEG_MIN_DURATION_OFF: Optional[float] = None  # fill within-speaker gaps shorter than this, 0–1 s
+
+    # --- Overlap-aware speaker embedding ---
+    # Embed only the parts of a turn outside overlap windows instead of dropping any
+    # turn that touches an overlap (which left often-interrupted speakers unidentified).
+    SPEAKER_EMBED_MASK_OVERLAP: bool = True
+    # A cluster with no turn ≥ MIN_SEGMENT_DURATION is embedded from its short turns
+    # concatenated, if they add up to at least this many seconds.
+    SPEAKER_SHORT_TURN_CONCAT_MIN_SEC: float = 3.0
+    # Optimal (Hungarian) one-to-one speaker↔profile assignment instead of greedy.
+    SPEAKER_ASSIGNMENT_HUNGARIAN: bool = True
+    # An extra cluster that matches an already-matched profile above threshold is
+    # labelled as that profile (pyannote split one person into two clusters).
+    SPEAKER_MERGE_DUPLICATE_CLUSTERS: bool = True
+    # S-norm: z-normalise speaker↔profile scores against the other enrolled profiles
+    # (cohort) before thresholding. Needs ≥ SPEAKER_SNORM_MIN_COHORT other profiles.
+    SPEAKER_SCORE_NORMALIZATION: bool = False
+    SPEAKER_SNORM_MIN_COHORT: int = 3
+    SPEAKER_SNORM_THRESHOLD: float = 2.0  # normalised-score threshold (std-devs above cohort mean)
+
+    # --- Profile-guided split of merged clusters ---
+    # When a selected participant stays unmatched, move turns from other clusters that
+    # clearly sound like that participant into a new speaker.
+    SPEAKER_CLUSTER_SPLIT_ENABLED: bool = True
+    SPEAKER_SPLIT_MARGIN: float = 0.10         # sim(unmatched) − sim(current) needed per turn
+    SPEAKER_SPLIT_MIN_SEGMENTS: int = 2        # turns needed to accept a split
+    SPEAKER_SPLIT_MIN_SECONDS: float = 4.0     # clean speech needed to accept a split
+
+    # --- Overlap handling ---
+    # Keep short interjections inside overlap windows as their own speaker turn
+    # instead of folding them into the surrounding speaker.
+    OVERLAP_KEEP_INTERJECTIONS: bool = True
+    # Separate overlapped speech (pyannote/speech-separation-ami-1.0, MODELS_DIR/speech_separation)
+    # and re-transcribe each source to recover the second speaker's words.
+    OVERLAP_SEPARATION_ENABLED: bool = False
+    OVERLAP_SEPARATION_MIN_SEC: float = 0.5    # ignore overlap windows shorter than this
+    OVERLAP_SEPARATION_PAD_SEC: float = 0.3    # padding added around each overlap window
+    OVERLAP_SEPARATION_CONTEXT_SEC: float = 5.0  # minimum crop length handed to the separation model
+    OVERLAP_SEPARATION_MAX_WINDOWS: int = 200  # safety cap per recording
+
     speaker_refinement_margin: float = 0.30  # margins/similarity difference for refinement
     speaker_refinement_min_seg_sec: float = 1.2  # segments shorter than this are never re-labelled by refinement
     speaker_refinement_high_threshold: float = 0.82  # absolute confidence threshold for ECAPA refinement override
@@ -175,6 +222,10 @@ class Settings(BaseSettings):
 
     # Transcription
     WHISPER_MODEL_SIZE: str = "large-v3"
+    # Forced transcription language (ISO code). Meetings are overwhelmingly English,
+    # so output is pinned to English. Set to "auto" (or empty) in .env to re-enable
+    # per-recording language detection.
+    WHISPER_LANGUAGE: str = "en"
     WHISPER_DEVICE: str = "auto"  # "cuda", "cpu", "auto"
     WHISPER_COMPUTE_TYPE: str = "int8"
     WHISPER_BATCH_SIZE: int = 8

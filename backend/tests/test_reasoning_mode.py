@@ -228,7 +228,7 @@ def test_short_rom_generation_reasoning_mode_off():
             "Sarah Jenkins will implement and deploy PgBouncer connection pooling middleware in transaction mode by November 15, 2026, capping DB connections at 150.",
             "Elena Rostova will refactor the internal auth library to enforce OAuth2 PKCE and RS256 token validation across services.",
             "James Wilson took ownership to refactor the job scheduler locking protocol to enforce strict timestamp ordering by December 1, 2026.",
-            "Maya Lin will configure automated development instance shutdown scripts by November 5, 2026, saving $20,000 monthly."
+            "Maya Lin will configure automated development instance shutdown scripts by November 5, 2026."
         ])
 
     with patch("services.ai_provider.get_provider") as mock_get_provider:
@@ -314,7 +314,7 @@ def test_short_rom_generation_reasoning_mode_on():
                 "Sarah Jenkins will deploy PgBouncer connection pooling middleware in transaction mode by November 15, 2026, capping PostgreSQL connections at 150.",
                 "Elena Rostova will refactor the internal authentication library to mandate OAuth2 PKCE and RS256 token validation across services.",
                 "James Wilson will refactor the job scheduler locking protocol to enforce timestamp-based ordering by December 1, 2026, avoiding deadlocks.",
-                "Maya Lin will configure automated development compute engine shutdown scripts by November 5, 2026, targeting $20,000 in monthly savings."
+                "Maya Lin will configure automated development compute engine shutdown scripts by November 5, 2026."
             ])
 
     with patch("services.ai_provider.get_provider") as mock_get_provider:
@@ -343,7 +343,7 @@ def test_short_rom_generation_reasoning_mode_on():
     assert "==================================================" in call_2["prompt"]
     assert "REASONING BLOCK:" in call_2["prompt"]
     assert "Discussion Analysis & Synthesis Plan:" in call_2["prompt"]
-    assert "Return ONLY a valid JSON array of rewritten point strings" in call_2["prompt"]
+    assert "Return ONLY a valid JSON array of condensed point objects" in call_2["prompt"]
 
     # 4. Verify valid output and NO reasoning text leaked
     points = result["agendas"][0]["discussion_points"]

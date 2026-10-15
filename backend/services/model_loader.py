@@ -287,6 +287,7 @@ def verify_all_models() -> Dict[str, bool]:
     ]
     optional = [
         "eres2net_large",  # 3D-Speaker ERes2Net-Large (alternative speaker embedding)
+        "speech_separation",  # pyannote/speech-separation-ami-1.0 (overlap re-transcription)
     ]
     results: Dict[str, bool] = {}
     for name in expected:

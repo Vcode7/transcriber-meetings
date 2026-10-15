@@ -24,7 +24,7 @@ local pipeline directory (audio_context/). No path rewriting is needed.
 import logging
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from config import settings
 from services.compat import apply_compatibility_patches
 
@@ -77,6 +77,60 @@ def _check_required_models() -> List[str]:
     return missing
 
 
+# settings attribute → (sub-pipeline, parameter) in community-1's parameter tree
+_HYPERPARAMETER_SETTINGS = {
+    "DIARIZATION_CLUSTERING_THRESHOLD": ("clustering", "threshold"),
+    "DIARIZATION_VBX_FA": ("clustering", "Fa"),
+    "DIARIZATION_VBX_FB": ("clustering", "Fb"),
+    "DIARIZATION_SEG_MIN_DURATION_OFF": ("segmentation", "min_duration_off"),
+}
+
+
+def _apply_hyperparameter_overrides(pipeline) -> Dict[str, Any]:
+    """
+    Override community-1 hyper-parameters with any DIARIZATION_* settings that are
+    set (not None). Unset settings keep the snapshot's tuned values. Returns the
+    applied overrides; never raises — a bad override leaves the pipeline as loaded.
+    """
+    overrides: Dict[str, Dict[str, float]] = {}
+    for attr, (group, name) in _HYPERPARAMETER_SETTINGS.items():
+        value = getattr(settings, attr, None)
+        if value is not None:
+            overrides.setdefault(group, {})[name] = float(value)
+    if not overrides:
+        return {}
+    try:
+        params = pipeline.parameters(instantiated=True)
+        for group, values in overrides.items():
+            params.setdefault(group, {}).update(values)
+        pipeline.instantiate(params)
+        logger.info(f"[Diarization] Hyper-parameter overrides applied: {overrides}")
+        return overrides
+    except Exception as e:
+        logger.warning(f"[Diarization] Hyper-parameter overrides {overrides} rejected ({e}) — using snapshot defaults.")
+        return {}
+
+
+def resolve_speaker_hints(
+    participant_count: int = 0,
+    expected_speakers: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Build pyannote speaker-count hints for a recording.
+
+    An explicit ``expected_speakers`` (user-provided) becomes ``num_speakers``.
+    Otherwise the number of selected participant profiles becomes
+    ``min_speakers`` — guests without a profile may also speak, so it is only a
+    lower bound. Without this hint VBx tends to merge similar voices into one
+    cluster and one participant disappears from the transcript.
+    """
+    if expected_speakers and int(expected_speakers) > 0:
+        return {"num_speakers": int(expected_speakers)}
+    if participant_count >= 2 and getattr(settings, "DIARIZATION_USE_PARTICIPANT_COUNT", True):
+        return {"min_speakers": int(participant_count)}
+    return {}
+
+
 def _try_load_pyannote():
     global _diarization_pipeline, _pyannote_available
 
@@ -116,6 +170,7 @@ def _try_load_pyannote():
 
         # ── Step 3: Load pipeline from local directory — no internet calls ────
         pipeline = Pipeline.from_pretrained(str(audio_context_path))
+        _apply_hyperparameter_overrides(pipeline)
         pipeline = pipeline.to(get_torch_device())
 
         _diarization_pipeline = pipeline
@@ -282,7 +337,7 @@ def _merge_overlaps_into_exclusive(
     return exclusive_segments
 
 
-def _diarize_pyannote(file_path: str) -> List[Dict[str, Any]]:
+def _diarize_pyannote(file_path: str, **speaker_hints) -> List[Dict[str, Any]]:
     try:
         audio_input = _load_for_pyannote(file_path)
     except Exception as e:
@@ -293,7 +348,10 @@ def _diarize_pyannote(file_path: str) -> List[Dict[str, Any]]:
     if pipeline is None:
         raise RuntimeError("Pyannote diarization pipeline is not initialized.")
 
-    diarization = pipeline(audio_input)
+    hints = {k: v for k, v in speaker_hints.items() if v}
+    if hints:
+        logger.info(f"[Diarization] Speaker-count hints: {hints}")
+    diarization = pipeline(audio_input, **hints)
 
     # ── community-1 / pyannote 4.x returns a DiarizeOutput object. ────────
     #
@@ -427,7 +485,25 @@ def _diarize_energy(file_path: str, min_seg_dur: float = 1.5) -> List[Dict[str, 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def diarize(file_path: str) -> List[Dict[str, Any]]:
+def collect_overlap_windows(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Unique overlap windows ({start, end, speakers}) carried by diarization segments, time-sorted."""
+    seen: set = set()
+    windows: List[Dict[str, Any]] = []
+    for seg in segments:
+        for w in seg.get("overlap_regions") or []:
+            key = (w["start"], w["end"], tuple(w.get("speakers", [])))
+            if key not in seen:
+                seen.add(key)
+                windows.append(w)
+    return sorted(windows, key=lambda w: (w["start"], w["end"]))
+
+
+def diarize(
+    file_path: str,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
     Returns a list of diarization segments:
     [{"start": float, "end": float, "speaker": str, "is_overlap": bool}]
@@ -437,10 +513,18 @@ def diarize(file_path: str) -> List[Dict[str, Any]]:
     assignment, otherwise fill_nearest gives their words to the neighbouring
     (usually requesting) speaker. Speaker identification still only embeds
     turns of at least MIN_SEGMENT_DURATION.
+
+    num_speakers / min_speakers / max_speakers are forwarded to pyannote
+    (see resolve_speaker_hints); the energy fallback ignores them.
     """
     if is_pyannote_available():
         min_dur = getattr(settings, "DIARIZATION_ASSIGN_MIN_DURATION", settings.MIN_SEGMENT_DURATION)
-        raw = _diarize_pyannote(file_path)
+        raw = _diarize_pyannote(
+            file_path,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
     else:
         # The energy fallback alternates labels blindly; short segments would only add noise.
         min_dur = settings.MIN_SEGMENT_DURATION

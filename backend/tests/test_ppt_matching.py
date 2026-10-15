@@ -142,3 +142,23 @@ def test_llm_outage_falls_back_to_high_similarity_only():
     for g in result["comparison_groups"]:
         assert g["match_score"] >= 0.5 and g["match_type"] == "similarity_match"
         assert g["final_point"]                                   # falls back to the slide finding text
+
+
+
+# ── Small local models: decorated ids and truncated JSON (seen with gemma-4-E4B Q3 via Ollama) ──
+
+def test_verified_ids_decorated_by_the_model_are_accepted():
+    from services.ppt_matching import parse_verified
+    raw = json.dumps({"matches": [
+        {"id": "P5 [Slide 5 · Proposed Ordinance 2026-0108]", "confidence": "high", "reason": "deadline"},
+        {"id": "3", "confidence": "medium", "reason": "appraisal"},
+        {"id": "P9", "confidence": "high", "reason": "not a candidate"},
+    ]})
+    assert parse_verified(raw, {"P5": 0, "P3": 1}) == [(0, "high", "deadline"), (1, "medium", "appraisal")]
+
+
+def test_truncated_json_is_repaired():
+    from services.ppt_insights import parse_json_object
+    raw = '{"matches": [\n  {"id": "P5", "confidence": "high", "reason": "same ordinance {2026-0108}"},\n  {"id": "P3", "confidence": "medium"}'
+    assert [m["id"] for m in parse_json_object(raw)["matches"]] == ["P5", "P3"]
+    assert parse_json_object('{"a": 1}') == {"a": 1}

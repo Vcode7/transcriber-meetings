@@ -24,6 +24,8 @@ import textwrap
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union
 
+from services.point_classification import normalize_action_flag
+
 logger = logging.getLogger(__name__)
 
 
@@ -1540,12 +1542,11 @@ ROM_DISCUSSION_EXTRACTION_PROMPT = """You are an expert meeting analyst. Extract
 
 CORE EXTRACTION RULES:
 
-1. CONCISE, TOPIC-BASED EXTRACTION
-   - Group related consecutive statements that belong to the same topic or discussion thread into a SINGLE discussion point.
+1. ONE SUBJECT PER DISCUSSION POINT
+   - Group consecutive statements about the SAME subject (the same project, system, issue, decision or topic) into a single discussion point.
    - Do NOT create a separate discussion point for every sentence, minor clarification, side remark, or filler statement.
-   - Aim for the minimum number of discussion points that fully captures all meaningful content — typically 1 point per distinct topic or decision thread.
-   - Merge follow-up questions, brief acknowledgements, and continuations of the same topic into the preceding discussion point.
-   - Only start a new discussion point when the conversation clearly shifts to a genuinely different topic.
+   - Merge follow-up questions, brief acknowledgements, and continuations of the same subject into the preceding discussion point.
+   - Never combine different subjects or agenda topics in one point, even when they are discussed back to back: when the conversation moves to another subject, start a new discussion point.
 
 2. PRESERVE ALL IMPORTANT CONTENT INSIDE DISCUSSION POINT
    - Include decisions made, questions raised, key facts, numbers, dates, and technical details directly inside the `discussion_point` text.
@@ -1554,10 +1555,11 @@ CORE EXTRACTION RULES:
    - Do not invent, infer, or embellish information not present in the transcript.
    - Apply only minimal grammatical corrections needed for readability.
 
-3. AVOID DUPLICATION ACROSS POINTS
-   - Do NOT repeat the same technical terms, speaker names, dates, numbers, or context across multiple discussion points.
-   - Capture shared context (e.g. project name, meeting topic) once in the most relevant point.
-   - If a technical term or date appears in several statements on the same topic, include it only in the single merged point.
+3. SELF-CONTAINED POINTS
+   - Every discussion point must be understandable on its own, without reading the other points.
+   - Name the subject explicitly in every point (project, system, product, location or topic) — never write "it", "this", "the project" or "the issue" without saying which one.
+   - Resolve pronouns to the people and things they refer to.
+   - Do not repeat the same fact twice within one point.
 
 4. ACTION ITEMS & ACTION OWNER IDENTIFICATION (CRITICAL)
    - Every action item in "action_items" MUST identify: assigner, assignee, task, and deadline (or null if not mentioned).
@@ -1629,12 +1631,11 @@ IMPORTANT: This call focuses ONLY on discussion points. Do NOT extract action it
 
 CORE EXTRACTION RULES:
 
-1. CONCISE, TOPIC-BASED EXTRACTION
-   - Group related consecutive statements that belong to the same topic or discussion thread into a SINGLE discussion point.
+1. ONE SUBJECT PER DISCUSSION POINT
+   - Group consecutive statements about the SAME subject (the same project, system, issue, decision or topic) into a single discussion point.
    - Do NOT create a separate discussion point for every sentence, minor clarification, side remark, or filler statement.
-   - Aim for the minimum number of discussion points that fully captures all meaningful content — typically 1 point per distinct topic or decision thread.
-   - Merge follow-up questions, brief acknowledgements, and continuations of the same topic into the preceding discussion point.
-   - Only start a new discussion point when the conversation clearly shifts to a genuinely different topic.
+   - Merge follow-up questions, brief acknowledgements, and continuations of the same subject into the preceding discussion point.
+   - Never combine different subjects or agenda topics in one point, even when they are discussed back to back: when the conversation moves to another subject, start a new discussion point.
 
 2. PRESERVE ALL IMPORTANT CONTENT INSIDE DISCUSSION POINT
    - Include decisions made, questions raised, key facts, numbers, dates, and technical details directly inside the `discussion_point` text.
@@ -1643,9 +1644,11 @@ CORE EXTRACTION RULES:
    - Do not invent, infer, or embellish information not present in the transcript.
    - Apply only minimal grammatical corrections needed for readability.
 
-3. AVOID DUPLICATION ACROSS POINTS
-   - Do NOT repeat the same technical terms, speaker names, dates, numbers, or context across multiple discussion points.
-   - Capture shared context once in the most relevant point.
+3. SELF-CONTAINED POINTS
+   - Every discussion point must be understandable on its own, without reading the other points.
+   - Name the subject explicitly in every point (project, system, product, location or topic) — never write "it", "this", "the project" or "the issue" without saying which one.
+   - Resolve pronouns to the people and things they refer to.
+   - Do not repeat the same fact twice within one point.
 
 4. DATES & TECHNICAL ACCURACY
    - DATES: Extract ONLY actual calendar dates (e.g. "July 8, 2026", "next Monday"). NEVER output transcript timestamps or audio offsets as dates.
@@ -1788,12 +1791,11 @@ ROM_DISCUSSION_EMBEDDED_PROMPT = """You are an expert meeting analyst. Extract s
 
 CORE EXTRACTION RULES:
 
-1. CONCISE, TOPIC-BASED EXTRACTION
-   - Group related consecutive statements that belong to the same topic or discussion thread into a SINGLE discussion point.
+1. ONE SUBJECT PER DISCUSSION POINT
+   - Group consecutive statements about the SAME subject (the same project, system, issue, decision or topic) into a single discussion point.
    - Do NOT create a separate discussion point for every sentence, minor clarification, side remark, or filler statement.
-   - Aim for the minimum number of discussion points that fully captures all meaningful content — typically 1 point per distinct topic or decision thread.
-   - Merge follow-up questions, brief acknowledgements, and continuations of the same topic into the preceding discussion point.
-   - Only start a new discussion point when the conversation clearly shifts to a genuinely different topic.
+   - Merge follow-up questions, brief acknowledgements, and continuations of the same subject into the preceding discussion point.
+   - Never combine different subjects or agenda topics in one point, even when they are discussed back to back: when the conversation moves to another subject, start a new discussion point.
 
 2. PRESERVE ALL IMPORTANT CONTENT INSIDE DISCUSSION POINT — INCLUDING ACTIONS
    - Include decisions made, questions raised, key facts, numbers, dates, and technical details directly inside the `discussion_point` text.
@@ -1828,9 +1830,11 @@ CORE EXTRACTION RULES:
    - In `speakers`, list only the speaker labels of those turns, exactly as written in the turn headers.
    - Never extract points or actions from the previous transcript window (context only).
 
-4. AVOID DUPLICATION ACROSS POINTS
-   - Do NOT repeat the same technical terms, speaker names, dates, numbers, or context across multiple discussion points.
-   - Capture shared context (e.g. project name, meeting topic) once in the most relevant point.
+4. SELF-CONTAINED POINTS
+   - Every discussion point must be understandable on its own, without reading the other points.
+   - Name the subject explicitly in every point (project, system, product, location or topic) — never write "it", "this", "the project" or "the issue" without saying which one.
+   - Resolve pronouns to the people and things they refer to.
+   - Do not repeat the same fact twice within one point.
 
 5. DATES & TECHNICAL ACCURACY
    - DATES: Extract ONLY actual calendar dates (e.g. "July 8, 2026", "next Monday"). NEVER output transcript timestamps or audio offsets as dates.
@@ -1908,6 +1912,13 @@ Each discussion point in the provided JSON array contains:
 - `speakers`: List of attendees who participated in that discussion point.
 - `owner_candidates` (optional): Owners already verified against the meeting transcript for this point.
 - `transcript_excerpt` (optional): The original transcript turns behind this point, one per line as `[T12 | 03:41-03:52] Speaker: text`.
+- `role` (optional): "target" when the point was identified as containing an action; "context" when it is a neighbouring point included only so the targets can be understood.
+
+TARGET AND CONTEXT POINTS (when `role` is present):
+- Extract action items ONLY from points with role "target". NEVER create an action item from a "context" point alone.
+- Use context points only to understand the targets, for example who accepted a request or a deadline stated just after it.
+- `source_point_id` MUST be the id of a target point.
+- A target point may still contain no genuine action item; then emit nothing for it.
 
 WRITING QUALITY GUIDELINES:
 1. Complete, Self-Contained Task Sentence (Action + Owner + Deadline):
@@ -2090,6 +2101,8 @@ MERGING:
 
 * Merge only consecutive points that clearly belong to the same continuous discussion thread, subject, issue, or agenda topic.
 * Keep genuinely independent topics separate; do not merge based only on shared keywords, participants, or broad similarity.
+* Never merge points about different subjects or agenda topics, even when they are consecutive: each output point covers ONE subject.
+* Every output point must be self-contained: name its subject (project, system or topic) explicitly instead of "it" or "this".
 * Merge without information loss, preserving every unique fact, speaker contribution, question, decision, conclusion, outcome, action, responsibility, deadline, date, number, reference, and technical detail.
 * `original_point_ids` must include every source point represented in the enhanced or merged point.
 * Combine overlapping information clearly without unnecessary duplication.
@@ -2107,6 +2120,19 @@ OUTPUT INTEGRITY:
 * Return only fields defined in the required output schema.
 * Preserve a valid explicit `action_owner` when applicable; otherwise return null.
 * `discussion_point` must contain the complete enhanced discussion, including all relevant actions, responsibilities, deadlines, questions, decisions, and outcomes.
+
+POINT TYPE AND ACTION FLAG:
+
+* `type`: the ONE type that best describes what the output point records:
+  - "decision": a decision, approval, rejection or agreement was reached in the meeting.
+  - "debate": participants argued different positions or disagreed on an issue, whether or not it was resolved.
+  - "question_answer": someone asked a question and it was answered or left open.
+  - "issue": a problem, risk, blocker, delay or concern was raised.
+  - "update": a status, progress or information report.
+  - "discussion": general discussion that fits none of the above.
+  If several apply, use the first one in this order: decision, debate, question_answer, issue, update, discussion. For a merged point, classify the merged discussion as a whole.
+* `include_action_point`: true ONLY when the point states a concrete task that someone committed to, was assigned, or was explicitly asked to do after the meeting (with or without an owner or deadline). Otherwise false, including for: work already completed during the meeting (approvals given, votes taken, presentations delivered), vague intentions ("look into it", "keep monitoring") without a specific deliverable, opinions, background and status updates.
+* Do NOT extract, list or rewrite the action itself. It stays inside `discussion_point`; the flag only marks that the point contains one.
 
 {reference_examples_section}
 
@@ -2126,7 +2152,7 @@ PREVIOUS MEETING CONTEXT (enhanced Stage 2 points from past meetings):
 
 OUTPUT RULES:
 - Return ONLY the JSON below. No extra text, no markdown prose, no explanations.
-- For each enhanced point return ONLY: original_point_ids, discussion_point, speakers, action_owner.
+- For each enhanced point return ONLY: original_point_ids, discussion_point, speakers, action_owner, type, include_action_point, context_usage_report.
 - You MAY merge closely related consecutive points. List ALL source IDs in original_point_ids.
 - Preserve questions, decisions, conclusions, and outcomes inside discussion_point.
 - Keep action_owner if present in input; otherwise null.
@@ -2135,10 +2161,12 @@ OUTPUT RULES:
 {{
   "enhanced_points": [
     {{
-      "original_point_ids": ["id-1"],
+      "original_point_ids": ["P1"],
       "discussion_point": "Clear, information-dense enhanced discussion point written in formal third-person meeting minutes style, preserving questions, decisions, conclusions, and outcomes.",
       "speakers": ["Speaker Name"],
       "action_owner": "Person responsible for the action or null",
+      "type": "decision | debate | question_answer | issue | update | discussion",
+      "include_action_point": false,
       "context_usage_report": {{
         "meeting_context_used": true,
         "global_context_used": false,
@@ -2208,10 +2236,25 @@ MERGING:
 * Include ALL source point IDs in `original_point_ids`.
 * Combine overlapping information clearly without unnecessary duplication.
 * Keep genuinely distinct topics as separate points.
+* Never merge points about different subjects or agenda topics, even when they are consecutive: each output point covers ONE subject.
+* Every output point must be self-contained: name its subject (project, system or topic) explicitly instead of "it" or "this".
+
+POINT TYPE AND ACTION FLAG:
+
+* `type`: the ONE type that best describes what the output point records:
+  - "decision": a decision, approval, rejection or agreement was reached in the meeting.
+  - "debate": participants argued different positions or disagreed on an issue, whether or not it was resolved.
+  - "question_answer": someone asked a question and it was answered or left open.
+  - "issue": a problem, risk, blocker, delay or concern was raised.
+  - "update": a status, progress or information report.
+  - "discussion": general discussion that fits none of the above.
+  If several apply, use the first one in this order: decision, debate, question_answer, issue, update, discussion. For a merged point, classify the merged discussion as a whole.
+* `include_action_point`: true ONLY when the point states a concrete task that someone committed to, was assigned, or was explicitly asked to do after the meeting (with or without an owner or deadline). Otherwise false, including for: work already completed during the meeting (approvals given, votes taken, presentations delivered), vague intentions ("look into it", "keep monitoring") without a specific deliverable, opinions, background and status updates.
+* Do NOT extract, list or rewrite the action itself. It stays inside `discussion_point`; the flag only marks that the point contains one.
 
 OUTPUT RULES:
 
-* Return ONLY the fields: `original_point_ids`, `discussion_point`, `speakers`, and `action_owner`.
+* Return ONLY the fields: `original_point_ids`, `discussion_point`, `speakers`, `action_owner`, `type`, and `include_action_point`.
 * Do NOT return `context_usage_report`, `technical_terms`, `dates`, `numbers`, `references`, `action_items`, or any other fields.
 * Preserve questions, concerns, proposals, decisions, conclusions, agreements, disagreements, outcomes, and follow-up requirements inside `discussion_point`.
 * `speakers` must accurately represent the speakers associated with the source discussion. Do not invent speakers.
@@ -2234,10 +2277,12 @@ Return exactly this JSON structure:
 {{
     "enhanced_points": [
         {{
-        "original_point_ids": ["id-1", "id-2"],
+        "original_point_ids": ["P1", "P2"],
         "discussion_point": "Complete, accurate, information-dense discussion written in formal third-person meeting minutes style, preserving all relevant discussion, actions, responsibilities, deadlines, questions, decisions, and outcomes.",
         "speakers": ["Speaker Name"],
-        "action_owner": "Explicit responsible person, organization, or role, or null"
+        "action_owner": "Explicit responsible person, organization, or role, or null",
+        "type": "decision | debate | question_answer | issue | update | discussion",
+        "include_action_point": false
         }}
     ]
 }}
@@ -2344,6 +2389,8 @@ ROM_AGENDA_GENERATION_PROMPT = """You are an expert meeting analyst. Generate st
 
 {agenda_input}
 
+{extraction_rules}
+
 {context}
 
 {previous_mom}
@@ -2373,6 +2420,20 @@ Generate enriched agenda sections as JSON:
   ]
 }}
 ```"""
+
+# {extraction_rules} of ROM_AGENDA_GENERATION_PROMPT, by what the agenda input holds
+# ("Extract Agenda from Tables" on: the document's tables; off: the whole document).
+ROM_AGENDA_EXTRACTION_RULES = {
+    "tables": """AGENDA SOURCE: TABLES ONLY
+The uploaded agenda above contains only the table(s) found in the agenda document; titles, headings and other text were removed.
+- Each data row of a table that lists agenda items, topics or sessions is one agenda item. Use the header row only to understand the columns; never output it as an item.
+- Title: the topic / subject / agenda item column. Presenter: the presenter / speaker / owner / lead / responsible column. Put the other columns (time, duration, notes) into the description.
+- A row without a number or time of its own that only continues the text of the row above belongs to that item.
+- Ignore tables that do not list agenda items (attendance or distribution lists, document control, revision history, sign-off).""",
+    "document": """AGENDA SOURCE: WHOLE DOCUMENT
+Scan the entire uploaded agenda: numbered or bulleted lists, headings that introduce agenda topics, tables and paragraphs that list topics. Each distinct agenda topic is one item.
+- Do not output the document title, meeting logistics (date, time, venue, dial-in details), attendee lists or signatures as agenda items.""",
+}
 # ===========================================================================
 # PROMPT: ROM_MOM_EXPANSION_PROMPT
 # STATUS: CURRENTLY IN USE
@@ -2463,11 +2524,11 @@ ASSIGNMENT RULES:
 - The selected agenda must be supported by information contained in the discussion point.
 - Do NOT assign a point simply because it is broadly or semantically similar to an agenda.
 
-3. DO NOT USE POSITION AS PROOF
-- Discussion order and timeline are only supporting context.
-- A point appearing immediately after another agenda does NOT mean it belongs to that agenda.
-- If the discussion content clearly supports another agenda, assign the agenda supported by the content.
-- Never use chronological position as the primary reason for an assignment.
+3. NEIGHBOURING POINTS AND POSITION ARE SUPPORTING CONTEXT
+- A point may include "previous_point" and "next_point": the discussion just before and after it in the meeting.
+- Use them to understand what a short or follow-up point refers to (e.g. "He agreed to send it by Friday" continues the subject of the previous point).
+- Discussion order and timeline are only supporting context: when the point's own content clearly supports an agenda, follow the content.
+- Never assign a point by position alone.
 
 4. REQUIRE CLEAR EVIDENCE
 - Every assignment must have a clear reason based on information present in the discussion point.
@@ -2481,12 +2542,11 @@ ASSIGNMENT RULES:
 - Do not treat common or general terminology as sufficient evidence by itself.
 - Prefer direct subject-matter evidence over broad semantic similarity.
 
-6. HANDLE UNCERTAINTY CORRECTLY
-- If the discussion point cannot be confidently matched to a specific agenda, assign it to the closest relevant agenda based on the available evidence.
-- Set "confidence": "low" when the match is uncertain or only partially supported.
+6. POINTS THAT MATCH NO AGENDA
+- If the AGENDA REFERENCE contains "AOB" (Other Discussion), assign "AOB" to a point whose subject matches none of the other agendas. Do not force such a point into an unrelated agenda.
+- When a point is related to an agenda but the evidence is only partial, assign that agenda and set "confidence": "low".
 - NEVER return null for assigned_agenda_id.
 - NEVER use the first agenda as a fallback without considering the discussion content.
-- Always select the agenda that has the strongest available connection to the discussion point, even when the evidence is weak.
 
 7. CONFIDENCE
 Use:
@@ -2496,7 +2556,7 @@ Use:
 
 8. ONE POINT = ONE ASSIGNMENT
 - Each discussion point must receive exactly one assignment.
-- The assignment must contain one valid agenda_id. When the evidence is weak, choose the closest agenda and set "confidence": "low" (never null).
+- The assignment must contain one valid agenda_id. When the evidence is weak, choose the closest related agenda and set "confidence": "low"; when no agenda is related, choose "AOB" if it is offered (never null).
 - Do not merge discussion points.
 - Do not split discussion points.
 - Do not combine multiple discussion points.
@@ -2526,7 +2586,7 @@ For every discussion point, verify:
 3. The assignment is not based only on chronological position.
 4. The assignment is not based only on broad semantic similarity.
 5. The selected agenda is the one most specifically supported by the available evidence.
-6. If sufficient evidence does not exist, the closest agenda is still assigned and confidence is low.
+6. A point related to an agenda only weakly has that agenda with confidence low; a point related to no agenda has "AOB" (when offered).
 7. The discussion point itself has not been changed, merged, or split.
 
 Return ONLY a JSON object. One entry per discussion point, in the same order as the batch:
@@ -2534,7 +2594,7 @@ Return ONLY a JSON object. One entry per discussion point, in the same order as 
 {{
   "assignments": [
     {{
-      "point_id": "uuid-string",
+      "point_id": "P1",
       "assigned_agenda_id": "A2",
       "confidence": "high",
       "reason": "The point discusses X which directly relates to agenda A2 on Y."
@@ -2667,10 +2727,16 @@ AGENDA ITEM:
 DISCUSSION POINTS UNDER THIS AGENDA (complete text, chronological):
 {points_json}
 
-Each discussion point has "id" and "text" (the complete discussion), and when known: "point_type" (decision / action_item / question / risk / discussion), "speakers", "action_owner" and "owner_candidates" (owners already validated against the transcript), "dates", "numbers", "technical_terms", "references", "time", and "candidate_actions" (tasks extracted earlier from the transcript; hints only, they may be incomplete, vague or duplicated).
+Each discussion point has "id" and "text" (the complete discussion), and when known: "role", "type" (decision / debate / question_answer / issue / update / discussion) or "point_type" (decision / action_item / question / risk / discussion), "speakers", "action_owner" and "owner_candidates" (owners already validated against the transcript), "dates", "numbers", "technical_terms", "references", "time", and "candidate_actions" (tasks extracted earlier from the transcript; hints only, they may be incomplete, vague or duplicated).
+
+ROLE (when present):
+- "target": the point was identified as containing an action. Action points may ONLY come from target points.
+- "context": a neighbouring point, given only so you understand the targets (for example who accepted a request, or a deadline stated just after it). NEVER create an action point from a context point alone.
+- Every action point's "source_point_ids" must include at least one target point; add a context point only when it supplies a detail of that action.
+- A target point may still contain no genuine action point after the rules below; then return nothing for it.
 
 TASK
-Analyse ALL the discussion points of this agenda together and list the action points the meeting actually produced.
+Analyse ALL the discussion points given together and list the action points the meeting actually produced.
 
 1. WHAT IS AN ACTION POINT
 - Work that remains to be done AFTER the meeting: a concrete next step that someone agreed to do, was assigned, volunteered for, or was explicitly asked to do, or follow-up work that a recorded decision requires (for example: provide the requested figures, revise and resubmit a document, implement an approved change).
@@ -2706,15 +2772,117 @@ If the discussion contains no genuine action point, return {"action_points": []}
 
 
 # ===========================================================================
+# PROMPT: ROM_ACTION_IMPORTANCE_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: QwenProvider.score_action_point_importance() <- services/action_importance.py
+#          (Final ROM agenda action points and MoM action items from Stage 2 points)
+# TASK KEY: "rom_action_importance"
+# PURPOSE: Scores the importance (40-100%) of validated action points from their source discussion.
+# ===========================================================================
+#region ROM_ACTION_IMPORTANCE_PROMPT
+ROM_ACTION_IMPORTANCE_PROMPT = """You are an expert meeting analyst. Rate how important each action point below is for the people who must follow up after the meeting.
+
+ACTION POINTS:
+{action_points_json}
+
+Each action point has "id", "task", "owner" and "deadline", and when known: "basis" (decision / commitment / assignment / request), "evidence" (a quote from the discussion), "agenda", "point_type" and "source_discussion" (the discussion the task comes from).
+
+SCALE ("importance", a percentage):
+- 80-100: critical. A critical project update or deliverable, an important date or deadline, a high-priority decision that must be implemented, or a blocker, risk or compliance matter. Use 90-100 only when the discussion makes the urgency or the consequence explicit.
+- 60-80: moderately important. A clear task, update or decision follow-up with a concrete deliverable but no stated urgency.
+- 40-50: general information or low priority. Routine updates, minor or optional tasks, courtesies, vague follow-ups.
+
+RULES
+- Judge each action point on the evidence in its task and source discussion, not on how urgent its wording sounds.
+- A score of 80 or more needs a stated date or deadline, a decision, an explicit priority, or a stated consequence (risk, blocker, compliance, cost). A missing owner or deadline alone does not make a point unimportant.
+- Use the whole scale. Most meetings have few critical points; do not give every point the same score and do not inflate scores.
+- Use multiples of 5.
+- "reason": one short phrase citing the evidence (for example "deadline 15 Oct; blocks integration testing").
+
+Return ONLY a JSON object with every id exactly once:
+{"scores": [{"id": "AP1", "importance": 75, "reason": "..."}]}"""
+#endregion
+
+
+
+# ===========================================================================
 # PROMPT: ROM_VERSION_SHORT_PROMPT
 # STATUS: CURRENTLY IN USE
 # USED IN: RomService.generate_rom_version() (services/rom_service.py)
 # TASK KEY: "rom_version_short"
-# PURPOSE: Generates the condensed 'Short' version of Final ROM, capturing all critical meeting content concisely.
+# PURPOSE: Generates the condensed 'Short' version of Final ROM from the agenda's complete points,
+#          condensing each point by its Stage 2 type and citing the points behind every output point.
 # ===========================================================================
 #region ROM_VERSION_SHORT_PROMPT
 
 ROM_VERSION_SHORT_PROMPT = """You are an expert meeting-record editor.
+
+Create a SHORT, INFORMATION-RICH version of the complete discussion for ONE agenda item.
+
+AGENDA:
+{agenda_title}
+
+DISCUSSION POINTS:
+{points_json}
+
+{rules_section}{mandatory_section}
+
+INPUT FORMAT:
+Each discussion point starts with a header line: its ID (P1, P2, ...), its Type, the Speakers, the Action Owner when known, "ACTION" when the point contains a task someone must do after the meeting, and a VERY IMPORTANT tag when it must stay intact. The complete discussion follows the header.
+
+IMPORTANT:
+Think about the ENTIRE agenda discussion as one conversation. Do NOT rewrite each input point separately.
+Identify the most important meeting insights, combine related points, and remove repetition and low-value detail. The output must be substantially shorter than the input (roughly 40–50% of its length; a target, not a hard limit) while keeping the important meaning.
+
+CONDENSE EACH POINT ACCORDING TO ITS TYPE:
+* decision: state the final decision exactly: what was decided, approved or rejected, by whom when stated, with its conditions, amounts and dates. Leave out the deliberation that led to it.
+* debate: state the issue in a few words, then the conclusion or outcome. Mention opposing positions only in one short clause when they explain the conclusion. If the debate was not resolved, say so and what remains open. Never invent a conclusion.
+* question_answer: state who asked what and the essential answer (and who gave it, when stated). If no answer was given, say the question remains open.
+* issue: state the problem, its impact and the agreed mitigation, if any.
+* update: state the current status with its key figures and dates.
+* discussion: keep the one or two most important insights; drop background, examples and filler.
+* ACTION: keep who will do what and by when, exactly as stated. Never add an owner or a deadline that is not stated.
+
+MERGING:
+* Merge points only when they cover the same subject, issue or decision; combine the important viewpoints of several speakers into one point.
+* Keep genuinely different subjects as separate points. Never hide a decision inside a point about another subject.
+* A merged point takes the type of its most important outcome (decision, then debate, question_answer, issue, update, discussion).
+* Do NOT force a fixed number of output points. A point is usually one or two sentences; use more only when a decision has several conditions.
+
+VERY IMPORTANT POINTS:
+Every point tagged VERY IMPORTANT or listed in MANDATORY POINTS MUST appear as its own output point, unchanged, citing only its own ID.
+
+FACTUAL ACCURACY:
+* Use only information stated in the discussion points. Do not invent, assume or infer.
+* Copy names, speakers, owners, dates, deadlines, numbers, amounts, technical terms and decisions exactly.
+* Never turn an open question or an unresolved debate into a decision.
+
+QUALITY:
+Avoid vague points such as "An issue was discussed.", "Progress was reviewed." or "The team had a debate." State the actual substance: what the issue, the progress or the conclusion was.
+Before returning, check that no decision, action, conclusion or important answer has been lost.
+
+OUTPUT:
+Return ONLY a valid JSON array of condensed point objects. Each object has:
+* "text": the condensed point.
+* "type": decision, debate, question_answer, issue, update or discussion.
+* "source_ids": the IDs (P1, P2, ...) of every input point the condensed point was written from.
+[{{"text": "...", "type": "decision", "source_ids": ["P1", "P3"]}}]
+No markdown. No code fences. No explanation."""
+
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_VERSION_SHORT_VARIANT_PROMPT
+# STATUS: CURRENTLY IN USE (trained Short ROM variants only; not editable in Settings)
+# USED IN: RomService.generate_rom_version_with_variant() and the Short ROM training examples
+#          (services/rom_training/rom_training_service.py)
+# PURPOSE: The prompt trained LoRA variants were tuned on: "[Point i] text" lines in, a JSON array
+#          of strings out. Kept unchanged so training and inference use the same contract.
+# ===========================================================================
+#region ROM_VERSION_SHORT_VARIANT_PROMPT
+
+ROM_VERSION_SHORT_VARIANT_PROMPT = """You are an expert meeting-record editor.
 
 Create a SHORT, INFORMATION-RICH version of the complete discussion for ONE agenda item.
 
@@ -2843,7 +3011,8 @@ No explanation."""
 # STATUS: CURRENTLY IN USE
 # USED IN: RomService.generate_rom_version() (services/rom_service.py)
 # TASK KEY: "rom_version_medium"
-# PURPOSE: Generates the condensed 'Medium' version of Final ROM, preserving all important content with context and rationale.
+# PURPOSE: Generates the condensed 'Medium' version of Final ROM, preserving all important content with context and rationale,
+#          and citing the points behind every output point.
 # ===========================================================================
 #region ROM_VERSION_MEDIUM_PROMPT
 ROM_VERSION_MEDIUM_PROMPT = """You are an expert meeting records editor. You are given all discussion points for a single agenda item from a meeting. Your task is to produce a MEDIUM version of this agenda's discussion — an aggregated version that retains ALL important discussion details, decisions, and action points with their context.
@@ -2853,9 +3022,12 @@ AGENDA: {agenda_title}
 DISCUSSION POINTS:
 {points_json}
 {rules_section}{mandatory_section}
+INPUT FORMAT:
+Each discussion point starts with a header line: its ID (P1, P2, ...), its Type, the Speakers, the Action Owner when known, "ACTION" when the point contains a task someone must do after the meeting, and a VERY IMPORTANT tag when it must stay intact. The complete discussion follows the header.
+
 INSTRUCTIONS:
 - VERY IMPORTANT POINTS (CRITICAL):
-  * Every point marked as "Very Important" (labeled with [VERY IMPORTANT] or listed in MANDATORY POINTS) MUST be included in the output.
+  * Every point tagged VERY IMPORTANT or listed in MANDATORY POINTS MUST be included in the output as its own point, citing only its own ID.
   * You MUST preserve the COMPLETE ORIGINAL CONTENT of each marked point verbatim, WITHOUT ANY SUMMARIZATION or paraphrasing.
   * The marked point must remain fully intact in both Short and Medium versions.
 - Process ALL points together for this agenda as a whole - do NOT process each point individually.
@@ -2878,8 +3050,13 @@ INSTRUCTIONS:
 - Produce a moderate reduction - typically >70% of the input count. Aim for 4-8 points per agenda.
 - Write in formal, professional language.
 
-Return ONLY a valid JSON array of rewritten point strings. No markdown, no code fences, no extra text:
-["point 1", "point 2", ...]"""
+OUTPUT:
+Return ONLY a valid JSON array of condensed point objects. Each object has:
+* "text": the condensed point.
+* "type": decision, debate, question_answer, issue, update or discussion.
+* "source_ids": the IDs (P1, P2, ...) of every input point the condensed point was written from. A point that merges several input points lists all of them.
+[{{"text": "...", "type": "decision", "source_ids": ["P1", "P3"]}}]
+No markdown. No code fences. No explanation."""
 #endregion
 
 
@@ -2950,6 +3127,82 @@ REQUIREMENTS:
   "conclusion": "The clear 1 to 3 sentence synthesized summary.",
   "explanation": "Brief explanation of how the points were synthesized into the summary."
 }}"""
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_EXPLAIN_CONDENSED_POINT_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: RomService.explain_condensed_point() (services/rom_service.py)
+# TASK KEY: "rom_explain_condensed_point"
+# PURPOSE: Explains, on demand, how one Short/Medium ROM point was written from its original (long)
+#          points: what was retained, removed and merged, and why.
+# ===========================================================================
+#region ROM_EXPLAIN_CONDENSED_POINT_PROMPT
+ROM_EXPLAIN_CONDENSED_POINT_PROMPT = """You are an expert meeting-record editor.
+
+A {version} Record of Meeting condenses the complete (long) discussion points of each agenda. Explain how ONE condensed point was written from its original points.
+
+AGENDA:
+{agenda_title}
+
+CONDENSED POINT:
+{point_text}
+
+ORIGINAL POINTS IT WAS WRITTEN FROM:
+{source_points}
+{notes_section}
+Compare the condensed point with its original points and explain:
+* "retained": the facts, decisions, actions, names, numbers and dates the condensed point keeps.
+* "removed": what was left out (repetition, background, examples, deliberation, minor details), naming the actual content.
+* "merged": which original points (by ID, e.g. P2 and P5) were combined and on what common subject; write "Not merged: written from <ID> only." when there is one original point.
+* "why": why these choices fit the {version} version (keeping decisions, actions and outcomes while cutting repetition and low-value detail). Use the PIPELINE NOTES when they explain a change.
+
+RULES:
+* Refer to original points only by their IDs (P1, P2, ...).
+* Describe only differences you can see between the texts above. Do not invent content, reasons or facts.
+* Each field is one or two sentences.
+
+Return ONLY a valid JSON object, no markdown, no code fences:
+{{"retained": "...", "removed": "...", "merged": "...", "why": "..."}}"""
+#endregion
+
+
+# ===========================================================================
+# PROMPT: ROM_EXPAND_CONDENSED_POINT_PROMPT
+# STATUS: CURRENTLY IN USE
+# USED IN: RomService.expand_condensed_point() (services/rom_service.py)
+# TASK KEY: "rom_expand_condensed_point"
+# PURPOSE: Expand Point: 2-3 more sentences of detail for one Short/Medium ROM point, taken only from
+#          the original points mapped to it. The sentences are fact-checked and appended to the point.
+# ===========================================================================
+#region ROM_EXPAND_CONDENSED_POINT_PROMPT
+ROM_EXPAND_CONDENSED_POINT_PROMPT = """You are an expert meeting-record editor.
+
+A condensed Record of Meeting point was written from the original discussion points below. Add more detail to it.
+
+AGENDA:
+{agenda_title}
+
+CONDENSED POINT:
+{point_text}
+
+ORIGINAL POINTS (the ONLY allowed source of information):
+{source_points}
+
+TASK:
+Write 2 to 3 NEW sentences that add the most important details from the original points that the condensed point leaves out: for example the reasons behind a decision, conditions, figures, who raised or answered what, consequences, or open issues.
+
+RULES:
+* Use ONLY information stated in the original points. Do not invent, assume or infer anything.
+* Copy names, speakers, owners, numbers, amounts, dates and technical terms exactly.
+* Do NOT repeat what the condensed point already says, and do not rewrite it.
+* Never turn an open question or an unresolved debate into a decision.
+* Each sentence is complete, standalone and written in formal meeting-minutes style.
+* If the original points contain no further important detail, return an empty list.
+
+Return ONLY a valid JSON object, no markdown, no code fences:
+{{"sentences": ["...", "..."]}}"""
 #endregion
 
 
@@ -3206,6 +3459,7 @@ def _get_prompt(key: str) -> str:
         "rom_point_classification": ROM_POINT_CLASSIFICATION_PROMPT,
         "rom_agenda_topic_synthesis": ROM_AGENDA_TOPIC_SYNTHESIS_PROMPT,
         "rom_agenda_action_points": ROM_AGENDA_ACTION_POINTS_PROMPT,
+        "rom_action_importance": ROM_ACTION_IMPORTANCE_PROMPT,
         "raw_mom_extraction": "",
         "agenda_compress": AGENDA_COMPRESS_PROMPT,
         "agenda_compress_with_context": AGENDA_COMPRESS_WITH_CONTEXT_PROMPT,
@@ -3230,9 +3484,28 @@ def _get_prompt(key: str) -> str:
         "rom_version_medium":      ROM_VERSION_MEDIUM_PROMPT,
         "rom_ai_edit_points":      ROM_AI_EDIT_POINTS_PROMPT,
         "rom_conclude_points":     ROM_CONCLUDE_POINTS_PROMPT,
+        "rom_explain_condensed_point": ROM_EXPLAIN_CONDENSED_POINT_PROMPT,
+        "rom_expand_condensed_point":  ROM_EXPAND_CONDENSED_POINT_PROMPT,
         "rom_ai_chat":             ROM_AI_CHAT_PROMPT,
     }
     return _CONSTANT_MAP.get(key, "")
+
+
+# A context point only explains its neighbours; its owner hints and transcript would invite tasks.
+_CONTEXT_HIDDEN_KEYS = ("action_owner", "owner_candidates", "transcript_excerpt")
+
+
+def _action_extraction_view(entry: Dict, target_ids: Optional[List[str]]) -> Dict:
+    """One point of an action-extraction request. With ``target_ids`` (flagged groups) each point
+    gets a role: "target" (may produce actions) or "context"; without, the point is sent as is."""
+    if target_ids is None:
+        return entry
+    is_target = entry["id"] in target_ids
+    view = {"id": entry["id"], "role": "target" if is_target else "context"}
+    for key, value in entry.items():
+        if key not in ("id", "include_action_point") and (is_target or key not in _CONTEXT_HIDDEN_KEYS):
+            view[key] = value
+    return view
 
 
 def _format_transcript(transcript: List[Dict]) -> str:
@@ -3384,6 +3657,49 @@ class AIProvider(ABC):
 
 
 STANDARD_CTX_SIZES = (2048, 4096, 8192, 16384, 32768, 65536, 131072)
+
+# Structured (JSON) extraction must repeat names, numbers, terms and JSON keys verbatim; a high
+# repeat penalty pushes the model to paraphrase them. These tasks use at most this penalty.
+STRUCTURED_REPEAT_PENALTY = 1.05
+_STRUCTURED_TASK_PREFIXES = ("rom_", "stage1_", "stage2_", "mom_extract", "mom_action")
+
+
+def repeat_penalty_for(task_key: Optional[str], configured: Any) -> float:
+    """Repeat penalty for one call: the configured value, capped for structured-output tasks."""
+    try:
+        value = float(configured)
+    except (TypeError, ValueError):
+        value = 1.15
+    if value <= 0:
+        value = 1.15
+    if task_key and str(task_key).startswith(_STRUCTURED_TASK_PREFIXES):
+        return min(value, STRUCTURED_REPEAT_PENALTY)
+    return value
+
+
+# Upper bound for one Ollama request (seconds). Long generations on a 6 GB GPU take minutes;
+# this only stops a request that hangs, which would otherwise block every later ROM run.
+DEFAULT_OLLAMA_REQUEST_TIMEOUT = 1200
+
+
+class OllamaTimeoutError(Exception):
+    """An Ollama request did not finish within the configured timeout."""
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    import socket
+    import urllib.error
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(getattr(exc, "reason", None), (TimeoutError, socket.timeout))
+
+
+def _ollama_timeout_result(exc: OllamaTimeoutError) -> str:
+    """What _infer returns after a timed-out request: an empty result, which every caller already
+    treats as a failed call. The local Qwen pipeline is deliberately not loaded here — Ollama may
+    still hold the GPU, and a second model would compete for its 6 GB."""
+    logger.error(f"[QwenAI] {exc}. Returning an empty result (no local-model fallback after a timeout).")
+    return ""
 
 
 def calculate_dynamic_num_ctx(
@@ -3651,6 +3967,30 @@ class QwenProvider(AIProvider):
         logger.info("[QwenAI] Qwen3 model unloaded.")
         log_gpu_memory("Post-unload QwenLLM")
 
+    @classmethod
+    def release_ollama_model(cls) -> bool:
+        """Ask the Ollama server to drop the model it last served from VRAM now (keep_alive=0)
+        instead of after ollama_keep_alive. Used before transcription may need the GPU."""
+        model = getattr(cls, "_cached_ollama_model", None)
+        server_url = getattr(cls, "_cached_ollama_server_url", None)
+        if not model or not server_url:
+            return False
+        import json
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/generate",
+                data=json.dumps({"model": model, "keep_alive": 0}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read()
+            logger.info(f"[QwenAI] Released Ollama model '{model}' from VRAM.")
+            return True
+        except Exception as e:
+            logger.warning(f"[QwenAI] Could not release Ollama model '{model}': {e}")
+            return False
+
 
     @classmethod
     def _get_active_settings(cls):
@@ -3674,6 +4014,7 @@ class QwenProvider(AIProvider):
             "ollama_keep_alive": "5m",
             "ollama_num_thread": 0,
             "ollama_num_gpu": -1,
+            "ollama_request_timeout": getattr(settings, "OLLAMA_REQUEST_TIMEOUT", DEFAULT_OLLAMA_REQUEST_TIMEOUT),
             "max_tokens_mom": 1500,
             "max_tokens_mom_merge": 3072,
             "max_tokens_agenda_compress": 2000,
@@ -3701,7 +4042,7 @@ class QwenProvider(AIProvider):
             "rom_separate_action_extraction": False,
             "rom_action_owner_verification": False,
             "rom_action_generation_chunk_size": 10,
-            "rom_min_similarity_threshold": 0.80,
+            "rom_min_similarity_threshold": 0.60,
             "whisper_batch_size": 8,
             "max_tokens_rom_discussion": 4096,
             "max_tokens_rom_discussion_embedded": 4096,
@@ -3856,8 +4197,10 @@ class QwenProvider(AIProvider):
         return None
 
     @classmethod
-    def _call_ollama(cls, server_url: str, model: str, prompt: str, max_new_tokens: int, think: Optional[bool] = None) -> Optional[str]:
-        """Perform chat generation call using configured Ollama server endpoint."""
+    def _call_ollama(cls, server_url: str, model: str, prompt: str, max_new_tokens: int, think: Optional[bool] = None,
+                     repeat_penalty: Optional[float] = None) -> Optional[str]:
+        """Perform chat generation call using configured Ollama server endpoint.
+        ``repeat_penalty`` overrides the configured value (see repeat_penalty_for)."""
         import urllib.request
         import json
 
@@ -3891,7 +4234,7 @@ class QwenProvider(AIProvider):
             "num_predict": max_new_tokens,
             "temperature": float(cfg["ollama_temperature"]),
             "num_ctx": selected_num_ctx,
-            "repeat_penalty": float(cfg["ollama_repeat_penalty"]),
+            "repeat_penalty": float(repeat_penalty if repeat_penalty is not None else cfg["ollama_repeat_penalty"]),
             "top_p": float(cfg["ollama_top_p"]),
             "top_k": int(cfg["ollama_top_k"]),
             "think": think_enabled,
@@ -3950,8 +4293,8 @@ class QwenProvider(AIProvider):
                 data=json.dumps(payload).encode('utf-8'),
                 headers={"Content-Type": "application/json"}
             )
-            # Timeout set to 90 seconds for long generation tasks
-            with urllib.request.urlopen(req) as response:
+            timeout_sec = float(cfg.get("ollama_request_timeout") or DEFAULT_OLLAMA_REQUEST_TIMEOUT)
+            with urllib.request.urlopen(req, timeout=timeout_sec) as response:
                 status_code = response.status
                 raw_body = response.read().decode('utf-8')
                 logger.debug(f"[QwenAI] Raw Ollama response: {raw_body}")
@@ -4002,6 +4345,11 @@ class QwenProvider(AIProvider):
                 else:
                     logger.error(f"[QwenAI] Ollama request failed with status {status_code}")
         except Exception as e:
+            if _is_timeout_error(e):
+                raise OllamaTimeoutError(
+                    f"Ollama request to model '{model}' at {base_url} timed out after "
+                    f"{cfg.get('ollama_request_timeout') or DEFAULT_OLLAMA_REQUEST_TIMEOUT}s"
+                ) from e
             logger.error(f"[QwenAI] Ollama chat inference failed for model '{model}' at {base_url}: {e}")
         return None
 
@@ -4025,6 +4373,8 @@ class QwenProvider(AIProvider):
             elif db_max_tokens is not None and db_max_tokens > 0:
                 max_new_tokens = db_max_tokens
 
+        # Structured (JSON) tasks repeat names, numbers and keys verbatim: cap the penalty.
+        repeat_penalty = repeat_penalty_for(task_key, cfg.get("ollama_repeat_penalty"))
 
         if use_ollama:
             # Invalidate cache if server_url, port, or priority list settings changed
@@ -4037,7 +4387,11 @@ class QwenProvider(AIProvider):
             model_name = getattr(cls, "_cached_ollama_model", None)
             if model_name is not None:
                 logger.info(f"[QwenAI] Attempting inference using cached Ollama model '{model_name}' at {server_url}...")
-                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think)
+                try:
+                    res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think,
+                                           repeat_penalty=repeat_penalty)
+                except OllamaTimeoutError as exc:
+                    return _ollama_timeout_result(exc)
                 if res is not None:
                     logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
                     return res
@@ -4055,7 +4409,11 @@ class QwenProvider(AIProvider):
                 cls._cached_ollama_model = model_name
                 
                 logger.info(f"[QwenAI] Ollama model detected. Running inference with '{model_name}' at {server_url}...")
-                res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think)
+                try:
+                    res = cls._call_ollama(server_url, model_name, prompt, max_new_tokens, think=think,
+                                           repeat_penalty=repeat_penalty)
+                except OllamaTimeoutError as exc:
+                    return _ollama_timeout_result(exc)
                 if res is not None:
                     logger.info(f"[QwenAI] Inference successfully completed using Ollama model '{model_name}'.")
                     return res
@@ -4095,16 +4453,12 @@ class QwenProvider(AIProvider):
                 enable_thinking=enable_think,  # Qwen3: control chain-of-thought preamble
             )
 
-            rep_penalty = cfg.get("ollama_repeat_penalty", 1.15)
-            if rep_penalty is None or rep_penalty <= 0:
-                rep_penalty = 1.15
-
             output = pipe(
                 text,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,          # deterministic - enterprise doc quality
                 temperature=1.0,          # ignored when do_sample=False
-                repetition_penalty=rep_penalty,  # reduce repetitive output
+                repetition_penalty=repeat_penalty,  # reduce repetitive output (capped for JSON tasks)
                 return_full_text=False,
             )
 
@@ -4706,7 +5060,8 @@ class QwenProvider(AIProvider):
             # Final fallback: parse without context
             return self.parse_agenda_items(agenda_text)
 
-    def _parse_json_dict(self, raw: str) -> Optional[Dict]:
+    @staticmethod
+    def _parse_json_dict(raw: str) -> Optional[Dict]:
         r"""Attempt to parse raw LLM response text into a Python dict.
         
         Handles:
@@ -5008,6 +5363,9 @@ class QwenProvider(AIProvider):
 
         # Attempt normal parsing
         data = self._parse_json_dict(raw)
+        # Output that had to be recovered or repaired was cut off or malformed: the caller
+        # re-extracts the window in smaller parts (see RomService._extract_with_split).
+        recovered = data is None
 
         # If parsing fails, first attempt deterministic truncation recovery
         if data is None:
@@ -5025,6 +5383,8 @@ class QwenProvider(AIProvider):
 
         if isinstance(data, dict):
             data.setdefault("discussion_points", [])
+            if recovered:
+                data["recovered"] = True
             return data
 
         logger.error(
@@ -5078,6 +5438,7 @@ class QwenProvider(AIProvider):
 
         # Attempt normal parsing
         data = self._parse_json_dict(raw)
+        recovered = data is None
 
         # If parsing fails, first attempt deterministic truncation recovery
         if data is None:
@@ -5095,6 +5456,8 @@ class QwenProvider(AIProvider):
 
         if isinstance(data, dict):
             data.setdefault("action_items", [])
+            if recovered:
+                data["recovered"] = True
             return data
 
         logger.error(
@@ -5536,6 +5899,9 @@ class QwenProvider(AIProvider):
             excerpt = (p.get("owner_transcript_excerpt") or "").strip()
             if excerpt:
                 entry["transcript_excerpt"] = excerpt
+            flag = normalize_action_flag(p.get("include_action_point"))
+            if flag is not None:
+                entry["include_action_point"] = flag
             points_input.append(entry)
 
         if not points_input:
@@ -5546,19 +5912,31 @@ class QwenProvider(AIProvider):
         roster = build_roster([{"speaker_label": name} for name in participants])
         input_by_id = {e["id"]: e for e in points_input if e["id"]}
 
-        all_action_items: List[Dict] = []
         total_points = len(points_input)
-        chunks = [points_input[i:i + effective_chunk_size] for i in range(0, total_points, effective_chunk_size)]
+        # Points Stage 2 flagged as containing an action are sent in groups of 5, with the group's
+        # other points and one neighbour on each side as context. Points without flags (ROMs
+        # built before Stage 2 flagged points) are sent in plain chunks.
+        flagged_mode = any("include_action_point" in e for e in points_input)
+        if flagged_mode:
+            from services.agenda_action_points import ACTION_GROUP_SIZE, build_action_groups
+            batches = build_action_groups(points_input)
+            batching = f"flagged groups of {ACTION_GROUP_SIZE}, {sum(1 for e in points_input if e.get('include_action_point'))} flagged"
+        else:
+            batches = [{"entries": points_input[i:i + effective_chunk_size], "target_ids": None}
+                       for i in range(0, total_points, effective_chunk_size)]
+            batching = f"chunk_size={effective_chunk_size}"
         active_prompt = _get_prompt("mom_extract_actions")
         default_prompt = MOM_EXTRACT_ACTIONS_FROM_POINTS_PROMPT
         is_custom = bool(active_prompt.strip() and active_prompt.strip() != default_prompt.strip())
         logger.info(
-            f"[QwenAI] extract_actions_from_enhanced_points: chunking enabled — processing {total_points} point(s) "
-            f"across {len(chunks)} chunk(s) (chunk_size={effective_chunk_size}, reasoning_mode={use_reasoning}, custom_prompt={is_custom})"
+            f"[QwenAI] extract_actions_from_enhanced_points: processing {total_points} point(s) "
+            f"in {len(batches)} batch(es) ({batching}, reasoning_mode={use_reasoning}, custom_prompt={is_custom})"
         )
 
-        for chunk_idx, chunk in enumerate(chunks, 1):
-            chunk_info = f"chunk {chunk_idx}/{len(chunks)}"
+        batch_items: List[tuple] = []  # (batch, action items parsed from it)
+        for chunk_idx, batch in enumerate(batches, 1):
+            chunk = [_action_extraction_view(e, batch["target_ids"]) for e in batch["entries"]]
+            chunk_info = f"chunk {chunk_idx}/{len(batches)}"
             logger.info(f"[QwenAI] Processing action extraction {chunk_info} ({len(chunk)} point(s), reasoning_mode={use_reasoning})...")
             points_json = json.dumps(chunk, ensure_ascii=False, indent=2)
             if "{points_json}" in active_prompt:
@@ -5578,7 +5956,8 @@ class QwenProvider(AIProvider):
                     "commitments, directives, or deliverables exist, who the true owners are, and what deadlines or outcomes apply.\n\n"
                     f"DISCUSSION POINTS:\n{points_json}\n\n"
                     "REASONING INSTRUCTIONS:\n"
-                    "1. Evaluate each discussion point: determine whether it contains an explicit commitment, directive, delegated task, "
+                    "1. Evaluate each discussion point (only points with role \"target\" when roles are given; \"context\" points only explain them): "
+                    "determine whether it contains an explicit commitment, directive, delegated task, "
                     "or agreed next step versus an informational update, background context, retrospective, or opinion with no action assigned.\n"
                     "2. Identify the true action owner for each valid action item: distinguish explicitly assigned or volunteering individuals "
                     "from participants who were merely speaking or presenting. If unassigned, note that.\n"
@@ -5618,9 +5997,11 @@ class QwenProvider(AIProvider):
             chunk_items = self.parse_action_extraction_response(raw, chunk_info=chunk_info)
             if chunk_items:
                 logger.info(f"[QwenAI] Action extraction {chunk_info} parsed OK, found {len(chunk_items)} action item(s)")
-                all_action_items.extend(chunk_items)
+                batch_items.append((batch, chunk_items))
             else:
                 logger.info(f"[QwenAI] Action extraction {chunk_info} parse completed with 0 action items.")
+
+        all_action_items: List[Dict] = [act for _, items in batch_items for act in items]
 
         # Owner: the LLM's owner if the point's validated candidates or transcript excerpt
         # support it; otherwise the source point's validated action_owner when the LLM
@@ -5653,7 +6034,16 @@ class QwenProvider(AIProvider):
             else:
                 act["expected_outcome"] = None
 
-        logger.info(f"[QwenAI] extract_actions_from_enhanced_points complete: {len(all_action_items)} action item(s) extracted across {len(chunks)} chunk(s).")
+        if flagged_mode:
+            # Same checks as the Final ROM action points: a task must come from a flagged point of
+            # its group, be specific, not already done, use only stated facts/deadlines; duplicates
+            # across groups are merged.
+            from services.agenda_action_points import validate_group_proposals
+            all_action_items, rejected = validate_group_proposals(polished_points, batch_items, roster)
+            for r in rejected:
+                logger.info(f"[QwenAI] Action extraction: removed {r['task'][:80]!r} ({r['reason']})")
+
+        logger.info(f"[QwenAI] extract_actions_from_enhanced_points complete: {len(all_action_items)} action item(s) extracted across {len(batches)} batch(es).")
         return all_action_items
 
     def polish_rom_points(
@@ -5876,6 +6266,12 @@ class QwenProvider(AIProvider):
             )
             data = self.try_deterministic_json_truncation_recovery(raw)
 
+        # Step 3: LLM JSON repair (same as Stage 1). Points still missing afterwards are carried
+        # unenhanced by RomService (_link_enhanced_points), never dropped.
+        if data is None:
+            logger.warning("[ROM Enhance Window] Deterministic recovery failed. Invoking LLM JSON Repair step...")
+            data = self.repair_stage1_json(raw, orig_max_tokens=self._get_active_settings().get("max_tokens_rom_enhance_window") or 4096)
+
         if isinstance(data, dict):
             pts = data.get("enhanced_points") or data.get("discussion_points") or data.get("polished_points") or []
             logger.info(
@@ -5950,6 +6346,9 @@ class QwenProvider(AIProvider):
         if data is None:
             logger.warning("[ROM Enhance All Together] Initial JSON parse failed. Attempting recovery...")
             data = self.try_deterministic_json_truncation_recovery(raw)
+        if data is None:
+            logger.warning("[ROM Enhance All Together] Deterministic recovery failed. Invoking LLM JSON Repair step...")
+            data = self.repair_stage1_json(raw, orig_max_tokens=self._get_active_settings().get("max_tokens_rom_enhance_all_together") or 8192)
 
         if isinstance(data, dict):
             pts = data.get("enhanced_points") or data.get("discussion_points") or data.get("polished_points") or []
@@ -6009,25 +6408,30 @@ class QwenProvider(AIProvider):
             logger.error(f"[ROM Enhance Action Points] Failed to parse JSON from response.\n{raw}")
             return {"enhanced_action_points": []}
 
-    def validate_stage2_point(self, point_text: str, transcript_text: str) -> bool:
-        """Stage 2 Validation Pass: ask LLM whether a single enhanced discussion point
-        is genuinely supported by the meeting transcript.
+    def validate_stage2_point(self, point_text: str, transcript_text: str, supporting_text: str = "") -> bool:
+        """Stage 2 Validation Pass: ask LLM whether a single enhanced discussion point is
+        supported by the transcript excerpt it was written from (and, when given, the
+        documents it was enriched with).
 
         Returns True (keep) if the LLM answers YES, False (invalid) if NO.
         Any response that is not a clean YES/NO is treated as YES (safe default).
         """
+        sources = "the TRANSCRIPT EXCERPT" + (" or the SUPPORTING DOCUMENTS" if supporting_text else "")
         prompt = (
             "You are a strict meeting-minutes validator.\n\n"
-            "Given the DISCUSSION POINT and the COMPLETE MEETING TRANSCRIPT below, "
-            "decide whether the discussion point is genuinely supported by or grounded in the transcript.\n\n"
+            "The TRANSCRIPT EXCERPT is the part of the meeting the DISCUSSION POINT was written from"
+            + (", and the SUPPORTING DOCUMENTS are the reference documents it was enriched with" if supporting_text else "")
+            + f". Decide whether the discussion point is supported by {sources}.\n\n"
             "Rules:\n"
             "- Reply with only the single word YES or NO.\n"
             "- Do NOT include any explanation, punctuation, or extra text.\n"
-            "- YES means the point is valid and should be kept.\n"
-            "- NO means the point is hallucinated, fabricated, or unrelated to the transcript.\n\n"
+            f"- YES: every claim (who said or did what, numbers, dates, decisions, actions) is stated in {sources}. "
+            "Rewording, summarising and formal minutes style are fine.\n"
+            f"- NO: the point states something that is not in {sources}, or contradicts it.\n\n"
             f"DISCUSSION POINT:\n{point_text.strip()}\n\n"
-            f"COMPLETE MEETING TRANSCRIPT:\n{transcript_text.strip()}\n\n"
-            "Answer (YES or NO):"
+            f"TRANSCRIPT EXCERPT:\n{transcript_text.strip()}\n\n"
+            + (f"SUPPORTING DOCUMENTS:\n{supporting_text.strip()}\n\n" if supporting_text else "")
+            + "Answer (YES or NO):"
         )
         raw = self._infer(prompt, max_new_tokens=8, task_key="stage2_validate")
         if not raw:
@@ -6041,26 +6445,28 @@ class QwenProvider(AIProvider):
     def correct_invalid_stage2_points(
         self,
         invalid_points_json: str,
-        transcript_text: str,
+        transcript_text: str = "",
     ) -> List[Dict]:
-        """Stage 2 Validation Pass: correct all invalid discussion points in one call.
+        """Stage 2 Validation Pass: correct a batch of invalid discussion points in one call.
 
-        Sends all invalid points + the complete transcript.
-        Returns a list of corrected point dicts preserving original IDs.
-        Each corrected point must have: id, polished_text, speakers, technical_terms,
-        action_items, dates.
+        Each point carries its own ``transcript_excerpt`` (the part of the meeting it was written
+        from) and, when it used them, ``supporting_documents``; ``transcript_text`` is only an
+        optional shared fallback. Returns a list of {id, polished_text} dicts preserving the IDs
+        sent; only the text is corrected (speakers, owners, action items and facts stay validated
+        Stage 1 data).
         """
+        shared = f"MEETING TRANSCRIPT:\n{transcript_text.strip()}\n\n" if transcript_text and transcript_text.strip() else ""
         prompt = (
             "You are a meeting-minutes editor.\n\n"
-            "The following discussion points were flagged as NOT genuinely supported by the "
-            "meeting transcript. For EACH point, rewrite the 'polished_text' so it accurately "
-            "reflects what was actually discussed in the transcript, or remove clearly fabricated "
-            "claims. Preserve the original point IDs exactly.\n\n"
+            "The following discussion points were flagged as NOT supported by the part of the meeting "
+            "they were written from. Each point carries its own 'transcript_excerpt' (and, if it used "
+            "reference documents, 'supporting_documents'). For EACH point, rewrite the 'polished_text' "
+            "so it states only what its excerpt or documents support, removing unsupported claims. "
+            "Preserve the original point IDs exactly (e.g. \"P1\").\n\n"
             "Return ONLY a valid JSON array with no extra text, markdown, or explanation. "
-            "Each element must have the fields: id, polished_text, speakers (array), "
-            "technical_terms (array), action_items (array), dates (array).\n\n"
+            "Each element must have exactly two fields: id and polished_text.\n\n"
             f"INVALID POINTS (JSON):\n{invalid_points_json}\n\n"
-            f"COMPLETE MEETING TRANSCRIPT:\n{transcript_text.strip()}\n\n"
+            f"{shared}"
             "Corrected JSON array:"
         )
         raw = self._infer(prompt, max_new_tokens=4096, task_key="stage2_correct")
@@ -6098,18 +6504,40 @@ class QwenProvider(AIProvider):
         data = self._parse_json_dict(raw)
         return data if isinstance(data, dict) else {"group_classification": "different", "result_points": []}
 
-    def generate_rom_agendas(self, agenda_text: Optional[str], context: str, previous_mom: Optional[str] = None) -> Dict:
-        """Generate enriched agenda representations for ROM pipeline."""
+    def generate_rom_agendas(
+        self,
+        agenda_text: Optional[str],
+        context: str,
+        previous_mom: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict:
+        """Generate enriched agenda representations for ROM pipeline.
+
+        ``source`` describes ``agenda_text``: "tables" (only the tables of the agenda document,
+        see rom_service.extract_agendas) or "document" (the whole document); each adds its
+        extraction rules to the prompt. None keeps the prompt without them.
+        """
         agenda_input = ""
         if agenda_text:
             agenda_input = f"UPLOADED AGENDA:\n{agenda_text}"
         else:
             agenda_input = "No agenda file provided. Generate appropriate agendas based on the context."
-        
+
         context_section = f"SUPPORTING CONTEXT:\n{context}" if context else ""
         prev_mom_section = f"PREVIOUS MEETING MOM:\n{previous_mom}" if previous_mom else ""
-        
-        prompt = _get_prompt("rom_agenda").replace("{agenda_input}", agenda_input).replace("{context}", context_section).replace("{previous_mom}", prev_mom_section)
+        rules = ROM_AGENDA_EXTRACTION_RULES.get(source or "", "") if agenda_text else ""
+
+        template = _get_prompt("rom_agenda")
+        if "{extraction_rules}" not in template and rules:
+            # Customized prompts saved before this placeholder existed: rules follow the input.
+            agenda_input = f"{agenda_input}\n\n{rules}"
+        prompt = (
+            template
+            .replace("{agenda_input}", agenda_input)
+            .replace("{extraction_rules}", rules)
+            .replace("{context}", context_section)
+            .replace("{previous_mom}", prev_mom_section)
+        )
         raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_agenda")
         
         if not raw:
@@ -6295,7 +6723,8 @@ class QwenProvider(AIProvider):
                 "Analyse the discussion points of this agenda item to determine which genuine action points the meeting produced.\n\n"
                 f"AGENDA ITEM:\n{agenda_json}\n\nDISCUSSION POINTS:\n{points_json}\n\n"
                 "REASONING INSTRUCTIONS:\n"
-                "1. For each point, decide whether it records a commitment, assignment, request or decision that requires follow-up work "
+                "1. For each point (only points with role \"target\" when roles are given; \"context\" points only explain them), "
+                "decide whether it records a commitment, assignment, request or decision that requires follow-up work "
                 "after the meeting, or only information, opinion, status, or something already completed in the meeting "
                 "(motions moved, votes taken, approvals given, briefings delivered).\n"
                 "2. Find commitments that are spread over several points and should become one action point.\n"
@@ -6335,6 +6764,25 @@ class QwenProvider(AIProvider):
         if items is None:
             items = data.get("action_items")
         return {"action_points": items if isinstance(items, list) else []}
+
+    def score_action_point_importance(self, action_points_json: str) -> Optional[Dict]:
+        """Importance (40-100%) of validated action points (services/action_importance.py).
+        Returns {"scores": [{"id", "importance", "reason"}]} or None when the response cannot be parsed."""
+        prompt = self._fill_json_prompt(
+            "rom_action_importance", {"{action_points_json}": action_points_json}, {"{action_points_json}": "ACTION POINTS"},
+        )
+        raw = self._infer(prompt, max_new_tokens=2048, task_key="rom_action_importance", think=False)
+        text = re.sub(r'<think>.*?</think>', '', str(raw or ''), flags=re.DOTALL)
+        first_array, first_object = text.find('['), text.find('{')
+        if first_array != -1 and (first_object == -1 or first_array < first_object):
+            rows = self._parse_json_list(text)
+            if rows is not None:
+                return {"scores": rows}
+        data = self._parse_json_dict(raw) if raw else None
+        if not isinstance(data, dict):
+            logger.warning(f"[ActionImportance] Importance scoring returned no parsable JSON: {str(raw or '')[:400]!r}")
+            return None
+        return data
 
     @staticmethod
     def _parse_json_list(raw: str) -> Optional[List[Dict]]:

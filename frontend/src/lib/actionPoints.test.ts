@@ -1,5 +1,26 @@
 import { describe, it, expect } from 'vitest';
-import { agendaShowsActionPoints, collectAgendaActionPoints } from './actionPoints';
+import { agendaShowsActionPoints, collectAgendaActionPoints, importanceBand, passesImportance } from './actionPoints';
+
+describe('importanceBand', () => {
+  it('uses the scoring bands: 80+ critical, 60-79 moderate, below 60 general', () => {
+    expect(importanceBand(100)).toBe('critical');
+    expect(importanceBand(80)).toBe('critical');
+    expect(importanceBand(75)).toBe('moderate');
+    expect(importanceBand(60)).toBe('moderate');
+    expect(importanceBand(55)).toBe('general');
+    expect(importanceBand(40)).toBe('general');
+  });
+});
+
+describe('passesImportance', () => {
+  it('hides scored items below the threshold and keeps unscored items', () => {
+    expect(passesImportance({ importance: 70 }, 70)).toBe(true);
+    expect(passesImportance({ importance: 65 }, 70)).toBe(false);
+    expect(passesImportance({}, 90)).toBe(true);
+    expect(passesImportance({ importance: 45 }, 0)).toBe(true);
+    expect(passesImportance(undefined, 80)).toBe(true);
+  });
+});
 
 describe('agendaShowsActionPoints', () => {
   it('uses the per-agenda option and falls back to the global flag for older Final ROMs', () => {

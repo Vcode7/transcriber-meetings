@@ -22,7 +22,7 @@ from sqlalchemy import text
 import hashlib
 from database import get_db, get_db_context, dt_to_str, to_json, from_json
 from services.transcription import transcribe
-from services.diarization import diarize, is_pyannote_available
+from services.diarization import diarize, is_pyannote_available, resolve_speaker_hints
 from services.identification import identify_speakers, refine_transcript_speakers_with_ecapa
 from services.device_utils import log_gpu_memory
 
@@ -371,6 +371,84 @@ def _generic_speaker_labels(diar_segs: List[Dict[str, Any]]) -> List[Dict[str, A
     return labelled
 
 
+async def _load_speaker_hints(recording_id: str, participant_voice_ids: List[str]) -> Dict[str, int]:
+    """pyannote speaker-count hints from the recording's expected_speakers and selected participants."""
+    expected = None
+    try:
+        async with get_db_context() as db:
+            r = await db.execute(
+                text("SELECT expected_speakers FROM recordings WHERE id = :rid"),
+                {"rid": recording_id},
+            )
+            row = r.mappings().fetchone()
+            if row:
+                expected = row.get("expected_speakers")
+    except Exception as e:
+        logger.debug(f"[Pipeline] {recording_id} — expected_speakers unavailable ({e})")
+    hints = resolve_speaker_hints(len(set(participant_voice_ids or [])), expected)
+    logger.info(f"[Pipeline] {recording_id} — Diarization speaker hints: {hints or 'none'}")
+    return hints
+
+
+async def _recover_overlap_words(
+    loop,
+    recording_id: str,
+    file_path: str,
+    diar_segs: List[Dict[str, Any]],
+    language: Optional[str],
+    initial_prompt: str,
+    embedding_model: str,
+    user_settings: Dict[str, Any],
+    analytics: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Separate + re-transcribe overlapping speech when enabled (non-fatal, [] otherwise)."""
+    from services.overlap_separation import is_separation_enabled, recover_overlap_words
+    if not diar_segs or not is_separation_enabled(user_settings):
+        return []
+    logger.info(f"[Pipeline] {recording_id} — Overlap separation: recovering overlapped speech")
+    await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
+    t0 = time.monotonic()
+    words = await loop.run_in_executor(
+        None,
+        lambda: recover_overlap_words(
+            file_path, diar_segs, language=language,
+            initial_prompt=initial_prompt, embedding_model=embedding_model,
+        ),
+    )
+    analytics["overlap_separation_sec"] = round(time.monotonic() - t0, 3)
+    analytics["overlap_words_recovered"] = len(words)
+    return words
+
+
+def _merge_overlap_words(
+    recording_id: str,
+    speaker_segments: List[Dict[str, Any]],
+    recovered_words: List[Dict[str, Any]],
+    identified_segs: List[Dict[str, Any]],
+    analytics: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if not recovered_words:
+        return speaker_segments
+    from services.overlap_separation import merge_recovered_words
+    merged, stats = merge_recovered_words(speaker_segments, recovered_words, identified_segs)
+    analytics["overlap_words_added"] = stats["added_words"]
+    logger.info(f"[Pipeline] {recording_id} — Overlap separation merge: {stats}")
+    return merged
+
+
+def _copy_turn_flags(seg: Dict[str, Any], final_seg: Dict[str, Any]) -> None:
+    """Carry optional per-turn markers onto a final transcript segment."""
+    if seg.get("speaker_refined"):
+        # Downstream (ROM Stage 1) treats refined segments as uncertain attributions.
+        final_seg["speaker_refined"] = True
+    if seg.get("overlap_speakers"):
+        # Other speakers talking at the same time as this turn.
+        final_seg["overlap_speakers"] = seg["overlap_speakers"]
+    if seg.get("from_separation"):
+        # Words recovered from a separated overlap source, not the main Whisper pass.
+        final_seg["from_separation"] = True
+
+
 def _speaker_confidence(seg: Dict[str, Any]) -> Optional[float]:
     """Fraction of a final segment's words whose word-level speaker matches the
     segment speaker. Words folded in from a different speaker lower it; ROM Stage 1
@@ -455,11 +533,13 @@ def _assign_speakers_to_words_manual(
             w_end = w.get("end", seg_end)
             w_label = best_label
             w_profile_id = best_profile_id
+            w_raw = None
             for s in identified_segs:
                 ov = max(0.0, min(w_end, s["end"]) - max(w_start, s["start"]))
                 if ov > 0.0:
                     w_label = s.get("speaker_label") or s.get("speaker") or w_label
                     w_profile_id = s.get("speaker_profile_id", w_profile_id)
+                    w_raw = s.get("speaker")
                     break
             enriched_words.append({
                 "word": w.get("word", "").strip(),
@@ -469,6 +549,8 @@ def _assign_speakers_to_words_manual(
                     w.get("probability", w.get("score", 1.0))
                 ),
                 "speaker_label": w_label,
+                "speaker": w_raw,
+                "speaker_profile_id": w_profile_id,
             })
 
         out_segments.append({
@@ -544,6 +626,9 @@ async def run_pipeline(
     finally:
         unregister_task(recording_id)
         unload_all_models()
+    # Transcription finished: start the ROM pipeline if the meeting's ROM settings ask for it.
+    from tasks.rom_auto_pipeline import maybe_start
+    await maybe_start(recording_id, user_id)
 
 
 async def _run_pipeline_impl(
@@ -678,9 +763,12 @@ async def _run_pipeline_impl(
                     lambda: transcribe(file_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
                 )
 
+        speaker_hints = await _load_speaker_hints(recording_id, participant_voice_ids)
+        _analytics["diarization_speaker_hints"] = speaker_hints or None
+
         # ── Helper: run diarization ───────────────────────────────────
         async def _do_diarization():
-            return await loop.run_in_executor(None, diarize, file_path)
+            return await loop.run_in_executor(None, lambda: diarize(file_path, **speaker_hints))
 
         if _parallel_td:
             # ══════════════════════════════════════════════════════════
@@ -860,7 +948,7 @@ async def _run_pipeline_impl(
             logger.info(f"[Pipeline] {recording_id} — STAGE 2: Diarizing")
             await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
             _t0_diarization = time.monotonic()
-            diar_segs = await loop.run_in_executor(None, diarize, file_path)
+            diar_segs = await loop.run_in_executor(None, lambda: diarize(file_path, **speaker_hints))
 
             _analytics["diarization_sec"] = round(time.monotonic() - _t0_diarization, 3)
             _analytics["diarization_engine"] = "pyannote" if is_pyannote_available() else "energy"
@@ -958,6 +1046,12 @@ async def _run_pipeline_impl(
         )
         logger.info(f"[Pipeline] {recording_id} — Speaker similarity threshold: {threshold}")
 
+        # ── Stage 3b: Overlap separation (opt-in) ─────────────────────
+        overlap_words = await _recover_overlap_words(
+            loop, recording_id, file_path, diar_segs, language, initial_prompt,
+            active_embedding_model, user_settings_dict, _analytics,
+        )
+
         # ── Stage 4: Speaker identification ───────────────────────────
         logger.info(f"[Pipeline] {recording_id} — STAGE 4: Identifying speakers")
         await _update_status_safe(recording_id, "processing", {"progress": "identifying_speakers"})
@@ -974,6 +1068,7 @@ async def _run_pipeline_impl(
                     voice_profiles=voice_profiles,
                     similarity_threshold=threshold,
                     embedding_model=active_embedding_model,
+                    participants_selected=bool(participant_voice_ids),
                 ),
             )
         except Exception as e:
@@ -1020,6 +1115,9 @@ async def _run_pipeline_impl(
             speaker_segments = _assign_speakers_to_words_manual(aligned_result, identified_segs)
             speaker_segments = _resegment_by_word_speakers(speaker_segments)
         _analytics["speaker_assignment_method"] = _speaker_assignment_method
+        speaker_segments = _merge_overlap_words(
+            recording_id, speaker_segments, overlap_words, identified_segs, _analytics
+        )
 
         logger.info(f"[Pipeline] {recording_id} — Speaker segments: {len(speaker_segments)}")
 
@@ -1063,8 +1161,7 @@ async def _run_pipeline_impl(
                 "overlap_regions": seg.get("overlap_regions", []),
                 "speaker_confidence": _speaker_confidence(seg),
             }
-            if seg.get("speaker_refined"):
-                final_seg["speaker_refined"] = True
+            _copy_turn_flags(seg, final_seg)
             final_segments.append(final_seg)
 
         speakers_detected = []
@@ -1093,6 +1190,13 @@ async def _run_pipeline_impl(
                     generate_mom_auto = bool(row["generate_mom_auto"])
         except Exception as e:
             logger.warning(f"[Pipeline] {recording_id} — Failed to fetch generate_mom_auto setting (defaulting to True): {e}")
+
+        # ROM settings chosen at capture time (MoM/ROM): the MoM comes from the ROM run's Stage 2
+        # points (tasks/rom_auto_pipeline.py), not from a direct transcript summary.
+        from tasks.rom_auto_pipeline import replaces_direct_mom
+        if generate_mom_auto and await replaces_direct_mom(recording_id):
+            logger.info(f"[Pipeline] {recording_id} — ROM pipeline will generate the MoM; skipping the direct transcript MoM.")
+            generate_mom_auto = False
 
         now = datetime.now(timezone.utc)
         transcript_json = to_json(final_segments)
@@ -1514,6 +1618,10 @@ def _post_process_whisperx_segments(
                 "end": round(float(w.get("end", seg["end"])), 3),
                 "probability": round(float(word_conf), 4),
                 "speaker_label": w_speaker_lbl,
+                # Raw id + profile let _resegment_by_word_speakers give each turn its own
+                # speaker identity (the profile key is stripped there).
+                "speaker": w_raw or raw_id,
+                "speaker_profile_id": id_to_profile.get(w_raw, profile_id) if w_raw else profile_id,
             })
 
 
@@ -1589,12 +1697,22 @@ def _resegment_by_word_speakers(
     min_words   : minimum consecutive words needed to accept a speaker change.
     min_duration: minimum span (seconds) needed to accept a speaker change.
 
+    Short runs inside an overlap window that lists their speaker are kept as
+    their own turn (OVERLAP_KEEP_INTERJECTIONS). Each output turn takes its raw
+    speaker id and profile from its first word, carries only the overlap
+    windows it touches, and lists the other speakers in them as
+    ``overlap_speakers``.
+
     Returns
     -------
     A flat list of segment dicts with the same schema as the input.
     Chronological order and word completeness are guaranteed.
     """
+    keep_interjections = bool(getattr(settings, "OVERLAP_KEEP_INTERJECTIONS", True))
     out: List[Dict[str, Any]] = []
+
+    def _intersecting_regions(regions: List[Dict[str, Any]], start: float, end: float) -> List[Dict[str, Any]]:
+        return [r for r in regions if max(start, r["start"]) < min(end, r["end"])]
 
     for seg in segments:
         words = seg.get("words", [])
@@ -1602,6 +1720,8 @@ def _resegment_by_word_speakers(
             # Keep segments that have no word-level data unchanged.
             out.append(seg)
             continue
+
+        base_regions = seg.get("overlap_regions", []) or []
 
         # ── Build initial runs of consecutive same-speaker words ──────────
         # A run is a list of word dicts that share the same speaker_label.
@@ -1622,53 +1742,87 @@ def _resegment_by_word_speakers(
         # ── Apply noise gate: merge short/brief runs into the previous run ─
         # We iterate forward; a run that fails the gate is folded into the
         # preceding accepted run (which may have a different speaker label).
+        # Exception: a short run inside an overlap window that lists its speaker
+        # is a real interjection ("yes", "no wait") and keeps its own turn.
         merged_runs: List[List[Dict[str, Any]]] = []
         for run in runs:
             run_words = len(run)
-            run_dur = (
-                run[-1].get("end", 0.0) - run[0].get("start", 0.0)
-            ) if run else 0.0
+            run_start = run[0].get("start", 0.0)
+            run_end = run[-1].get("end", 0.0)
+            run_dur = run_end - run_start
 
             if merged_runs and run_words < min_words and run_dur < min_duration:
-                # Noise — fold into the previous accepted run.
-                merged_runs[-1].extend(run)
-            else:
-                merged_runs.append(list(run))
+                run_label = run[0].get("speaker_label")
+                is_interjection = keep_interjections and any(
+                    run_label in r.get("speakers", [])
+                    for r in _intersecting_regions(base_regions, run_start, run_end)
+                )
+                if not is_interjection:
+                    # Noise — fold into the previous accepted run.
+                    merged_runs[-1].extend(run)
+                    continue
+            merged_runs.append(list(run))
 
         # ── Emit one output segment per merged run ────────────────────────
         base_profile_id = seg.get("speaker_profile_id")
         base_avg_logprob = seg.get("avg_logprob", 0.0)
         base_speaker_raw = seg.get("speaker", "")
         base_is_overlap = seg.get("is_overlap", False)
-        base_overlap_regions = seg.get("overlap_regions", [])
 
         for run in merged_runs:
             if not run:
                 continue
 
-            # Speaker label comes from the first word of the accepted run;
-            # that word carries the label set by _post_process_whisperx_segments.
-            run_speaker_label = run[0].get("speaker_label") or seg.get("speaker_label", "")
+            # Speaker identity comes from the first word of the accepted run;
+            # that word carries the label (and raw id / profile) set by
+            # _post_process_whisperx_segments / _assign_speakers_to_words_manual.
+            first = run[0]
+            run_speaker_label = first.get("speaker_label") or seg.get("speaker_label", "")
+            if "speaker_profile_id" in first or first.get("speaker"):
+                run_profile_id = first.get("speaker_profile_id")
+                run_speaker_raw = first.get("speaker") or base_speaker_raw
+            else:
+                run_profile_id = base_profile_id
+                run_speaker_raw = base_speaker_raw
+            for w in run:
+                w.pop("speaker_profile_id", None)
+                if w.get("speaker") is None:
+                    w.pop("speaker", None)
 
-            run_start = round(float(run[0].get("start", seg["start"])), 3)
+            run_start = round(float(first.get("start", seg["start"])), 3)
             run_end   = round(float(run[-1].get("end",   seg["end"])),   3)
             run_text  = " ".join(w.get("word", "").strip() for w in run if w.get("word", "").strip())
 
-            out.append({
+            # Only the overlap windows this turn actually touches.
+            if base_regions:
+                run_regions = _intersecting_regions(base_regions, run_start, run_end)
+                run_is_overlap = bool(run_regions)
+            else:
+                run_regions = []
+                run_is_overlap = base_is_overlap
+            overlap_speakers = sorted({
+                sp for r in run_regions for sp in r.get("speakers", []) if sp != run_speaker_label
+            })
+
+            new_seg = {
                 "start":             run_start,
                 "end":               run_end,
                 "text":              run_text,
                 "words":             run,
                 "avg_logprob":       base_avg_logprob,
                 "speaker_label":     run_speaker_label,
-                "speaker_profile_id": base_profile_id,
-                "speaker":           base_speaker_raw,
-                "is_overlap":        base_is_overlap,
-                "overlap_regions":   base_overlap_regions,
-            })
+                "speaker_profile_id": run_profile_id,
+                "speaker":           run_speaker_raw,
+                "is_overlap":        run_is_overlap,
+                "overlap_regions":   run_regions,
+            }
+            if overlap_speakers:
+                new_seg["overlap_speakers"] = overlap_speakers
+            if seg.get("from_separation"):
+                new_seg["from_separation"] = True
+            out.append(new_seg)
 
     return out
-
 
 def _offset_segment_timestamps(segment: Dict[str, Any], offset: float) -> Dict[str, Any]:
     """Offset all segment-level and word-level timestamps by a given offset in seconds."""
@@ -1692,6 +1846,122 @@ def _offset_segment_timestamps(segment: Dict[str, Any], offset: float) -> Dict[s
         new_seg["words"] = new_words
     return new_seg
 
+
+# Uncovered audio after the last background chunk shorter than this is ignored.
+FINALIZE_TAIL_MIN_SEC = 1.0
+
+
+def _remap_chunk_windows(chunk_rows: list, keep_ranges) -> List[Dict[str, Any]]:
+    """
+    Chunk rows with chunk_start_sec / chunk_end_sec moved onto the edited
+    timeline (for the per-chunk summaries); chunks whose audio was removed
+    entirely are dropped.
+    """
+    from utils.audio_edit import map_time_clamped
+    out: List[Dict[str, Any]] = []
+    for row in chunk_rows:
+        r = dict(row)
+        s = map_time_clamped(float(r.get("chunk_start_sec") or 0.0), keep_ranges)
+        e = map_time_clamped(float(r.get("chunk_end_sec") or 0.0), keep_ranges)
+        if e - s < FINALIZE_TAIL_MIN_SEC:
+            continue
+        r["chunk_start_sec"], r["chunk_end_sec"] = s, e
+        out.append(r)
+    return out
+
+
+async def _transcribe_finalize_tail(
+    recording_id: str,
+    full_wav_path: str,
+    covered_until: float,
+    user_id: str,
+    meeting_prompt: str,
+    use_vocabulary: bool,
+    loop,
+) -> Optional[Dict[str, Any]]:
+    """
+    Transcribe the audio after the last background chunk.
+
+    A live recording submits a chunk at each 10-minute mark while recording, so
+    the stretch between the last mark and Stop is never chunk-transcribed.
+    Returns {"segments", "aligned_segments", "raw_text"} on the full-audio
+    timeline, or None when there is no meaningful tail or transcription failed.
+    """
+    from utils.audio_utils import get_duration, render_keep_ranges
+
+    try:
+        total = get_duration(full_wav_path)
+    except Exception as e:
+        logger.warning(f"[FinalPipeline] {recording_id} — Could not read full audio duration for tail check: {e}")
+        return None
+    if total - covered_until < FINALIZE_TAIL_MIN_SEC:
+        return None
+
+    logger.info(
+        f"[FinalPipeline] {recording_id} — Chunks cover 0–{covered_until:.1f}s of {total:.1f}s; "
+        f"transcribing the uncovered tail"
+    )
+    tail_path = os.path.splitext(full_wav_path)[0] + "_tail.wav"
+    try:
+        await loop.run_in_executor(
+            None, lambda: render_keep_ranges(full_wav_path, [(covered_until, total)], tail_path)
+        )
+
+        initial_prompt = ""
+        try:
+            async with get_db_context() as db:
+                global_prompt = await get_global_prompt(db, user_id)
+                vocab_items = await list_vocabulary(db, user_id)
+                shortcut_items = await list_shortcuts(db, user_id)
+            initial_prompt = build_whisper_prompt(
+                global_prompt=global_prompt,
+                meeting_prompt=meeting_prompt,
+                vocabulary=[item["word"] for item in vocab_items],
+                use_vocabulary=use_vocabulary,
+                shortcuts=shortcut_items,
+            )
+        except Exception as e:
+            logger.warning(f"[FinalPipeline] {recording_id} — Tail prompt build failed (non-fatal): {e}")
+
+        user_settings_dict: Dict[str, Any] = {}
+        try:
+            async with get_db_context() as db:
+                r = await db.execute(
+                    text("SELECT * FROM user_settings WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                us_row = r.mappings().fetchone()
+                if us_row:
+                    user_settings_dict = dict(us_row)
+        except Exception:
+            pass
+
+        # Language is auto-detected, matching how the background chunks were transcribed.
+        t_result = await loop.run_in_executor(
+            None,
+            lambda: transcribe(tail_path, initial_prompt=initial_prompt, user_settings=user_settings_dict),
+        )
+    except Exception as e:
+        logger.error(
+            f"[FinalPipeline] {recording_id} — Tail transcription FAILED; transcript will end at "
+            f"{covered_until:.1f}s: {e}",
+            exc_info=True,
+        )
+        return None
+    finally:
+        try:
+            os.remove(tail_path)
+        except OSError:
+            pass
+
+    segs = t_result.get("segments", [])
+    aligned = (t_result.get("aligned_result") or {}).get("segments", segs)
+    logger.info(f"[FinalPipeline] {recording_id} — Tail transcription OK: {len(segs)} segments")
+    return {
+        "segments": [_offset_segment_timestamps(s, covered_until) for s in segs],
+        "aligned_segments": [_offset_segment_timestamps(s, covered_until) for s in aligned],
+        "raw_text": t_result.get("raw_text", ""),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1873,6 +2143,7 @@ async def run_finalize_pipeline(
     participant_voice_ids: List[str] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    edit_keep_ranges: Optional[List[List[float]]] = None,
 ):
     try:
         await _run_finalize_pipeline_impl(
@@ -1884,6 +2155,7 @@ async def run_finalize_pipeline(
             participant_voice_ids=participant_voice_ids,
             use_vocabulary=use_vocabulary,
             speaker_summary=speaker_summary,
+            edit_keep_ranges=edit_keep_ranges,
         )
     except asyncio.CancelledError:
         logger.info(f"[FinalPipeline] {recording_id} — Task was CANCELLED.")
@@ -1900,6 +2172,9 @@ async def run_finalize_pipeline(
     finally:
         unregister_task(recording_id)
         unload_all_models()
+    # Transcription finished: start the ROM pipeline if the meeting's ROM settings ask for it.
+    from tasks.rom_auto_pipeline import maybe_start
+    await maybe_start(recording_id, user_id)
 
 
 async def _run_finalize_pipeline_impl(
@@ -1911,12 +2186,16 @@ async def _run_finalize_pipeline_impl(
     participant_voice_ids: List[str] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    edit_keep_ranges: Optional[List[List[float]]] = None,
 ):
     """
     Final merge pipeline for chunked recordings.
 
     1. Wait for all background chunk jobs to reach 'done' or 'error'.
-    2. Merge transcripts from all completed chunks in order.
+    2. Merge transcripts from all completed chunks in order.  When the user
+       trimmed the recording (``edit_keep_ranges``, source timeline), the
+       chunk transcripts are remapped onto the edited ``full_wav_path``.
+       Audio after the last chunk is transcribed from ``full_wav_path``.
     3. Run diarization ONCE on the full audio.
     4. Assign speakers from diarization to merged words using timestamps.
     5. Run AI insights on the merged transcript.
@@ -2032,6 +2311,30 @@ async def _run_finalize_pipeline_impl(
             f"from {len(chunk_rows)} chunks"
         )
 
+    # How far the background chunks reach on the source timeline.
+    covered_until = max(
+        (float(row.get("chunk_end_sec") or 0.0) for row in chunk_rows if row["status"] == "done"),
+        default=0.0,
+    )
+
+    if edit_keep_ranges and chunk_rows:
+        # The chunks were transcribed before the user trimmed the recording;
+        # move them onto the edited timeline that full_wav_path now uses.
+        from utils.audio_edit import remap_segments, map_time_clamped
+        keep = [(float(a), float(b)) for a, b in edit_keep_ranges]
+        before = len(merged_segments)
+        merged_segments = remap_segments(merged_segments, keep)
+        merged_aligned_segments = remap_segments(merged_aligned_segments, keep)
+        merged_raw_parts = [
+            (s.get("text") or "").strip() for s in merged_segments if (s.get("text") or "").strip()
+        ]
+        covered_until = map_time_clamped(covered_until, keep)
+        chunk_rows = _remap_chunk_windows(chunk_rows, keep)
+        logger.info(
+            f"[FinalPipeline] {recording_id} — Remapped chunk transcript onto trimmed audio "
+            f"(keep={keep}): {before} → {len(merged_segments)} segments"
+        )
+
     # Fetch pre-detected language from DB (reused from first chunk)
     detected_language = None
     try:
@@ -2050,9 +2353,19 @@ async def _run_finalize_pipeline_impl(
     has_usable_chunks = len(merged_segments) > 0
     _parallel_td = False
     diar_segs: List[Dict[str, Any]] = []
+    speaker_hints = await _load_speaker_hints(recording_id, participant_voice_ids)
 
     if has_usable_chunks:
         logger.info(f"[FinalPipeline] {recording_id} — Using merged chunk results (skipping full audio transcription)")
+        tail = await _transcribe_finalize_tail(
+            recording_id, full_wav_path, covered_until, user_id,
+            meeting_prompt, use_vocabulary, loop,
+        )
+        if tail:
+            merged_segments.extend(tail["segments"])
+            merged_aligned_segments.extend(tail["aligned_segments"])
+            if tail["raw_text"]:
+                merged_raw_parts.append(tail["raw_text"])
         # Unload transcription models immediately to free VRAM before diarization
         try:
             from services.transcription import unload_whisperx_model, unload_align_model
@@ -2155,7 +2468,7 @@ async def _run_finalize_pipeline_impl(
 
         # ── Helper: run diarization ───────────────────────────────────
         async def _do_diarization_fin():
-            return await loop.run_in_executor(None, diarize, full_wav_path)
+            return await loop.run_in_executor(None, lambda: diarize(full_wav_path, **speaker_hints))
 
         if _parallel_td:
             # ══════════════════════════════════════════════════════════
@@ -2290,7 +2603,7 @@ async def _run_finalize_pipeline_impl(
             # Note: chunk summary generation now runs AFTER speaker identification
             # so it can use speaker-attributed text instead of raw transcript.
             log_gpu_memory("Pre-diarization")
-            diar_segs = await loop.run_in_executor(None, diarize, full_wav_path)
+            diar_segs = await loop.run_in_executor(None, lambda: diarize(full_wav_path, **speaker_hints))
 
             logger.info(f"[FinalPipeline] {recording_id} — Diarization OK: {len(diar_segs)} segments")
         except Exception as e:
@@ -2340,6 +2653,7 @@ async def _run_finalize_pipeline_impl(
     # User settings and similarity threshold
     threshold = settings.SPEAKER_SIMILARITY_THRESHOLD
     active_embedding_model = "ecapa"
+    user_settings_row = None
     try:
         async with get_db_context() as db:
             r = await db.execute(
@@ -2373,6 +2687,12 @@ async def _run_finalize_pipeline_impl(
                 except Exception as e:
                     logger.warning(f"[FinalPipeline] Failed to persist lazily generated {active_embedding_model} embeddings: {e}")
 
+    # ── Step 5b: Overlap separation (opt-in) ────────────────────────────
+    overlap_words = await _recover_overlap_words(
+        loop, recording_id, full_wav_path, diar_segs, language, meeting_prompt or "",
+        active_embedding_model, dict(user_settings_row) if user_settings_row else {}, _analytics_fin,
+    )
+
     # ── Step 6: Speaker identification ──────────────────────────────────
     logger.info(f"[FinalPipeline] {recording_id} — Identifying speakers (model={active_embedding_model})")
     await _update_status_safe(recording_id, "processing", {"progress": "identifying_speakers"})
@@ -2391,6 +2711,7 @@ async def _run_finalize_pipeline_impl(
                     voice_profiles=voice_profiles,
                     similarity_threshold=threshold,
                     embedding_model=active_embedding_model,
+                    participants_selected=bool(participant_voice_ids),
                 ),
             )
         except Exception as e:
@@ -2429,6 +2750,9 @@ async def _run_finalize_pipeline_impl(
             _analytics_fin["speaker_assignment_method"] = "manual"
             speaker_segments = _assign_speakers_to_words_manual(aligned_result, identified_segs)
             speaker_segments = _resegment_by_word_speakers(speaker_segments)
+        speaker_segments = _merge_overlap_words(
+            recording_id, speaker_segments, overlap_words, identified_segs, _analytics_fin
+        )
     else:
         # No diarization — label all segments as Speaker 1
         from services.identification import merge_transcript_with_speakers
@@ -2480,8 +2804,7 @@ async def _run_finalize_pipeline_impl(
             "overlap_regions": seg.get("overlap_regions", []),
             "speaker_confidence": _speaker_confidence(seg),
         }
-        if seg.get("speaker_refined"):
-            final_seg["speaker_refined"] = True
+        _copy_turn_flags(seg, final_seg)
         final_segments.append(final_seg)
 
     speakers_detected = list({
@@ -2510,6 +2833,12 @@ async def _run_finalize_pipeline_impl(
                 generate_mom_auto = bool(row["generate_mom_auto"])
     except Exception as e:
         logger.warning(f"[FinalPipeline] {recording_id} — Failed to fetch generate_mom_auto setting (defaulting to True): {e}")
+
+    # ROM settings chosen at capture time (MoM/ROM): the MoM comes from the ROM run's Stage 2 points.
+    from tasks.rom_auto_pipeline import replaces_direct_mom
+    if generate_mom_auto and await replaces_direct_mom(recording_id):
+        logger.info(f"[FinalPipeline] {recording_id} — ROM pipeline will generate the MoM; skipping the direct transcript MoM.")
+        generate_mom_auto = False
 
     now_fin = datetime.now(timezone.utc)
     transcript_json = to_json(final_segments)

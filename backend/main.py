@@ -54,6 +54,7 @@ from routers.attachments_router import router as attachments_router
 from routers.global_context_router import router as global_context_router
 from routers.raw_mom_router import router as raw_mom_router
 from routers.rom_router import router as rom_router
+from routers.rom_pipeline_router import router as rom_pipeline_router
 from routers.dashboard_router import router as dashboard_router
 from routers.prompt_templates_router import router as prompt_templates_router
 from routers.collections_router import router as collections_router
@@ -351,6 +352,7 @@ app.include_router(attachments_router)
 app.include_router(global_context_router)
 app.include_router(raw_mom_router)
 app.include_router(rom_router)
+app.include_router(rom_pipeline_router)
 app.include_router(dashboard_router)
 app.include_router(prompt_templates_router)
 app.include_router(collections_router)

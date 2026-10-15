@@ -246,6 +246,13 @@ class OcrSettings(BaseModel):
         help="Text lines recognised per model call.",
         ge=1, le=8, step=1,
     )
+    rec_crop_padding: float = _field(
+        0.1, group="recognition", label="Text-line crop margin",
+        help="Margin added around each detected text line before recognition, as a fraction of "
+             "the line height. Detected boxes hug the glyphs; a small margin roughly halved "
+             "merged and split words in testing. 0 matches the official pipeline.",
+        ge=0.0, le=0.5, step=0.05, unit="× line height",
+    )
 
     # ── Layout & output
     merge_lines: bool = _field(
@@ -262,6 +269,12 @@ class OcrSettings(BaseModel):
     column_detection: bool = _field(
         False, group="layout", label="Multi-column reading order",
         help="Detect columns (XY-cut) and read each column top to bottom before moving right.",
+    )
+    structured_output: bool = _field(
+        True, group="layout", label="Preserve tables and layout",
+        help="Rebuild tables from the positions of the detected text (Markdown rows and columns), "
+             "keep wide gaps inside a line as a tab and separate paragraphs with a blank line. "
+             "Off returns plain text lines.",
     )
     text_cleanup: bool = _field(
         True, group="layout", label="Remove noise lines",
@@ -388,6 +401,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "det_score_mode": "slow", "cls_thresh": 0.6, "rec_score_thresh": 0.4,
             "rec_max_width": 960, "merge_lines": False, "auto_orient": False,
             "pdf_render_dpi": 150, "pdf_scan_text_threshold": 20, "max_workers": 5,
+            "rec_crop_padding": 0.0, "structured_output": False,
         },
     },
 }

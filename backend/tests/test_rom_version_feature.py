@@ -92,7 +92,7 @@ def test_generate_rom_version_short_processes_agenda_wise(mock_get_provider):
     assert mock_provider.query.called
     call_prompt = mock_provider.query.call_args[0][0]
     assert "Sprint Planning" in call_prompt
-    assert "Speaker=Alice" in call_prompt
+    assert "Speakers=Alice" in call_prompt
     assert "Action Owner=Alice" in call_prompt
     assert "Use active voice." in call_prompt
 

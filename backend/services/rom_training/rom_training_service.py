@@ -208,12 +208,11 @@ def _build_training_examples(
     Input: Long ROM points for an agenda
     Target: Manually written MoM points for the same agenda
     """
-    from services.prompt_service import get_prompt_sync
-
     examples = []
-    # Use the same short ROM prompt template to build the input
+    # The prompt trained variants are run with (RomService.generate_rom_version_with_variant):
+    # "[Point i]" lines in, a JSON array of strings out.
     try:
-        prompt_template = get_prompt_sync("rom_version_short")
+        from services.ai_provider import ROM_VERSION_SHORT_VARIANT_PROMPT as prompt_template
     except Exception:
         prompt_template = (
             "Agenda: {agenda_title}\n\nDiscussion Points:\n{points_json}"

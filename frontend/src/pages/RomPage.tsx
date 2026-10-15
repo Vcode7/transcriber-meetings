@@ -19,10 +19,22 @@ import { getApiErrorDetail } from '../lib/errors'
 import { renderMarkdown } from '../lib/markdown'
 import { AgendaTimelineControls, AgendaTimelineRange } from '../components/AgendaTimelineControls'
 import { Stage2ContextPreviewModal, Stage2ContextGroup } from '../components/Stage2ContextPreviewModal'
-import { AgendaActionPointsSection, PointTypeBadge } from '../components/AgendaActionPoints'
-import { agendaShowsActionPoints, collectAgendaActionPoints } from '../lib/actionPoints'
+import {
+  AgendaActionPointsSection, DiscussionTypeBadge, ImportanceBadge, ImportanceThresholdSelect, PointTypeBadge,
+} from '../components/AgendaActionPoints'
+import { useImportanceThreshold } from '../hooks/useImportanceThreshold'
+import type { DiscussionType } from '../components/AgendaActionPoints'
+import { agendaShowsActionPoints, collectAgendaActionPoints, filterByImportance, hiddenByImportanceText } from '../lib/actionPoints'
+import type { ActionImportance } from '../lib/actionPoints'
 import type { AgendaActionPoint, ActionPointAudit } from '../lib/actionPoints'
 import { DiscussionAnalysis, DiscussionAnalysisPanel, SuggestedAgenda } from '../components/DiscussionAnalysisPanel'
+import { Stage1Options, Stage2Options, type Stage2OptionsValue } from '../components/rom/RomStageOptions'
+import { AgendaItemsEditor, moveItem, type AgendaItem as EditorAgendaItem, type NewAgendaInput } from '../components/rom/AgendaItemsEditor'
+import { CondensedPointDetails } from '../components/rom/CondensedPointDetails'
+import { AgendaReductionChip, VersionReductionSummary } from '../components/rom/VersionReductionSummary'
+import { condenseSourceIndex, pointSources, versionReduction } from '../lib/romVersions'
+import type { CondenseExplanation, CondenseSource } from '../lib/romVersions'
+import { getRomPipeline, startRomPipeline, type RomPipelineInfo, type RomPipelineSettings } from '../api/romPipeline'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -199,6 +211,9 @@ interface PolishedPoint {
   numbers: string[]
   references: string[]
   action_items: Array<{ task: string; assignee: string | null; deadline: string | null }> | string[]
+  // Stage 2 classification: how the point is shortened, and whether action points come from it
+  type?: string
+  include_action_point?: boolean
   context_usage_report?: {
     meeting_context_used: boolean
     global_context_used: boolean
@@ -241,9 +256,12 @@ interface FinalRomAgenda {
   action_points_mode?: 'agenda'
   action_points?: AgendaActionPoint[]
   action_point_audit?: ActionPointAudit
+  // Short/Medium: the long points this agenda was condensed from, under the IDs the LLM saw (P1, P2, ...)
+  condense_sources?: CondenseSource[]
   discussion_points: Array<{
     id: string
     text: string
+    polished_text?: string
     speaker: string
     action_owner: string | null
     timeline_start: number
@@ -252,7 +270,27 @@ interface FinalRomAgenda {
     action_items: string[]
     point_type?: string
     point_types?: string[]
+    type?: string
+    include_action_point?: boolean
+    // Short/Medium: original (long) point IDs, explanation, verification notes and Expand Point state
+    source_point_ids?: string[]
+    is_very_important?: boolean
+    condense_explanation?: CondenseExplanation
+    condense_notes?: string[]
+    expanded_sentences?: string[]
+    pre_expand_text?: string
   }>
+}
+
+type FinalRomPoint = FinalRomAgenda['discussion_points'][number]
+
+// Action item of the MoM generated from Stage 2 points (stage3.enhanced_mom)
+interface MomActionItem extends ActionImportance {
+  task?: string
+  item?: string
+  description?: string
+  owner?: string
+  deadline?: string
 }
 
 interface AgendaDocEntry {
@@ -298,6 +336,8 @@ interface RomData {
     skipped_agendas?: Record<string, { note?: string }>
     discussion_analysis?: DiscussionAnalysis | null
     suggested_agendas?: SuggestedAgenda[]
+    /** How the agenda text was read (absent when agendas were provided or cached) */
+    agenda_extraction?: { mode: 'tables' | 'document'; table_count: number } | null
     enhanced_mom?: any
     completed_at: string | null
   } | null
@@ -485,6 +525,48 @@ function Stage1ProgressBanner({ progress }: {
           </span>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Automatic ROM pipeline status (run by the backend after transcription) ─────
+
+function RomAutoRunBanner({ info, onRetry }: { info: RomPipelineInfo; onRetry: () => void }) {
+  const status = info.status!
+  const what = status.output_type === 'rom' ? 'ROM' : 'MoM'
+  const active = ['waiting', 'queued', 'running'].includes(status.state)
+  const failed = status.state === 'error' || status.state === 'interrupted'
+  const color = failed ? 'hsl(0,70%,50%)' : active ? 'hsl(280,75%,60%)' : 'hsl(140,70%,40%)'
+  const progress = info.stage1_progress
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '.6rem', marginBottom: '1rem' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '.65rem .9rem', borderRadius: 9,
+        border: `1.5px solid ${color.replace(')', ' / .4)')}`, background: color.replace(')', ' / .07)'),
+      }}>
+        {active ? <Loader size={15} className="spin" style={{ color, flexShrink: 0 }} />
+          : failed ? <AlertTriangle size={15} style={{ color, flexShrink: 0 }} />
+          : <CheckCircle size={15} style={{ color, flexShrink: 0 }} />}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: '.82rem', color }}>
+            Automatic {what} pipeline · {active ? (status.stage_label || 'Running') : failed ? (status.stage_label || 'Failed') : 'Complete'}
+          </div>
+          <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', marginTop: 2 }}>
+            {status.state === 'waiting' && 'Starts when transcription finishes. Settings were chosen when the meeting was captured.'}
+            {(status.state === 'queued' || status.state === 'running') && 'Running in the background with the settings chosen at capture. Manual runs are paused until it finishes.'}
+            {failed && (status.error || 'The pipeline stopped.')}
+            {status.state === 'done' && 'Results are below. You can still edit and re-run any stage manually.'}
+          </div>
+        </div>
+        {failed && (
+          <button onClick={onRetry} style={{ padding: '.35rem .8rem', borderRadius: 7, border: 'none', background: color, color: 'white', fontWeight: 700, fontSize: '.74rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'Inter', flexShrink: 0 }}>
+            <RefreshCw size={12} /> Retry
+          </button>
+        )}
+      </div>
+      {status.stage === 'stage1' && active && progress && progress.windows_total > 0 && (
+        <Stage1ProgressBanner progress={progress} />
+      )}
     </div>
   )
 }
@@ -1038,7 +1120,7 @@ export default function RomPage() {
   const [meetingTopK, setMeetingTopK] = useState(5)
   const [globalTopK, setGlobalTopK] = useState(3)
   const [discussionWindowSize, setDiscussionWindowSize] = useState(5)
-  const [minSimilarityThreshold, setMinSimilarityThreshold] = useState<number | null>(0.80)
+  const [minSimilarityThreshold, setMinSimilarityThreshold] = useState<number | null>(0.60)
   const [processAllTogether, setProcessAllTogether] = useState(false)
   const [stage2Status, setStage2Status] = useState<ProcessState>('idle')
   // Stage 2 meeting documents (uploaded inline, text extracted)
@@ -1054,6 +1136,29 @@ export default function RomPage() {
   const [previousMeetingMode, setPreviousMeetingMode] = useState<'auto' | 'select' | 'off'>('auto')
   const [selectedPreviousMeetingId, setSelectedPreviousMeetingId] = useState<string>('')
   const [previousMeetingTopK, setPreviousMeetingTopK] = useState(3)
+  const applyStage2Options = (p: Partial<Stage2OptionsValue>) => {
+    if (p.meetingTopK !== undefined) setMeetingTopK(p.meetingTopK)
+    if (p.globalTopK !== undefined) setGlobalTopK(p.globalTopK)
+    if (p.discussionWindowSize !== undefined) setDiscussionWindowSize(p.discussionWindowSize)
+    if (p.minSimilarityThreshold !== undefined) setMinSimilarityThreshold(p.minSimilarityThreshold)
+    if (p.processAllTogether !== undefined) setProcessAllTogether(p.processAllTogether)
+    if (p.previousMeetingMode !== undefined) setPreviousMeetingMode(p.previousMeetingMode)
+    if (p.previousMeetingId !== undefined) setSelectedPreviousMeetingId(p.previousMeetingId)
+    if (p.previousMeetingTopK !== undefined) setPreviousMeetingTopK(p.previousMeetingTopK)
+  }
+
+  // Automatic ROM pipeline, started by the backend after transcription with the settings chosen
+  // on the Upload / Record / Tab Recording page (stored with the recording).
+  const [romPipeline, setRomPipeline] = useState<RomPipelineInfo | null>(null)
+  const autoRunActive = !!romPipeline?.status && ['waiting', 'queued', 'running'].includes(romPipeline.status.state)
+  const autoRunActiveRef = useRef(false)
+  autoRunActiveRef.current = autoRunActive
+  // Manual runs would overwrite the same ROM data the automatic run is writing.
+  const guardAutoRun = () => {
+    if (!autoRunActiveRef.current) return false
+    toast.info('The automatic ROM pipeline is still running for this meeting. Wait for it to finish, then edit and re-run.')
+    return true
+  }
   const [availablePreviousMeetings, setAvailablePreviousMeetings] = useState<Array<{
     id: string
     name: string
@@ -1102,10 +1207,13 @@ export default function RomPage() {
   const [aiChatLoading, setAiChatLoading] = useState(false)
   const [copiedMsgIdx, setCopiedMsgIdx] = useState<number | null>(null)
   const aiChatEndRef = useRef<HTMLDivElement>(null)
+  const aiChatScrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (showAiChatPanel && aiChatEndRef.current) {
-      aiChatEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    // Scroll only the chat pane; scrollIntoView() would also scroll the page layout
+    const el = aiChatScrollRef.current
+    if (showAiChatPanel && el) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     }
   }, [aiChatMessages, aiChatLoading, showAiChatPanel])
 
@@ -1134,6 +1242,7 @@ export default function RomPage() {
   const [editingStage2PointId, setEditingStage2PointId] = useState<string | null>(null)
   const [stage2EditDraft, setStage2EditDraft] = useState('')
   const [savingStage2Point, setSavingStage2Point] = useState(false)
+  const [classifyingPointId, setClassifyingPointId] = useState<string | null>(null)
 
   // Stage 2 Retrieve Context Preview state
   const [showContextPreview, setShowContextPreview] = useState(false)
@@ -1184,7 +1293,12 @@ export default function RomPage() {
 
   // Stage 3 – discussion analysis before agenda creation, and adding its suggested agendas
   const [analyzeDiscussion, setAnalyzeDiscussion] = useState(true)
+  // Stage 3 – Extract Agenda from Tables: agenda items from the agenda text's tables only
+  const [agendaFromTables, setAgendaFromTables] = useState(true)
   const [addingSuggestionId, setAddingSuggestionId] = useState<string | null>(null)
+
+  // Minimum action-point importance shown and exported (Final ROM and MoM action points)
+  const [minImportance, setMinImportance] = useImportanceThreshold()
 
   // Reasoning Mode state (Short ROM & Action Point from Enhanced Point)
   const [reasoningModeShortRom, setReasoningModeShortRom] = useState(false)
@@ -1342,9 +1456,6 @@ export default function RomPage() {
   const forceReparseRef = useRef(false)
 
   // Editing state for Stage 3 Agendas
-  const [editingAgendaId, setEditingAgendaId] = useState<string | null>(null)
-  const [editAgendaTitle, setEditAgendaTitle] = useState('')
-  const [editAgendaDescription, setEditAgendaDescription] = useState('')
   const [savingAgendas, setSavingAgendas] = useState(false)
 
   // Editing state for final ROM
@@ -1373,10 +1484,6 @@ export default function RomPage() {
   const [mediumRomPrompt, setMediumRomPrompt] = useState(DEFAULT_MEDIUM_PROMPT)
 
   // Stage 3 Add Agenda state
-  const [showAddAgendaForm, setShowAddAgendaForm] = useState(false)
-  const [newAgendaTitle, setNewAgendaTitle] = useState('')
-  const [newAgendaDesc, setNewAgendaDesc] = useState('')
-  const [newAgendaPresenter, setNewAgendaPresenter] = useState('')
   const [creatingAgenda, setCreatingAgenda] = useState(false)
 
   // Save edited Stage 3 Agendas to backend
@@ -1406,17 +1513,17 @@ export default function RomPage() {
   }
 
   // Create a new Agenda item in Stage 3
-  const handleCreateAgenda = async () => {
-    if (!newAgendaTitle.trim() || !id) {
+  const handleCreateAgenda = async (item: NewAgendaInput): Promise<boolean> => {
+    if (!item.title.trim() || !id) {
       toast.error('Please enter an agenda title')
-      return
+      return false
     }
     setCreatingAgenda(true)
     try {
       const res = await api.post(`/rom/${id}/stage3/agenda`, {
-        title: newAgendaTitle.trim(),
-        description: newAgendaDesc.trim(),
-        presenter: newAgendaPresenter.trim() || undefined,
+        title: item.title.trim(),
+        description: item.description.trim(),
+        presenter: item.presenter.trim() || undefined,
       })
       const fullData = res.data.rom_data || res.data
       if (fullData) {
@@ -1431,13 +1538,11 @@ export default function RomPage() {
           }
         })
       }
-      setShowAddAgendaForm(false)
-      setNewAgendaTitle('')
-      setNewAgendaDesc('')
-      setNewAgendaPresenter('')
       toast.success('Agenda item added successfully')
+      return true
     } catch (e) {
       toast.error(getApiErrorDetail(e) || 'Failed to add agenda')
+      return false
     } finally {
       setCreatingAgenda(false)
     }
@@ -1539,14 +1644,17 @@ export default function RomPage() {
     if (previousMomInputRef.current) previousMomInputRef.current.value = ''
   }
 
-  // Handle uploading a file for the agenda section
+  // Handle uploading a file for the agenda section. PPT/PDF/DOCX files are also kept slide by
+  // slide, so Generate Final ROM extracts doc points from them (PPT matching logic).
   const handleAgendaFileUpload = async (files: FileList | null) => {
     if (!files?.length || !id) return
     setUploadingAgendaFile(true)
     const results: { name: string; text: string }[] = []
     for (const file of Array.from(files)) {
       try {
-        const text = await extractFileText(file)
+        const formData = new FormData()
+        formData.append('file', file)
+        const text = (await api.post(`/rom/${id}/stage3/agenda-document`, formData)).data.text
         results.push({ name: file.name, text })
         toast.success(`Extracted text from ${file.name}`)
       } catch (err) {
@@ -1666,6 +1774,7 @@ export default function RomPage() {
 
   // Create Agenda (Step 1)
   const runCreateAgenda = async (forceReextract: boolean = false): Promise<boolean> => {
+    if (guardAutoRun()) return false
     setStage3AgendaStatus('processing')
     try {
       const res = await api.post(`/rom/${id}/stage3/create-agenda`, {
@@ -1676,6 +1785,7 @@ export default function RomPage() {
         previous_mom_texts: previousMomDocs.length > 0 ? previousMomDocs.map(d => d.text.slice(0, prevMomCharLimit)) : null,
         previous_mom_char_limit: prevMomCharLimit,
         analyze_discussion: analyzeDiscussion,
+        agenda_from_tables: agendaFromTables,
       })
       const fullData = res.data.rom_data || { ...(romData || {} as RomData), stage3: res.data.stage3 }
       setRomData(fullData)
@@ -1685,9 +1795,14 @@ export default function RomPage() {
       const agendaCount = fullData.stage3?.agendas?.length ?? 0
       const suggestionCount = fullData.stage3?.suggested_agendas?.length ?? 0
       const derived = fullData.stage3?.discussion_analysis?.mode === 'derived_agendas'
+      const extraction = fullData.stage3?.agenda_extraction
+      const source = !extraction ? ''
+        : extraction.mode === 'tables' ? ` from ${extraction.table_count} table(s)`
+        : agendaFromTables ? ` from the whole document (${extraction.table_count ? 'no agenda rows in its tables' : 'no tables found'})`
+        : ' from the whole document'
       toast.success(
         `Agendas created: ${agendaCount} agenda item(s)` +
-        (derived ? ' built from the discussion' : '') +
+        (derived ? ' built from the discussion' : source) +
         (suggestionCount > 0 ? ` · ${suggestionCount} suggested agenda(s) to review` : '')
       )
       return true
@@ -1728,6 +1843,7 @@ export default function RomPage() {
 
   // Generate Final ROM (Step 2 – map points)
   const runGenerateFinalRom = async (): Promise<boolean> => {
+    if (guardAutoRun()) return false
     setStage3FinalStatus('processing')
     try {
       const res = await api.post(`/rom/${id}/stage3/generate-final-rom`, {
@@ -1796,7 +1912,7 @@ export default function RomPage() {
 
   // Generate MOM from Enhanced ROM
   const runGenerateMomFromRom = async () => {
-    if (!id) return
+    if (!id || guardAutoRun()) return
     setEnhancedMomStatus('processing')
     try {
       const res = await api.post(`/rom/${id}/stage3/generate-mom-from-rom`)
@@ -2018,6 +2134,66 @@ export default function RomPage() {
     }
   }, [id, selectedPreviousMeetingId])
 
+  const applyMeetingRomSettings = useCallback((s: RomPipelineSettings) => {
+    setTranscriptWindow(s.transcript_window_minutes)
+    setMeetingTopK(s.meeting_top_k)
+    setGlobalTopK(s.global_top_k)
+    setDiscussionWindowSize(s.discussion_window_size)
+    setMinSimilarityThreshold(s.min_similarity_threshold)
+    if (s.process_all_together !== null) setProcessAllTogether(!!s.process_all_together)
+    setPreviousMeetingMode(s.previous_meeting_mode)
+    if (s.previous_meeting_id) setSelectedPreviousMeetingId(s.previous_meeting_id)
+    setPreviousMeetingTopK(s.previous_meeting_top_k)
+    if (typeof s.agenda_from_tables === 'boolean') setAgendaFromTables(s.agenda_from_tables)
+    if (s.output_type === 'rom' && s.agenda_text) {
+      setAgendaText(prev => prev || s.agenda_text || '')
+      const doc = s.agenda_doc
+      if (doc) setAgendaUploadedFiles(prev => prev.length ? prev : [{ name: doc.filename, text: s.agenda_text || '' }])
+    }
+  }, [])
+
+  const refreshRomPipeline = useCallback(async (applySettings = false) => {
+    if (!id) return null
+    try {
+      const info = await getRomPipeline(id)
+      setRomPipeline(info)
+      if (applySettings && info.settings && info.settings.output_type !== 'off') applyMeetingRomSettings(info.settings)
+      return info
+    } catch {
+      return null
+    }
+  }, [id, applyMeetingRomSettings])
+
+  // Live status of the automatic run; results are reloaded as each stage finishes.
+  const lastAutoStageRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (!autoRunActive) return
+    const timer = setInterval(async () => {
+      const status = (await refreshRomPipeline())?.status
+      if (!status) return
+      if (status.state === 'done') {
+        loadData()
+        toast.success(status.output_type === 'rom' ? 'Automatic ROM pipeline finished' : 'Automatic MoM pipeline finished')
+      } else if (status.state === 'error' || status.state === 'interrupted') {
+        loadData()
+      } else if (status.stage !== lastAutoStageRef.current) {
+        if (lastAutoStageRef.current !== undefined) loadData()
+        lastAutoStageRef.current = status.stage
+      }
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [autoRunActive, refreshRomPipeline, loadData])
+
+  const retryRomPipeline = async () => {
+    if (!id) return
+    try {
+      await startRomPipeline(id)
+      await refreshRomPipeline()
+    } catch (e) {
+      toast.error(getApiErrorDetail(e) || 'Could not restart the ROM pipeline')
+    }
+  }
+
   useEffect(() => {
     if (id) {
       loadData()
@@ -2051,11 +2227,14 @@ export default function RomPage() {
         }
       })
       .catch(() => {})
-  }, [id, loadData, fetchPreviousMeetings])
+      // The meeting's own ROM settings (chosen when it was captured) win over the user defaults.
+      .finally(() => { refreshRomPipeline(true) })
+  }, [id, loadData, fetchPreviousMeetings, refreshRomPipeline])
 
   // ── Actions ─────────────────────────────────────────────────────────────────
 
   const runStage1 = async (): Promise<boolean> => {
+    if (guardAutoRun()) return false
     setStage1Status('processing')
     setStage1Progress(null)
 
@@ -2106,6 +2285,7 @@ export default function RomPage() {
   }
 
   const runStage2 = async (): Promise<boolean> => {
+    if (guardAutoRun()) return false
     setStage2Status('processing')
     try {
       const res = await api.post(`/rom/${id}/stage2/generate`, {
@@ -2341,6 +2521,22 @@ export default function RomPage() {
     }
   }
 
+  const handleSetStage2Classification = async (
+    pointId: string,
+    change: { type?: DiscussionType; include_action_point?: boolean },
+  ) => {
+    if (!id) return
+    setClassifyingPointId(pointId)
+    try {
+      const res = await api.post(`/rom/${id}/stage2/point/${pointId}/classification`, change)
+      if (res.data.rom_data) setRomData(res.data.rom_data)
+    } catch (e: any) {
+      toast.error(getApiErrorDetail(e) || 'Failed to update the point type')
+    } finally {
+      setClassifyingPointId(null)
+    }
+  }
+
   const handlePointContextMenu = (e: React.MouseEvent, pointId: string) => {
     const selection = window.getSelection()
     const selectedText = selection?.toString()?.trim() || ''
@@ -2387,6 +2583,7 @@ export default function RomPage() {
 
 
   const runCompleteRom = async () => {
+    if (guardAutoRun()) return
     setIsGeneratingAll(true)
     try {
       setGenerateAllStep('Stage 1 of 3: Window Extraction...')
@@ -2432,7 +2629,7 @@ export default function RomPage() {
   const downloadDocx = async (stage: string) => {
     try {
       // Final ROM: each agenda's own "Include Action Points" option decides what the DOCX shows
-      const queryParam = stage === 'final' ? `?version=${romVersion}` : ''
+      const queryParam = stage === 'final' ? `?version=${romVersion}&min_importance=${minImportance}` : ''
       const res = await api.get(`/rom/${id}/${stage}/download/docx${queryParam}`, { responseType: 'blob' })
       const url = URL.createObjectURL(new Blob([res.data]))
       const a = document.createElement('a')
@@ -2573,6 +2770,102 @@ export default function RomPage() {
       toast.error(getApiErrorDetail(e) || `Failed to generate ${targetVersion} ROM`)
     } finally {
       setGeneratingVersion(false)
+    }
+  }
+
+  // ── Short/Medium points: explanation (generated on first open), Expand Point, Revert ──
+  const [condensedPointBusy, setCondensedPointBusy] = useState<Record<string, 'explain' | 'expand' | 'revert'>>({})
+
+  const setPointBusy = (pointId: string, kind?: 'explain' | 'expand' | 'revert') => {
+    setCondensedPointBusy(prev => {
+      const next = { ...prev }
+      if (kind) next[pointId] = kind
+      else delete next[pointId]
+      return next
+    })
+  }
+
+  // Patch one point of a version in local state; condensed point IDs are unique to their version
+  const patchVersionPoint = (
+    version: 'short' | 'medium',
+    pointId: string,
+    fields: Partial<FinalRomPoint>,
+    remove: Array<'pre_expand_text' | 'expanded_sentences'> = [],
+  ) => {
+    const apply = <T extends { agendas: FinalRomAgenda[] } | null | undefined>(rom: T): T => (rom?.agendas ? {
+      ...rom,
+      agendas: rom.agendas.map(ag => ({
+        ...ag,
+        discussion_points: (ag.discussion_points || []).map(pt => {
+          if (pt.id !== pointId) return pt
+          const next = { ...pt, ...fields }
+          remove.forEach(key => { delete next[key] })
+          return next
+        }),
+      })),
+    } : rom) as T
+    setRomData(prev => prev ? {
+      ...prev,
+      final_rom: apply(prev.final_rom),
+      final_rom_versions: { ...(prev.final_rom_versions || {}), [version]: apply(prev.final_rom_versions?.[version]) },
+    } : prev)
+  }
+
+  // The client's current text and original point IDs (they may include unsaved edits)
+  const condensedPointBody = (version: 'short' | 'medium', pt: FinalRomPoint) => ({
+    version,
+    point_id: pt.id,
+    point_text: pt.text || pt.polished_text || '',
+    source_point_ids: pt.source_point_ids || [],
+  })
+
+  const handleExplainPoint = async (pt: FinalRomPoint, regenerate: boolean) => {
+    const version = romVersion
+    if (!id || version === 'long' || condensedPointBusy[pt.id]) return
+    setPointBusy(pt.id, 'explain')
+    try {
+      const res = await api.post(`/rom/${id}/final/explain-point`, { ...condensedPointBody(version, pt), regenerate })
+      if (res.data?.explanation) patchVersionPoint(version, pt.id, { condense_explanation: res.data.explanation })
+    } catch (e) {
+      toast.error(getApiErrorDetail(e, 'Failed to generate the explanation'))
+    } finally {
+      setPointBusy(pt.id)
+    }
+  }
+
+  const handleExpandPoint = async (pt: FinalRomPoint) => {
+    const version = romVersion
+    if (!id || version === 'long' || condensedPointBusy[pt.id]) return
+    setPointBusy(pt.id, 'expand')
+    try {
+      const res = await api.post(`/rom/${id}/final/expand-point`, condensedPointBody(version, pt))
+      const added: string[] = res.data?.added_sentences || []
+      if (!added.length || !res.data?.point) {
+        toast.info('No further supported detail in the original points.')
+        return
+      }
+      patchVersionPoint(version, pt.id, res.data.point)
+      const what = `Added ${added.length} sentence${added.length === 1 ? '' : 's'} from the original points.`
+      toast.success(res.data.persisted ? what : `${what} Click "Save Changes" to persist.`)
+    } catch (e) {
+      toast.error(getApiErrorDetail(e, 'Failed to expand the point'))
+    } finally {
+      setPointBusy(pt.id)
+    }
+  }
+
+  const handleRevertExpand = async (pt: FinalRomPoint) => {
+    const version = romVersion
+    if (!id || version === 'long' || condensedPointBusy[pt.id]) return
+    setPointBusy(pt.id, 'revert')
+    try {
+      const res = await api.post(`/rom/${id}/final/expand-point/revert`, { version, point_id: pt.id })
+      patchVersionPoint(version, pt.id, res.data.point, res.data.removed_fields || ['pre_expand_text', 'expanded_sentences'])
+      toast.success('Expansion reverted.')
+    } catch (e) {
+      toast.error(getApiErrorDetail(e, 'Failed to revert the expansion'))
+    } finally {
+      setPointBusy(pt.id)
     }
   }
 
@@ -3210,6 +3503,85 @@ export default function RomPage() {
     }
   }
 
+  // Generated MoM (Stage 3 tab), shown with or without agendas
+  const renderGeneratedMom = () => (
+    <>
+          {/* Generated MOM Section */}
+          {(enhancedMomData || romData?.stage3?.enhanced_mom) && (() => {
+            const mom = enhancedMomData || romData.stage3.enhanced_mom
+            const momItems: MomActionItem[] = Array.isArray(mom.action_items) ? mom.action_items : []
+            const momActions = filterByImportance(momItems, minImportance)
+            const momHasImportance = momItems.some(a => a && a.importance !== undefined && a.importance !== null)
+            return (
+              <div style={{ borderRadius: 10, border: '1.5px solid hsl(140,70%,45%/.4)', background: 'hsl(var(--card))', padding: '1rem 1.15rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <SectionHeader icon={<FileText size={14} />} label="Generated Minutes of Meeting (MOM)" color="hsl(140,70%,45%)" />
+                  <button onClick={downloadEnhancedMomDocx} style={{ padding: '.35rem .75rem', borderRadius: 7, border: '1px solid hsl(140,70%,45%/.4)', background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,45%)', fontSize: '.74rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontFamily: 'Inter' }}>
+                    <Download size={12} /> Download MOM (.docx)
+                  </button>
+                </div>
+                {mom.introduction && (
+                  <div style={{ padding: '.75rem', borderRadius: 8, background: 'hsl(var(--muted)/.2)', fontSize: '.84rem', lineHeight: 1.5, color: 'hsl(var(--ink))' }}>
+                    <strong>Introduction:</strong> {mom.introduction}
+                  </div>
+                )}
+                {mom.points_discussed?.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Key Discussion Points:</div>
+                    {mom.points_discussed.map((pt: any, idx: number) => (
+                      <div key={idx} style={{ padding: '.6rem .75rem', borderRadius: 7, border: '1px solid hsl(var(--border)/.3)', background: 'hsl(var(--paper)/.4)', fontSize: '.82rem' }}>
+                        <div style={{ fontWeight: 700, color: 'hsl(140,70%,40%)', marginBottom: 2 }}>{pt.topic || `Topic ${idx+1}`}</div>
+                        <div>{pt.summary}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {mom.action_items?.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Action Items:</div>
+                      {momHasImportance && <ImportanceThresholdSelect value={minImportance} onChange={setMinImportance} />}
+                    </div>
+                    {momActions.hidden > 0 && (
+                      <div style={{ color: 'hsl(var(--pencil))', fontStyle: 'italic', fontSize: '.72rem' }}>
+                        {hiddenByImportanceText(momActions.hidden, minImportance)}
+                      </div>
+                    )}
+                    <div style={{ overflowX: 'auto', borderRadius: 8, border: '1px solid hsl(var(--border)/.4)' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.78rem' }}>
+                        <thead>
+                          <tr style={{ background: 'hsl(var(--muted)/.4)', borderBottom: '1px solid hsl(var(--border)/.4)' }}>
+                            <th style={{ padding: '6px 8px', textAlign: 'left' }}>Item</th>
+                            <th style={{ padding: '6px 8px', textAlign: 'left', width: 120 }}>Owner</th>
+                            <th style={{ padding: '6px 8px', textAlign: 'left', width: 90 }}>Deadline</th>
+                            {momHasImportance && <th style={{ padding: '6px 8px', textAlign: 'left', width: 80 }}>Importance</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {momActions.visible.map((act, idx) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid hsl(var(--border)/.2)' }}>
+                              <td style={{ padding: '6px 8px' }}>{act.item || act.description || '-'}</td>
+                              <td style={{ padding: '6px 8px', fontWeight: 600 }}>{act.owner || 'Unassigned'}</td>
+                              <td style={{ padding: '6px 8px', color: 'hsl(var(--pencil))' }}>{act.deadline || 'ASAP'}</td>
+                              {momHasImportance && <td style={{ padding: '6px 8px' }}><ImportanceBadge item={act} /></td>}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {mom.conclusion && (
+                  <div style={{ padding: '.6rem .75rem', borderRadius: 8, background: 'hsl(var(--muted)/.2)', fontSize: '.82rem', color: 'hsl(var(--ink))' }}>
+                    <strong>Conclusion:</strong> {mom.conclusion}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+    </>
+  )
+
   return (
     <div className="page-scroll-root" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
 
@@ -3310,17 +3682,7 @@ export default function RomPage() {
               <StatusBadge state={stage1Status} />
             </div>
 
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-                <label style={{ fontSize: '.71rem', color: 'hsl(var(--ink))', fontFamily: 'Inter' }}>Window (mins)</label>
-                <span style={{ fontSize: '.71rem', fontWeight: 700, color: 'hsl(280,75%,65%)', fontFamily: 'JetBrains Mono' }}>{transcriptWindow}m</span>
-              </div>
-              <input
-                type="range" min={0.5} max={15} step={0.5}
-                value={transcriptWindow} onChange={e => setTranscriptWindow(Number(e.target.value))}
-                style={{ width: '100%', accentColor: 'hsl(280,75%,60%)' }}
-              />
-            </div>
+            <Stage1Options transcriptWindow={transcriptWindow} onChange={setTranscriptWindow} />
 
             <button
               onClick={runStage1}
@@ -3346,179 +3708,15 @@ export default function RomPage() {
               <StatusBadge state={stage2Status} />
             </div>
 
-            <div style={{ display: 'flex', gap: 8 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 1 }}>
-                  <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>Meeting K</label>
-                  <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(140,70%,50%)', fontFamily: 'JetBrains Mono' }}>{meetingTopK}</span>
-                </div>
-                <input type="range" min={0} max={20} value={meetingTopK} onChange={e => setMeetingTopK(Number(e.target.value))} style={{ width: '100%', accentColor: 'hsl(140,70%,50%)' }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 1 }}>
-                  <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>Global K</label>
-                  <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(30,90%,55%)', fontFamily: 'JetBrains Mono' }}>{globalTopK}</span>
-                </div>
-                <input type="range" min={0} max={20} value={globalTopK} onChange={e => setGlobalTopK(Number(e.target.value))} style={{ width: '100%', accentColor: 'hsl(30,90%,55%)' }} />
-              </div>
-            </div>
-
-            {/* Discussion Window Size slider */}
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 1 }}>
-                <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>Discussion Window</label>
-                <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(270,80%,65%)', fontFamily: 'JetBrains Mono' }}>{discussionWindowSize} pts</span>
-              </div>
-              <input
-                type="range" min={3} max={20} step={1}
-                value={discussionWindowSize}
-                onChange={e => setDiscussionWindowSize(Number(e.target.value))}
-                style={{ width: '100%', accentColor: 'hsl(270,80%,65%)' }}
-              />
-            </div>
-
-            {/* Minimum Similarity Threshold Slider */}
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))' }}>Min Similarity</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                    <input
-                      type="checkbox"
-                      checked={minSimilarityThreshold !== null}
-                      onChange={e => setMinSimilarityThreshold(e.target.checked ? 0.80 : null)}
-                      style={{ width: 11, height: 11, accentColor: 'hsl(205,90%,55%)' }}
-                    />
-                    Filter
-                  </label>
-                  <span style={{ fontSize: '.68rem', fontWeight: 700, color: minSimilarityThreshold !== null ? 'hsl(205,90%,55%)' : 'hsl(var(--pencil))', fontFamily: 'JetBrains Mono' }}>
-                    {minSimilarityThreshold !== null ? minSimilarityThreshold.toFixed(2) : 'Off'}
-                  </span>
-                </div>
-              </div>
-              {minSimilarityThreshold !== null && (
-                <input
-                  type="range" min={0.50} max={0.98} step={0.01}
-                  value={minSimilarityThreshold}
-                  onChange={e => setMinSimilarityThreshold(Number(e.target.value))}
-                  style={{ width: '100%', accentColor: 'hsl(205,90%,55%)' }}
-                />
-              )}
-            </div>
-
-            {/* Process All Points Together Toggle */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' }}>
-              <label style={{ fontSize: '.68rem', color: 'hsl(var(--pencil))', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <input
-                  type="checkbox"
-                  checked={processAllTogether}
-                  onChange={e => setProcessAllTogether(e.target.checked)}
-                  style={{ width: 12, height: 12, accentColor: 'hsl(205,90%,55%)' }}
-                />
-                Process All Points Together
-              </label>
-            </div>
-
-            {/* Previous Meeting Context (Dual Mode) */}
-            <div style={{ padding: '.45rem .5rem', borderRadius: 8, background: 'hsl(270,75%,55%/.06)', border: '1px solid hsl(270,75%,55%/.22)', display: 'flex', flexDirection: 'column', gap: '.35rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(270,75%,60%)', textTransform: 'uppercase', letterSpacing: '.04em', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  ⏮️ Previous Meeting Context
-                </div>
-                {previousMeetingMode !== 'off' && (
-                  <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(270,75%,60%)', fontFamily: 'JetBrains Mono' }}>
-                    K={previousMeetingTopK}
-                  </span>
-                )}
-              </div>
-
-              {/* Mode Pills */}
-              <div style={{ display: 'flex', gap: 3, background: 'hsl(var(--muted)/.4)', padding: 2, borderRadius: 6 }}>
-                <button
-                  type="button"
-                  onClick={() => setPreviousMeetingMode('auto')}
-                  style={{
-                    flex: 1, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'auto' ? 700 : 500,
-                    background: previousMeetingMode === 'auto' ? 'hsl(270,75%,60%)' : 'transparent',
-                    color: previousMeetingMode === 'auto' ? 'white' : 'hsl(var(--pencil))',
-                    cursor: 'pointer', transition: 'all .15s ease'
-                  }}
-                  title="Auto-retrieve most similar Stage 2 points from all previous meetings via ChromaDB"
-                >
-                  Auto Retrieve
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviousMeetingMode('select')}
-                  style={{
-                    flex: 1, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'select' ? 700 : 500,
-                    background: previousMeetingMode === 'select' ? 'hsl(270,75%,60%)' : 'transparent',
-                    color: previousMeetingMode === 'select' ? 'white' : 'hsl(var(--pencil))',
-                    cursor: 'pointer', transition: 'all .15s ease'
-                  }}
-                  title="Select a specific past meeting to use its Stage 2 points only"
-                >
-                  Select Meeting
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviousMeetingMode('off')}
-                  style={{
-                    flex: 0.6, padding: '3px 0', border: 'none', borderRadius: 4, fontSize: '.64rem', fontWeight: previousMeetingMode === 'off' ? 700 : 500,
-                    background: previousMeetingMode === 'off' ? 'hsl(var(--muted))' : 'transparent',
-                    color: previousMeetingMode === 'off' ? 'hsl(var(--ink))' : 'hsl(var(--pencil))',
-                    cursor: 'pointer', transition: 'all .15s ease'
-                  }}
-                >
-                  Off
-                </button>
-              </div>
-
-              {/* Select Meeting Dropdown */}
-              {previousMeetingMode === 'select' && (
-                <div style={{ marginTop: 2 }}>
-                  <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))', display: 'block', marginBottom: 2 }}>Target Meeting:</label>
-                  {loadingPreviousMeetings ? (
-                    <div style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))' }}>Loading meetings...</div>
-                  ) : availablePreviousMeetings.length === 0 ? (
-                    <div style={{ fontSize: '.64rem', color: 'hsl(var(--destructive))' }}>No other meetings found.</div>
-                  ) : (
-                    <select
-                      value={selectedPreviousMeetingId}
-                      onChange={e => setSelectedPreviousMeetingId(e.target.value)}
-                      style={{
-                        width: '100%', fontSize: '.68rem', padding: '3px 5px', borderRadius: 5,
-                        border: '1px solid hsl(270,75%,55%/.3)', background: 'hsl(var(--card))',
-                        color: 'hsl(var(--ink))', outline: 'none'
-                      }}
-                    >
-                      {availablePreviousMeetings.map(m => (
-                        <option key={m.id} value={m.id}>
-                          {m.name} {m.date ? `(${m.date})` : ''} {m.has_stage2 ? `[${m.stage2_count} Stage 2 pts]` : '[No Stage 2 pts]'}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              )}
-
-              {/* Previous Meeting Top-K slider */}
-              {previousMeetingMode !== 'off' && (
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 1 }}>
-                    <label style={{ fontSize: '.64rem', color: 'hsl(var(--pencil))' }}>Stage 2 Points (Top-K)</label>
-                    <span style={{ fontSize: '.64rem', fontWeight: 700, color: 'hsl(270,75%,60%)', fontFamily: 'JetBrains Mono' }}>
-                      {previousMeetingTopK === 0 ? '0 (No Context)' : previousMeetingTopK}
-                    </span>
-                  </div>
-                  <input
-                    type="range" min={0} max={10} value={previousMeetingTopK}
-                    onChange={e => setPreviousMeetingTopK(Number(e.target.value))}
-                    style={{ width: '100%', accentColor: 'hsl(270,75%,60%)' }}
-                  />
-                </div>
-              )}
-            </div>
+            <Stage2Options
+              value={{
+                meetingTopK, globalTopK, discussionWindowSize, minSimilarityThreshold, processAllTogether,
+                previousMeetingMode, previousMeetingId: selectedPreviousMeetingId, previousMeetingTopK,
+              }}
+              onChange={applyStage2Options}
+              previousMeetings={availablePreviousMeetings}
+              loadingPreviousMeetings={loadingPreviousMeetings}
+            />
 
             {/* Meeting Docs upload */}
             <div>
@@ -3617,7 +3815,7 @@ export default function RomPage() {
                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 6px', borderRadius: 5, background: 'hsl(140,70%,45%/.1)', border: '1px solid hsl(140,70%,45%/.3)', fontSize: '.68rem' }}>
                       <FileText size={9} style={{ flexShrink: 0, color: 'hsl(140,70%,45%)' }} />
                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'hsl(var(--ink))' }}>{f.name}</span>
-                      <button onClick={() => { setAgendaUploadedFiles([]); setAgendaText('') }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))' }}><X size={8} /></button>
+                      <button onClick={() => { setAgendaUploadedFiles([]); setAgendaText(''); api.delete(`/rom/${id}/stage3/agenda-document`).catch(() => {}) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))' }}><X size={8} /></button>
                     </div>
                   ))}
                 </div>
@@ -3739,6 +3937,26 @@ export default function RomPage() {
               />
               <span style={{ fontWeight: analyzeDiscussion ? 700 : 500, color: analyzeDiscussion ? 'hsl(205,85%,40%)' : 'hsl(var(--pencil))' }}>
                 Analyze discussion to build / validate agendas
+              </span>
+            </label>
+
+            {/* Extract Agenda from Tables toggle */}
+            <label
+              title="On: agenda items are read from the tables of the agenda text only, ignoring headings and other text (the whole text is scanned when it has no table). Off: lists, headings and other formats anywhere in the text are scanned."
+              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.7rem', color: 'hsl(var(--ink))', padding: '.2rem 0', userSelect: 'none' }}
+            >
+              <input
+                type="checkbox"
+                checked={agendaFromTables}
+                onChange={e => {
+                  setAgendaFromTables(e.target.checked)
+                  // Cached agendas were read under the other setting: extract them again.
+                  if (agendaText.trim()) setForceRegenerateAgenda(true)
+                }}
+                style={{ accentColor: 'hsl(140,70%,45%)', width: 12, height: 12, cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: agendaFromTables ? 700 : 500, color: agendaFromTables ? 'hsl(140,70%,40%)' : 'hsl(var(--pencil))' }}>
+                Extract Agenda from Tables
               </span>
             </label>
 
@@ -3984,6 +4202,9 @@ export default function RomPage() {
 
           {/* ── Tab Content Container ── */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem 1.5rem', minHeight: 0 }}>
+            {romPipeline?.status && romPipeline.status.state !== 'off' && (
+              <RomAutoRunBanner info={romPipeline} onRetry={retryRomPipeline} />
+            )}
 
             {/* ── STAGE 1 TAB ── */}
             {activeTab === 'stage1' && (
@@ -4492,6 +4713,14 @@ export default function RomPage() {
                           }}>
                             <Clock size={11} /> {fmtTime(pt.timeline_start || 0)} – {fmtTime(pt.timeline_end || 0)}
                           </span>
+                          {pt.type !== undefined && (
+                            <DiscussionTypeBadge
+                              type={pt.type}
+                              includeActionPoint={pt.include_action_point}
+                              disabled={classifyingPointId === pt.id}
+                              onChange={change => handleSetStage2Classification(pt.id, change)}
+                            />
+                          )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(205,90%,55%)', background: 'hsl(205,90%,55%/.08)', padding: '1px 6px', borderRadius: 6 }}>
@@ -4680,6 +4909,7 @@ export default function RomPage() {
                   <button onClick={() => runCreateAgenda(false)} disabled={stage3AgendaStatus === 'processing' || stage2Status !== 'done'} className="btn btn-primary" style={{ fontSize: '.8rem', padding: '.45rem 1rem' }}>
                     <List size={14} /> Create Agenda
                   </button>
+                  <div style={{ textAlign: 'left', marginTop: '1.5rem' }}>{renderGeneratedMom()}</div>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -4716,436 +4946,205 @@ export default function RomPage() {
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <SectionHeader icon={<List size={14} />} label="Agenda Items" count={romData.stage3.agendas.length} color="hsl(140,70%,50%)" />
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button
-                        onClick={() => setShowAddAgendaForm(prev => !prev)}
-                        style={{
-                          padding: '.3rem .75rem', borderRadius: 7,
-                          border: '1.5px solid hsl(140,70%,45%/.5)',
-                          background: showAddAgendaForm ? 'hsl(140,70%,45%/.2)' : 'hsl(140,70%,45%/.1)',
-                          color: 'hsl(140,70%,35%)', fontSize: '.74rem', fontWeight: 700,
-                          display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontFamily: 'Inter'
-                        }}
-                      >
-                        <Plus size={12} /> {showAddAgendaForm ? 'Cancel Add' : 'Add Agenda'}
-                      </button>
-                      <button onClick={() => runCreateAgenda(true)} disabled={stage3AgendaStatus === 'processing'} style={{ padding: '.3rem .65rem', borderRadius: 7, border: '1px solid hsl(140,70%,45%/.4)', background: 'hsl(140,70%,45%/.08)', color: 'hsl(140,70%,45%)', fontSize: '.72rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontFamily: 'Inter' }}>
-                        {stage3AgendaStatus === 'processing' ? <Loader size={11} className="spin" /> : <RefreshCw size={11} />}
-                        Regenerate
-                      </button>
-                      <button onClick={() => downloadDocx('stage3')} style={{ padding: '.3rem .65rem', borderRadius: 7, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--muted)/.3)', color: 'hsl(var(--pencil))', fontWeight: 600, fontSize: '.72rem', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontFamily: 'Inter' }}>
-                        <Download size={11} /> Export
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* ── Add New Agenda Form (Collapsible) ── */}
-                  {showAddAgendaForm && (
-                    <div style={{
-                      borderRadius: 10,
-                      border: '2px solid hsl(140,70%,45%/.5)',
-                      background: 'hsl(140,70%,45%/.04)',
-                      padding: '1rem 1.15rem',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 10,
-                      boxShadow: '0 2px 8px rgba(0,0,0,0.05)'
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ fontSize: '.84rem', fontWeight: 800, color: 'hsl(140,70%,35%)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <Plus size={14} /> Add New Agenda Item
-                        </div>
-                        <button
-                          onClick={() => setShowAddAgendaForm(false)}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px' }}
-                        >
-                          <X size={14} />
+                  <AgendaItemsEditor
+                    agendas={romData.stage3.agendas as EditorAgendaItem[]}
+                    onAdd={handleCreateAgenda}
+                    onUpdate={async (index, patch) => {
+                      const updated = JSON.parse(JSON.stringify(romData!.stage3!.agendas))
+                      updated[index].title = patch.title
+                      updated[index].description = patch.description
+                      await saveStage3Agendas(updated)
+                    }}
+                    onDelete={(agendaId, title) => handleDeleteAgenda(agendaId, title)}
+                    onMove={(from, to) => saveStage3Agendas(moveItem(romData!.stage3!.agendas as EditorAgendaItem[], from, to))}
+                    adding={creatingAgenda}
+                    saving={savingAgendas}
+                    headerActions={<>
+                        <button onClick={() => runCreateAgenda(true)} disabled={stage3AgendaStatus === 'processing'} style={{ padding: '.3rem .65rem', borderRadius: 7, border: '1px solid hsl(140,70%,45%/.4)', background: 'hsl(140,70%,45%/.08)', color: 'hsl(140,70%,45%)', fontSize: '.72rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontFamily: 'Inter' }}>
+                          {stage3AgendaStatus === 'processing' ? <Loader size={11} className="spin" /> : <RefreshCw size={11} />}
+                          Regenerate
                         </button>
-                      </div>
-
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <div>
-                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
-                            Agenda Title <span style={{ color: 'hsl(var(--destructive))' }}>*</span>
-                          </label>
-                          <input
-                            value={newAgendaTitle}
-                            onChange={e => setNewAgendaTitle(e.target.value)}
-                            placeholder="e.g. Budget Review & Next Quarter Planning"
-                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.82rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))' }}
+                        <button onClick={() => downloadDocx('stage3')} style={{ padding: '.3rem .65rem', borderRadius: 7, border: '1px solid hsl(var(--border)/.4)', background: 'hsl(var(--muted)/.3)', color: 'hsl(var(--pencil))', fontWeight: 600, fontSize: '.72rem', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontFamily: 'Inter' }}>
+                          <Download size={11} /> Export
+                        </button>
+                    </>}
+                    beforeList={<>
+                        {/* ── Discussion analysis: topics, matches with evidence, suggested agendas ── */}
+                        {romData.stage3.discussion_analysis && (
+                          <DiscussionAnalysisPanel
+                            analysis={romData.stage3.discussion_analysis}
+                            suggestions={romData.stage3.suggested_agendas || []}
+                            addingSuggestionId={addingSuggestionId}
+                            onAddSuggestion={handleAddSuggestedAgenda}
                           />
+                        )}
+
+                        {/* ── Stage 3 Interactive Agenda Discussion Sequence & Approximate Timeline ── */}
+                        <AgendaTimelineControls
+                          agendas={romData.stage3.agendas}
+                          totalDuration={effectiveMeetingDuration}
+                          discussionOrder={discussionOrder}
+                          agendaTimeline={agendaTimeline}
+                          onChangeOrder={(newOrder) => setDiscussionOrder(newOrder)}
+                          onChangeTimeline={(newTimeline) => setAgendaTimeline(newTimeline)}
+                          onReset={resetAgendaOrderAndTimeline}
+                          enableOrder={enableAgendaOrder}
+                          onChangeEnableOrder={(enabled) => setEnableAgendaOrder(enabled)}
+                          enableTimeline={enableAgendaTimeline}
+                          onChangeEnableTimeline={(enabled) => setEnableAgendaTimeline(enabled)}
+                        />
+                    </>}
+                    presenterOf={(agenda, agendaId) => agenda.presenter || agenda.speaker || romData.stage3?.agenda_doc_points?.[agendaId]?.presenter}
+                    renderIdExtra={(_agenda, agendaId) => {
+                      const seqRank = discussionOrder.indexOf(agendaId) + 1
+                      return seqRank > 0 ? <span style={{ fontSize: '.6rem', color: 'hsl(var(--pencil))', fontWeight: 600 }}>#{seqRank} seq</span> : null
+                    }}
+                    renderMetaExtra={(_agenda, agendaId) => {
+                      const timeRange = agendaTimeline[agendaId]
+                      return timeRange ? (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,40%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>
+                          <Clock size={10} /> {fmtTime(timeRange.start_sec)} – {fmtTime(timeRange.end_sec)}
                         </div>
-
-                        <div>
-                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
-                            Description / Discussion Details
-                          </label>
-                          <textarea
-                            value={newAgendaDesc}
-                            onChange={e => setNewAgendaDesc(e.target.value)}
-                            rows={2}
-                            placeholder="Optional overview of topics, context, or expected discussions..."
-                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.8rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))', resize: 'vertical' }}
-                          />
-                        </div>
-
-                        <div>
-                          <label style={{ fontSize: '.72rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'block', marginBottom: 3 }}>
-                            Presenter / Speaker (Optional)
-                          </label>
-                          <input
-                            value={newAgendaPresenter}
-                            onChange={e => setNewAgendaPresenter(e.target.value)}
-                            placeholder="e.g. Alice or Speaker_1"
-                            style={{ width: '100%', padding: '6px 10px', borderRadius: 7, border: '1.5px solid hsl(var(--border))', fontSize: '.82rem', fontFamily: 'Inter', color: 'hsl(var(--ink))', background: 'hsl(var(--paper))' }}
-                          />
-                        </div>
-
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
-                          <button
-                            onClick={() => setShowAddAgendaForm(false)}
-                            style={{ padding: '.4rem .9rem', borderRadius: 7, border: '1px solid hsl(var(--border))', background: 'transparent', fontSize: '.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter' }}
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={handleCreateAgenda}
-                            disabled={creatingAgenda || !newAgendaTitle.trim()}
-                            style={{
-                              padding: '.4rem 1.1rem',
-                              borderRadius: 7,
-                              border: 'none',
-                              background: 'hsl(140,70%,45%)',
-                              color: 'white',
-                              fontSize: '.76rem',
-                              fontWeight: 700,
-                              cursor: creatingAgenda || !newAgendaTitle.trim() ? 'not-allowed' : 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 6,
-                              fontFamily: 'Inter'
-                            }}
-                          >
-                            {creatingAgenda ? <Loader size={12} className="spin" /> : <Plus size={12} />}
-                            {creatingAgenda ? 'Adding...' : 'Add Agenda'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* ── Discussion analysis: topics, matches with evidence, suggested agendas ── */}
-                  {romData.stage3.discussion_analysis && (
-                    <DiscussionAnalysisPanel
-                      analysis={romData.stage3.discussion_analysis}
-                      suggestions={romData.stage3.suggested_agendas || []}
-                      addingSuggestionId={addingSuggestionId}
-                      onAddSuggestion={handleAddSuggestedAgenda}
-                    />
-                  )}
-
-                  {/* ── Stage 3 Interactive Agenda Discussion Sequence & Approximate Timeline ── */}
-                  <AgendaTimelineControls
-                    agendas={romData.stage3.agendas}
-                    totalDuration={effectiveMeetingDuration}
-                    discussionOrder={discussionOrder}
-                    agendaTimeline={agendaTimeline}
-                    onChangeOrder={(newOrder) => setDiscussionOrder(newOrder)}
-                    onChangeTimeline={(newTimeline) => setAgendaTimeline(newTimeline)}
-                    onReset={resetAgendaOrderAndTimeline}
-                    enableOrder={enableAgendaOrder}
-                    onChangeEnableOrder={(enabled) => setEnableAgendaOrder(enabled)}
-                    enableTimeline={enableAgendaTimeline}
-                    onChangeEnableTimeline={(enabled) => setEnableAgendaTimeline(enabled)}
-                  />
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {romData.stage3.agendas.map((agenda: any, aIdx: number) => {
-                      const agendaId = agenda.agenda_id || `A${aIdx + 1}`
+                      ) : null
+                    }}
+                    renderExtras={(agenda: any, _aIdx, agendaId) => {
                       const docEntry = romData.stage3?.agenda_doc_points?.[agendaId]
                       const isUploading = agendaDocUploading[agendaId] || false
                       const expanded = romData.stage3?.expanded_agendas?.find((ea: any) => ea.agenda_id === agendaId)
-                      const isEditingThisAgenda = editingAgendaId === agendaId
-                      const presenterName = agenda.presenter || agenda.speaker || docEntry?.presenter
-                      const seqRank = discussionOrder.indexOf(agendaId) + 1
-                      const timeRange = agendaTimeline[agendaId]
-
                       return (
-                        <div key={agendaId} style={{ borderRadius: 10, border: '1.5px solid hsl(var(--border)/.4)', background: 'hsl(var(--card))', overflow: 'hidden' }}>
-                          {/* Agenda Header */}
-                          <div style={{ background: 'hsl(140,70%,50%/.08)', padding: '.75rem 1rem', borderBottom: '1px solid hsl(var(--border)/.3)', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0, marginTop: 2 }}>
-                              <span style={{ background: 'hsl(140,70%,45%)', color: 'white', fontWeight: 700, fontSize: '.72rem', padding: '2px 7px', borderRadius: 5 }}>{agendaId}</span>
-                              {seqRank > 0 && (
-                                <span style={{ fontSize: '.6rem', color: 'hsl(var(--pencil))', fontWeight: 600 }}>#{seqRank} seq</span>
-                              )}
+                                        <>
+                        {/* Skip Agenda Toggle */}
+                        <div style={{ padding: '.5rem 1rem', borderBottom: '1px solid hsl(var(--border)/.2)', display: 'flex', alignItems: 'center', gap: 10, background: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,50%/.08)' : 'transparent' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,40%)' : 'hsl(var(--pencil))', userSelect: 'none', fontWeight: 600 }}>
+                            <input
+                              type="checkbox"
+                              checked={skippedAgendas[agendaId]?.skipped || false}
+                              onChange={e => {
+                                const checked = e.target.checked
+                                setSkippedAgendas(prev => ({
+                                  ...prev,
+                                  [agendaId]: {
+                                    skipped: checked,
+                                    note: prev[agendaId]?.note || 'Keep this agenda if forward to next meeting'
+                                  }
+                                }))
+                              }}
+                              style={{ accentColor: 'hsl(38,90%,50%)', width: 13, height: 13 }}
+                            />
+                            Skip this agenda
+                          </label>
+                          {skippedAgendas[agendaId]?.skipped && (
+                            <input
+                              value={skippedAgendas[agendaId]?.note || ''}
+                              onChange={e => {
+                                const val = e.target.value
+                                setSkippedAgendas(prev => ({
+                                  ...prev,
+                                  [agendaId]: { ...prev[agendaId], note: val }
+                                }))
+                              }}
+                              placeholder="Note (e.g. Forward to next meeting)"
+                              style={{
+                                flex: 1, padding: '3px 8px', borderRadius: 6,
+                                border: '1px solid hsl(38,90%,50%/.4)',
+                                background: 'hsl(38,90%,50%/.06)',
+                                fontSize: '.72rem', fontFamily: 'Inter',
+                                color: 'hsl(38,90%,35%)',
+                                fontStyle: 'italic'
+                              }}
+                            />
+                          )}
+                          {skippedAgendas[agendaId]?.skipped && (
+                            <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(38,90%,50%/.15)', color: 'hsl(38,90%,40%)', fontWeight: 700, border: '1px solid hsl(38,90%,50%/.35)', whiteSpace: 'nowrap' }}>
+                              ⏩ Skipped
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.75rem', opacity: skippedAgendas[agendaId]?.skipped ? 0.45 : 1, pointerEvents: skippedAgendas[agendaId]?.skipped ? 'none' : 'auto', transition: 'opacity .2s' }}>
+
+                          {/* Context Chips from RAG */}
+                          {expanded?.meeting_context_snippet && (
+                            <details style={{ background: 'transparent' }}>
+                              <summary style={{ cursor: 'pointer', fontSize: '.72rem', fontWeight: 600, color: 'hsl(205,90%,55%)', outline: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <FileText size={11} /> View Retrieved Context
+                              </summary>
+                              <div style={{ marginTop: '.4rem', padding: '.5rem .65rem', borderRadius: 7, background: 'hsl(205,90%,55%/.06)', border: '1px solid hsl(205,90%,55%/.2)', fontSize: '.73rem', color: 'hsl(var(--ink))', lineHeight: 1.45 }}>
+                                {expanded.meeting_context_snippet.slice(0, 500)}{expanded.meeting_context_snippet.length > 500 ? '…' : ''}
+                              </div>
+                            </details>
+                          )}
+
+                          {/* Keywords */}
+                          {agenda.keywords?.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                              {agenda.keywords.slice(0, 8).map((k: string, ki: number) => (
+                                <span key={ki} style={{ fontSize: '.65rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,40%)', border: '1px solid hsl(140,70%,45%/.25)' }}>{k}</span>
+                              ))}
                             </div>
-                            <div style={{ flex: 1 }}>
-                              {isEditingThisAgenda ? (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                  <input
-                                    value={editAgendaTitle}
-                                    onChange={e => setEditAgendaTitle(e.target.value)}
-                                    placeholder="Agenda Title"
-                                    style={{ width: '100%', padding: '4px 8px', borderRadius: 6, border: '1.5px solid hsl(140,70%,45%)', fontSize: '.88rem', fontWeight: 700, fontFamily: 'Inter', background: 'hsl(var(--paper))', color: 'hsl(var(--ink))' }}
-                                  />
-                                  <textarea
-                                    value={editAgendaDescription}
-                                    onChange={e => setEditAgendaDescription(e.target.value)}
-                                    placeholder="Agenda Description / Details"
-                                    style={{ width: '100%', minHeight: 50, padding: '4px 8px', borderRadius: 6, border: '1.5px solid hsl(140,70%,45%)', fontSize: '.78rem', fontFamily: 'Inter', background: 'hsl(var(--paper))', color: 'hsl(var(--ink))' }}
-                                  />
-                                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 2 }}>
-                                    <button onClick={() => setEditingAgendaId(null)} style={{ padding: '2px 8px', fontSize: '.72rem', borderRadius: 4, border: '1px solid hsl(var(--border))', background: 'transparent', cursor: 'pointer' }}>Cancel</button>
-                                    <button
-                                      disabled={savingAgendas}
-                                      onClick={async () => {
-                                        const updated = JSON.parse(JSON.stringify(romData!.stage3!.agendas))
-                                        updated[aIdx].title = editAgendaTitle
-                                        updated[aIdx].description = editAgendaDescription
-                                        await saveStage3Agendas(updated)
-                                        setEditingAgendaId(null)
-                                      }}
-                                      style={{ padding: '2px 10px', fontSize: '.72rem', borderRadius: 4, background: 'hsl(140,70%,45%)', color: 'white', border: 'none', fontWeight: 700, cursor: 'pointer' }}
-                                    >
-                                      {savingAgendas ? 'Saving...' : 'Save Agenda'}
-                                    </button>
-                                  </div>
+                          )}
+
+                          {/* Supporting Document Upload */}
+                          <div style={{ borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: '.65rem' }}>
+                            <div style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Supporting Document</div>
+
+                            {docEntry ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '.45rem' }}>
+                                {/* Doc info header */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '.35rem .55rem', borderRadius: 7, background: 'hsl(280,75%,60%/.08)', border: '1px solid hsl(280,75%,60%/.25)' }}>
+                                  <FileText size={11} style={{ color: 'hsl(280,75%,60%)', flexShrink: 0 }} />
+                                  <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--ink))', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{docEntry.doc_name}</span>
+                                  <span style={{ fontSize: '.65rem', fontWeight: 700, color: 'hsl(280,75%,60%)', background: 'hsl(280,75%,60%/.12)', padding: '1px 6px', borderRadius: 8 }}>{docEntry.points.length} pts</span>
+                                  <button
+                                    onClick={() => agendaDocInputRefs.current[agendaId]?.click()}
+                                    disabled={isUploading}
+                                    title="Replace document"
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '0 2px' }}
+                                  >
+                                    <RefreshCw size={10} />
+                                  </button>
                                 </div>
-                              ) : (
-                                <div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                    <div style={{ fontSize: '.92rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>{agenda.title}</div>
-                                    <button
-                                      onClick={() => {
-                                        setEditingAgendaId(agendaId)
-                                        setEditAgendaTitle(agenda.title || '')
-                                        setEditAgendaDescription(agenda.description || '')
-                                      }}
-                                      title="Edit Agenda Title & Description"
-                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '2px', display: 'flex', alignItems: 'center' }}
-                                    >
-                                      <Pencil size={12} />
-                                    </button>
-                                    <button
-                                      onClick={() => handleDeleteAgenda(agendaId, agenda.title)}
-                                      title="Delete Agenda Item"
-                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--destructive))', padding: '2px', display: 'flex', alignItems: 'center' }}
-                                    >
-                                      <Trash2 size={12} />
-                                    </button>
-                                  </div>
-                                  {agenda.description && <div style={{ fontSize: '.73rem', color: 'hsl(var(--pencil))', marginTop: 2, lineHeight: 1.35 }}>{agenda.description}</div>}
-                                  <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                                    {presenterName && (
-                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600 }}>
-                                        <User size={10} /> Presenter: {presenterName}
+                                {/* Extracted Points */}
+                                {docEntry.points.length > 0 && (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    {docEntry.points.map((point: string, pIdx: number) => (
+                                      <div key={pIdx} style={{ display: 'flex', gap: 6, padding: '.4rem .55rem', borderRadius: 6, background: 'hsl(var(--paper)/.5)', border: '1px solid hsl(var(--border)/.25)' }}>
+                                        <span style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(280,75%,65%)', flexShrink: 0, marginTop: 1, fontFamily: 'JetBrains Mono' }}>D{pIdx + 1}</span>
+                                        <span style={{ fontSize: '.78rem', color: 'hsl(var(--ink))', lineHeight: 1.4 }}>{point}</span>
                                       </div>
-                                    )}
-                                    {timeRange && (
-                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,40%)', border: '1px solid hsl(140,70%,45%/.3)', padding: '1px 7px', borderRadius: 6, fontSize: '.68rem', fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>
-                                        <Clock size={10} /> {fmtTime(timeRange.start_sec)} – {fmtTime(timeRange.end_sec)}
-                                      </div>
-                                    )}
+                                    ))}
                                   </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Skip Agenda Toggle */}
-                          <div style={{ padding: '.5rem 1rem', borderBottom: '1px solid hsl(var(--border)/.2)', display: 'flex', alignItems: 'center', gap: 10, background: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,50%/.08)' : 'transparent' }}>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: '.72rem', color: skippedAgendas[agendaId]?.skipped ? 'hsl(38,90%,40%)' : 'hsl(var(--pencil))', userSelect: 'none', fontWeight: 600 }}>
-                              <input
-                                type="checkbox"
-                                checked={skippedAgendas[agendaId]?.skipped || false}
-                                onChange={e => {
-                                  const checked = e.target.checked
-                                  setSkippedAgendas(prev => ({
-                                    ...prev,
-                                    [agendaId]: {
-                                      skipped: checked,
-                                      note: prev[agendaId]?.note || 'Keep this agenda if forward to next meeting'
-                                    }
-                                  }))
-                                }}
-                                style={{ accentColor: 'hsl(38,90%,50%)', width: 13, height: 13 }}
-                              />
-                              Skip this agenda
-                            </label>
-                            {skippedAgendas[agendaId]?.skipped && (
-                              <input
-                                value={skippedAgendas[agendaId]?.note || ''}
-                                onChange={e => {
-                                  const val = e.target.value
-                                  setSkippedAgendas(prev => ({
-                                    ...prev,
-                                    [agendaId]: { ...prev[agendaId], note: val }
-                                  }))
-                                }}
-                                placeholder="Note (e.g. Forward to next meeting)"
-                                style={{
-                                  flex: 1, padding: '3px 8px', borderRadius: 6,
-                                  border: '1px solid hsl(38,90%,50%/.4)',
-                                  background: 'hsl(38,90%,50%/.06)',
-                                  fontSize: '.72rem', fontFamily: 'Inter',
-                                  color: 'hsl(38,90%,35%)',
-                                  fontStyle: 'italic'
-                                }}
-                              />
-                            )}
-                            {skippedAgendas[agendaId]?.skipped && (
-                              <span style={{ fontSize: '.64rem', padding: '1px 6px', borderRadius: 5, background: 'hsl(38,90%,50%/.15)', color: 'hsl(38,90%,40%)', fontWeight: 700, border: '1px solid hsl(38,90%,50%/.35)', whiteSpace: 'nowrap' }}>
-                                ⏩ Skipped
-                              </span>
-                            )}
-                          </div>
-
-                          <div style={{ padding: '.85rem 1rem', display: 'flex', flexDirection: 'column', gap: '.75rem', opacity: skippedAgendas[agendaId]?.skipped ? 0.45 : 1, pointerEvents: skippedAgendas[agendaId]?.skipped ? 'none' : 'auto', transition: 'opacity .2s' }}>
-
-                            {/* Context Chips from RAG */}
-                            {expanded?.meeting_context_snippet && (
-                              <details style={{ background: 'transparent' }}>
-                                <summary style={{ cursor: 'pointer', fontSize: '.72rem', fontWeight: 600, color: 'hsl(205,90%,55%)', outline: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
-                                  <FileText size={11} /> View Retrieved Context
-                                </summary>
-                                <div style={{ marginTop: '.4rem', padding: '.5rem .65rem', borderRadius: 7, background: 'hsl(205,90%,55%/.06)', border: '1px solid hsl(205,90%,55%/.2)', fontSize: '.73rem', color: 'hsl(var(--ink))', lineHeight: 1.45 }}>
-                                  {expanded.meeting_context_snippet.slice(0, 500)}{expanded.meeting_context_snippet.length > 500 ? '…' : ''}
-                                </div>
-                              </details>
-                            )}
-
-                            {/* Keywords */}
-                            {agenda.keywords?.length > 0 && (
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
-                                {agenda.keywords.slice(0, 8).map((k: string, ki: number) => (
-                                  <span key={ki} style={{ fontSize: '.65rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,40%)', border: '1px solid hsl(140,70%,45%/.25)' }}>{k}</span>
-                                ))}
+                                )}
+                              </div>
+                            ) : (
+                              <div
+                                onClick={() => !isUploading && agendaDocInputRefs.current[agendaId]?.click()}
+                                style={{ border: '1.5px dashed hsl(280,75%,60%/.35)', borderRadius: 7, padding: '.45rem', textAlign: 'center', cursor: isUploading ? 'wait' : 'pointer', fontSize: '.72rem', color: 'hsl(280,75%,55%)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, background: 'hsl(280,75%,60%/.04)' }}
+                              >
+                                {isUploading ? <Loader size={10} className="spin" /> : <Upload size={10} />}
+                                {isUploading ? 'Extracting points...' : 'Upload Supporting Document'}
                               </div>
                             )}
 
-                            {/* Supporting Document Upload */}
-                            <div style={{ borderTop: '1px solid hsl(var(--border)/.3)', paddingTop: '.65rem' }}>
-                              <div style={{ fontSize: '.68rem', fontWeight: 700, color: 'hsl(var(--pencil))', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 6 }}>Supporting Document</div>
-
-                              {docEntry ? (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '.45rem' }}>
-                                  {/* Doc info header */}
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '.35rem .55rem', borderRadius: 7, background: 'hsl(280,75%,60%/.08)', border: '1px solid hsl(280,75%,60%/.25)' }}>
-                                    <FileText size={11} style={{ color: 'hsl(280,75%,60%)', flexShrink: 0 }} />
-                                    <span style={{ fontSize: '.72rem', fontWeight: 600, color: 'hsl(var(--ink))', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{docEntry.doc_name}</span>
-                                    <span style={{ fontSize: '.65rem', fontWeight: 700, color: 'hsl(280,75%,60%)', background: 'hsl(280,75%,60%/.12)', padding: '1px 6px', borderRadius: 8 }}>{docEntry.points.length} pts</span>
-                                    <button
-                                      onClick={() => agendaDocInputRefs.current[agendaId]?.click()}
-                                      disabled={isUploading}
-                                      title="Replace document"
-                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--pencil))', padding: '0 2px' }}
-                                    >
-                                      <RefreshCw size={10} />
-                                    </button>
-                                  </div>
-                                  {/* Extracted Points */}
-                                  {docEntry.points.length > 0 && (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                      {docEntry.points.map((point: string, pIdx: number) => (
-                                        <div key={pIdx} style={{ display: 'flex', gap: 6, padding: '.4rem .55rem', borderRadius: 6, background: 'hsl(var(--paper)/.5)', border: '1px solid hsl(var(--border)/.25)' }}>
-                                          <span style={{ fontSize: '.66rem', fontWeight: 700, color: 'hsl(280,75%,65%)', flexShrink: 0, marginTop: 1, fontFamily: 'JetBrains Mono' }}>D{pIdx + 1}</span>
-                                          <span style={{ fontSize: '.78rem', color: 'hsl(var(--ink))', lineHeight: 1.4 }}>{point}</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                <div
-                                  onClick={() => !isUploading && agendaDocInputRefs.current[agendaId]?.click()}
-                                  style={{ border: '1.5px dashed hsl(280,75%,60%/.35)', borderRadius: 7, padding: '.45rem', textAlign: 'center', cursor: isUploading ? 'wait' : 'pointer', fontSize: '.72rem', color: 'hsl(280,75%,55%)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, background: 'hsl(280,75%,60%/.04)' }}
-                                >
-                                  {isUploading ? <Loader size={10} className="spin" /> : <Upload size={10} />}
-                                  {isUploading ? 'Extracting points...' : 'Upload Supporting Document'}
-                                </div>
-                              )}
-
-                              <input
-                                ref={el => { agendaDocInputRefs.current[agendaId] = el }}
-                                type="file"
-                                accept=".pdf,.docx,.pptx,.txt,.md,.xlsx,.xls,.csv"
-                                style={{ display: 'none' }}
-                                onChange={e => {
-                                  const file = e.target.files?.[0]
-                                  if (file) handleAgendaDocUpload(agendaId, file)
-                                  if (e.target) e.target.value = ''
-                                }}
-                              />
-                            </div>
+                            <input
+                              ref={el => { agendaDocInputRefs.current[agendaId] = el }}
+                              type="file"
+                              accept=".pdf,.docx,.pptx,.txt,.md,.xlsx,.xls,.csv"
+                              style={{ display: 'none' }}
+                              onChange={e => {
+                                const file = e.target.files?.[0]
+                                if (file) handleAgendaDocUpload(agendaId, file)
+                                if (e.target) e.target.value = ''
+                              }}
+                            />
                           </div>
                         </div>
+                                        </>
                       )
-                    })}
-                  </div>
+                    }}
+                  />
 
-                  {/* Generated MOM Section */}
-                  {(enhancedMomData || romData?.stage3?.enhanced_mom) && (() => {
-                    const mom = enhancedMomData || romData.stage3.enhanced_mom
-                    return (
-                      <div style={{ borderRadius: 10, border: '1.5px solid hsl(140,70%,45%/.4)', background: 'hsl(var(--card))', padding: '1rem 1.15rem', display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <SectionHeader icon={<FileText size={14} />} label="Generated Minutes of Meeting (MOM)" color="hsl(140,70%,45%)" />
-                          <button onClick={downloadEnhancedMomDocx} style={{ padding: '.35rem .75rem', borderRadius: 7, border: '1px solid hsl(140,70%,45%/.4)', background: 'hsl(140,70%,45%/.1)', color: 'hsl(140,70%,45%)', fontSize: '.74rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontFamily: 'Inter' }}>
-                            <Download size={12} /> Download MOM (.docx)
-                          </button>
-                        </div>
-                        {mom.introduction && (
-                          <div style={{ padding: '.75rem', borderRadius: 8, background: 'hsl(var(--muted)/.2)', fontSize: '.84rem', lineHeight: 1.5, color: 'hsl(var(--ink))' }}>
-                            <strong>Introduction:</strong> {mom.introduction}
-                          </div>
-                        )}
-                        {mom.points_discussed?.length > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                            <div style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Key Discussion Points:</div>
-                            {mom.points_discussed.map((pt: any, idx: number) => (
-                              <div key={idx} style={{ padding: '.6rem .75rem', borderRadius: 7, border: '1px solid hsl(var(--border)/.3)', background: 'hsl(var(--paper)/.4)', fontSize: '.82rem' }}>
-                                <div style={{ fontWeight: 700, color: 'hsl(140,70%,40%)', marginBottom: 2 }}>{pt.topic || `Topic ${idx+1}`}</div>
-                                <div>{pt.summary}</div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {mom.action_items?.length > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <div style={{ fontSize: '.78rem', fontWeight: 700, color: 'hsl(var(--ink))' }}>Action Items:</div>
-                            <div style={{ overflowX: 'auto', borderRadius: 8, border: '1px solid hsl(var(--border)/.4)' }}>
-                              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.78rem' }}>
-                                <thead>
-                                  <tr style={{ background: 'hsl(var(--muted)/.4)', borderBottom: '1px solid hsl(var(--border)/.4)' }}>
-                                    <th style={{ padding: '6px 8px', textAlign: 'left' }}>Item</th>
-                                    <th style={{ padding: '6px 8px', textAlign: 'left', width: 120 }}>Owner</th>
-                                    <th style={{ padding: '6px 8px', textAlign: 'left', width: 90 }}>Deadline</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {mom.action_items.map((act: any, idx: number) => (
-                                    <tr key={idx} style={{ borderBottom: '1px solid hsl(var(--border)/.2)' }}>
-                                      <td style={{ padding: '6px 8px' }}>{act.item || act.description || '-'}</td>
-                                      <td style={{ padding: '6px 8px', fontWeight: 600 }}>{act.owner || 'Unassigned'}</td>
-                                      <td style={{ padding: '6px 8px', color: 'hsl(var(--pencil))' }}>{act.deadline || 'ASAP'}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        )}
-                        {mom.conclusion && (
-                          <div style={{ padding: '.6rem .75rem', borderRadius: 8, background: 'hsl(var(--muted)/.2)', fontSize: '.82rem', color: 'hsl(var(--ink))' }}>
-                            <strong>Conclusion:</strong> {mom.conclusion}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })()}
+                  {renderGeneratedMom()}
                 </div>
               )
             )}
@@ -5199,6 +5198,12 @@ export default function RomPage() {
             const isCurrentVersionGenerated = romVersion === 'long'
               ? !!(activeVersionRom?.agendas?.length)
               : !!(baseVersionRom?.agendas?.some((a: any) => a.discussion_points?.length))
+
+            // Short/Medium: word reduction against the long points, and each point's original long points
+            const longVersionRom = romData?.final_rom_versions?.long || originalFinalRom
+            const condensedView = romVersion !== 'long' && isCurrentVersionGenerated
+            const versionStats = condensedView ? versionReduction(activeVersionRom, longVersionRom) : null
+            const sourceIndex = condensedView ? condenseSourceIndex(activeVersionRom, longVersionRom) : null
 
             // Header checkbox reflects the per-agenda "Include Action Points" selection (all / some / none)
             const apActiveAgendas = (activeVersionRom?.agendas || []).filter((a: any) => !a.skipped)
@@ -5287,6 +5292,8 @@ export default function RomPage() {
                       )}
                       <span>Include Action Points{apPartlyIncluded ? ` (${apIncludedCount}/${apActiveAgendas.length})` : ''}</span>
                     </label>
+                    {/* Hide action points scored below this importance (also left out of the DOCX) */}
+                    {apIncludedCount > 0 && <ImportanceThresholdSelect value={minImportance} onChange={setMinImportance} />}
                     {/* Action Points Reasoning Mode Toggle (applies to all action point generation) */}
                       <label style={{
                         display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
@@ -5517,6 +5524,11 @@ export default function RomPage() {
                     </span>
                   </div>
                 </div>
+
+                {/* ── Reduction Analysis (Short/Medium vs. the long points) ── */}
+                {versionStats && romVersion !== 'long' && (
+                  <VersionReductionSummary version={romVersion} reduction={versionStats} />
+                )}
 
                 {/* ── Collapsible Very Important Points Summary Panel ── */}
                 {showImportantPanel && importantPoints.length > 0 && (
@@ -6040,7 +6052,12 @@ export default function RomPage() {
                                   ⏩ Skipped
                                 </span>
                               ) : (
-                                <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(30,90%,55%)', background: 'hsl(30,90%,55%/.1)', padding: '2px 7px', borderRadius: 8 }}>{pts.length} pts</span>
+                                <>
+                                  {versionStats?.agendas[agenda.agenda_id] && (
+                                    <AgendaReductionChip reduction={versionStats.agendas[agenda.agenda_id]} />
+                                  )}
+                                  <span style={{ fontSize: '.7rem', fontWeight: 700, color: 'hsl(30,90%,55%)', background: 'hsl(30,90%,55%/.1)', padding: '2px 7px', borderRadius: 8 }}>{pts.length} pts</span>
+                                </>
                               )}
                             </div>
 
@@ -6176,6 +6193,14 @@ export default function RomPage() {
 
                                               {/* Speaker / Action Owner & Badges */}
                                               <div style={{ marginTop: 4, fontSize: '.7rem', color: 'hsl(var(--pencil))', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                                {romVersion === 'long' && (
+                                                  <span
+                                                    title={`Point P${pIdx + 1} of this agenda (ID ${pt.id}) — the ID Short/Medium explanations use`}
+                                                    style={{ fontFamily: 'JetBrains Mono', fontSize: '.63rem', fontWeight: 700, padding: '0 5px', borderRadius: 4, border: '1px solid hsl(var(--border)/.6)' }}
+                                                  >
+                                                    P{pIdx + 1}
+                                                  </span>
+                                                )}
                                                 <span
                                                   title={isActionOwner ? `Action Owner: ${displayPerson}` : `Speaker: ${displayPerson}`}
                                                   style={{
@@ -6189,7 +6214,9 @@ export default function RomPage() {
                                                   {displayPerson}
                                                 </span>
                                                 {isDocPoint && <span style={{ fontSize: '.64rem', padding: '1px 5px', borderRadius: 4, background: 'hsl(280,75%,60%/.1)', color: 'hsl(280,75%,60%)', border: '1px solid hsl(280,75%,60%/.25)' }}>From Document</span>}
-                                                <PointTypeBadge type={pt.point_type} types={pt.point_types} />
+                                                {pt.type
+                                                  ? <DiscussionTypeBadge type={pt.type} includeActionPoint={pt.include_action_point} />
+                                                  : <PointTypeBadge type={pt.point_type} types={pt.point_types} />}
                                                 {isVeryImportantPoint && (
                                                   <span
                                                     title={ptImportantMarks.length > 0 ? `Marked as Very Important: ${ptImportantMarks.map(m => `"${m.text}"`).join(', ')}` : 'Marked as Very Important'}
@@ -6210,6 +6237,21 @@ export default function RomPage() {
                                                   </span>
                                                 )}
                                               </div>
+
+                                              {/* Short/Medium: explanation, original long points, Expand Point */}
+                                              {sourceIndex && !isEditing && !!pt.source_point_ids?.length && (
+                                                <CondensedPointDetails
+                                                  point={pt}
+                                                  sources={pointSources(pt, sourceIndex)}
+                                                  isVeryImportant={Boolean(pt.is_very_important)}
+                                                  explaining={condensedPointBusy[pt.id] === 'explain'}
+                                                  expanding={condensedPointBusy[pt.id] === 'expand'}
+                                                  reverting={condensedPointBusy[pt.id] === 'revert'}
+                                                  onExplain={regenerate => handleExplainPoint(pt, regenerate)}
+                                                  onExpand={() => handleExpandPoint(pt)}
+                                                  onRevert={() => handleRevertExpand(pt)}
+                                                />
+                                              )}
                                             </div>
 
                                             {/* Actions column */}
@@ -6255,6 +6297,7 @@ export default function RomPage() {
                                     actionPoints={agendaActionPoints}
                                     audit={agenda.action_point_audit}
                                     pointNumbers={pointNumbers}
+                                    minImportance={minImportance}
                                   />
                                 )}
                               </div>
@@ -6362,6 +6405,7 @@ export default function RomPage() {
 
                           {/* Chat Messages (Independently scrollable) */}
                           <div
+                            ref={aiChatScrollRef}
                             className="final-rom-chat-messages-scroll"
                             style={{
                               flex: '1 1 0%',

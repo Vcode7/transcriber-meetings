@@ -137,6 +137,25 @@ def split_turns_into_windows(turns: List[Dict[str, Any]], window_minutes: float)
     return windows
 
 
+def split_turns_in_half(turns: List[Dict[str, Any]], min_turns: int = 2) -> tuple:
+    """Two halves of a span of turns, balanced by amount of speech, each with at least
+    ``min_turns`` turns. The cut never falls directly after a question/request turn (its reply
+    stays with it). Returns (turns, []) when the span is too short to split."""
+    if len(turns) < 2 * min_turns:
+        return turns, []
+    total = sum(len(t.get("text", "")) for t in turns)
+    cut, spoken = len(turns) // 2, 0
+    for idx, turn in enumerate(turns):
+        spoken += len(turn.get("text", ""))
+        if spoken >= total / 2:
+            cut = idx + 1
+            break
+    cut = max(min_turns, min(len(turns) - min_turns, cut))
+    if _invites_response(turns[cut - 1]) and cut < len(turns) - min_turns:
+        cut += 1
+    return turns[:cut], turns[cut:]
+
+
 def render_turn(turn: Dict[str, Any]) -> str:
     line = (
         f"[{turn['turn_id']} | {format_timestamp(turn['start'])}-{format_timestamp(turn['end'])}] "

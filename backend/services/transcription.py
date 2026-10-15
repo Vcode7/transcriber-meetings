@@ -90,6 +90,18 @@ def _resolve_device() -> tuple[str, str]:
     return device, compute_type
 
 
+def resolve_language(requested: Optional[str] = None) -> Optional[str]:
+    """
+    Language to force on Whisper. settings.WHISPER_LANGUAGE (default "en") wins
+    over any per-call/detected language; "auto"/empty falls back to *requested*
+    (None = Whisper auto-detects).
+    """
+    forced = (getattr(settings, "WHISPER_LANGUAGE", "") or "").strip().lower()
+    if forced and forced != "auto":
+        return forced
+    return requested or None
+
+
 def get_whisperx_model():
     """Lazy-load the WhisperX model (done once per process)."""
     global _whisperx_model, _whisperx_device, _whisperx_compute_type
@@ -526,6 +538,8 @@ def transcribe_parallel(
     import gc
     import time
 
+    language = resolve_language(language)
+
     if chunk_minutes is None:
         chunk_minutes = int((user_settings or {}).get("whisper_parallel_chunk_minutes") or getattr(settings, "WHISPER_PARALLEL_CHUNK_MINUTES", 10))
     chunk_minutes = max(1, int(chunk_minutes))
@@ -688,6 +702,7 @@ def transcribe(
     import numpy as np
 
     cfg = user_settings or {}
+    language = resolve_language(language)
 
     # Extract pipeline toggles and parameters
     enable_transcription_vad = bool(cfg.get("enable_transcription_vad", cfg.get("enable_vad", getattr(settings, "ENABLE_TRANSCRIPTION_VAD", getattr(settings, "ENABLE_VAD", True)))))

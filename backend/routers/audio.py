@@ -1,9 +1,10 @@
 """Audio upload/record router — accepts files, triggers pipeline."""
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Form
 from sqlalchemy import text
@@ -11,7 +12,8 @@ from sqlalchemy import text
 from database import get_db, get_db_context, dt_to_str, to_json
 from routers.auth import get_current_user
 from utils.storage import save_upload, delete_file
-from utils.audio_utils import validate_audio, convert_to_wav, get_duration, trim_audio, process_audio_edit
+from utils.audio_utils import validate_audio, convert_to_wav, get_duration, render_keep_ranges
+from utils.audio_edit import build_keep_ranges, is_identity, rescale_for_source_duration
 from tasks.pipeline import run_pipeline, run_finalize_pipeline
 from tasks.chunk_pipeline import run_chunk_pipeline
 from tasks.upload_chunk_pipeline import run_upload_chunk_pipeline, UPLOAD_CHUNK_THRESHOLD_SEC
@@ -42,6 +44,174 @@ async def _validate_audio_for_user(wav_path: str, user_id: str, db) -> tuple[boo
     return validate_audio(wav_path, enabled=enabled, min_duration=min_dur, min_rms=min_rms)
 
 
+def _rom_settings_columns(rom_settings: Optional[str]) -> dict:
+    """recordings.rom_settings / rom_pipeline_status for the ROM settings chosen at capture time."""
+    from models.rom_pipeline import parse_rom_settings
+    from tasks.rom_auto_pipeline import initial_status_json
+    parsed = parse_rom_settings(rom_settings)
+    if parsed is None:
+        return {"rom_settings": None, "rom_pipeline_status": None}
+    return {"rom_settings": parsed.model_dump_json(), "rom_pipeline_status": initial_status_json(parsed)}
+
+
+def _clean_expected_speakers(value: Optional[int]) -> Optional[int]:
+    """A positive speaker count, or None (unknown)."""
+    try:
+        n = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return n if 0 < n <= 50 else None
+
+
+# ── Trim / middle-cut ──────────────────────────────────────────────────────
+
+def build_edit_request(
+    trim_start_sec: Optional[float],
+    trim_end_sec: Optional[float],
+    cut_start_sec: Optional[float],
+    cut_end_sec: Optional[float],
+    source_duration_sec: Optional[float],
+) -> Optional[dict]:
+    """
+    Canonical form of the trim/cut a client asked for, or None for "process
+    the whole file".  Each trim boundary is independent: an omitted start means
+    the beginning and an omitted end means the true end of the decoded audio,
+    so a boundary the user never moved can't clip audio when the browser's
+    duration estimate was short.  Stored with the recording and used for
+    upload de-duplication, so values are rounded to be JSON-stable.
+    """
+    def r(v: Optional[float]) -> Optional[float]:
+        return None if v is None else round(float(v), 3)
+
+    has_cut = cut_start_sec is not None and cut_end_sec is not None and cut_end_sec > cut_start_sec
+    if trim_start_sec is None and trim_end_sec is None and not has_cut:
+        return None
+    return {
+        "trim_start_sec": r(trim_start_sec),
+        "trim_end_sec": r(trim_end_sec),
+        "cut_start_sec": r(cut_start_sec) if has_cut else None,
+        "cut_end_sec": r(cut_end_sec) if has_cut else None,
+        "source_duration_sec": r(source_duration_sec),
+    }
+
+
+def apply_edit_request(
+    wav_path: str,
+    request: Optional[dict],
+    reference_duration: Optional[float] = None,
+    log_tag: str = "[Audio]",
+) -> Tuple[str, Optional[dict]]:
+    """
+    Apply a client trim/cut request to a freshly converted 16 kHz WAV.
+
+    Returns ``(wav_path_to_process, audio_edit)`` where ``audio_edit`` is the
+    record persisted in ``recordings.audio_edit`` (None when no edit was
+    requested).  ``audio_edit["keep_ranges"]`` is None when the selection
+    covers the whole file.  On success with a new file the source WAV is
+    deleted.  An impossible selection or a failed cut raises HTTP 422 — the
+    user asked for specific audio, so silently processing the full recording
+    would be wrong — and leaves ``wav_path`` for the caller to clean up.
+
+    ``reference_duration`` is the duration of the timeline the browser
+    trimmer showed (e.g. the video container); defaults to the decoded audio.
+    """
+    if request is None:
+        return wav_path, None
+
+    decoded = get_duration(wav_path)
+    points, scale = rescale_for_source_duration(
+        {k: request[k] for k in ("trim_start_sec", "trim_end_sec", "cut_start_sec", "cut_end_sec")},
+        request.get("source_duration_sec"),
+        reference_duration or decoded,
+    )
+    if scale != 1.0:
+        logger.warning(
+            f"{log_tag} Browser reported {request.get('source_duration_sec')}s but decoded audio is "
+            f"{decoded:.3f}s; rescaling trim points by {scale:.4f}"
+        )
+
+    try:
+        keep = build_keep_ranges(
+            decoded,
+            points["trim_start_sec"], points["trim_end_sec"],
+            points["cut_start_sec"], points["cut_end_sec"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid trim selection: {e}")
+
+    audio_edit = {
+        "request": request,
+        "decoded_duration": round(decoded, 3),
+        "scale": round(scale, 6),
+        "keep_ranges": None,
+        "output_duration": round(decoded, 3),
+        "audio_path": None,
+    }
+    if is_identity(keep, decoded):
+        logger.info(f"{log_tag} Trim selection covers the whole file — processing it unedited")
+        return wav_path, audio_edit
+
+    base, ext = os.path.splitext(wav_path)
+    edited_path = f"{base}_edited{ext}"
+    try:
+        render_keep_ranges(wav_path, keep, edited_path)
+    except Exception as e:
+        delete_file(edited_path)
+        logger.error(f"{log_tag} Audio edit failed for keep ranges {keep}: {e}", exc_info=True)
+        raise HTTPException(status_code=422, detail=f"Audio trim failed: {e}")
+
+    delete_file(wav_path)
+    audio_edit.update({
+        "keep_ranges": [[round(a, 3), round(b, 3)] for a, b in keep],
+        "output_duration": round(get_duration(edited_path), 3),
+        "audio_path": edited_path,
+    })
+    logger.info(
+        f"{log_tag} Edited audio: keep {audio_edit['keep_ranges']} of {decoded:.3f}s "
+        f"→ {audio_edit['output_duration']}s ({edited_path})"
+    )
+    return edited_path, audio_edit
+
+
+def keep_ranges_of(audio_edit_json: Optional[str]) -> Optional[List[Tuple[float, float]]]:
+    """Keep ranges from a stored ``recordings.audio_edit`` value (None = unedited)."""
+    try:
+        ranges = (json.loads(audio_edit_json) if audio_edit_json else {}).get("keep_ranges")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return [(float(a), float(b)) for a, b in ranges] if ranges else None
+
+
+async def find_duplicate_upload(db, user_id: str, filename: Optional[str], edit_request: Optional[dict]):
+    """
+    An active recording of the same file submitted in the last 20 seconds with
+    the same trim selection (guards against double-submits).  A different
+    selection is a new request, not a duplicate.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
+    res = await db.execute(
+        text("""
+            SELECT id, status, progress, audio_edit
+            FROM recordings
+            WHERE user_id = :user_id
+              AND filename = :filename
+              AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
+              AND created_at >= :cutoff
+            ORDER BY created_at DESC
+            LIMIT 5
+        """),
+        {"user_id": user_id, "filename": filename, "cutoff": dt_to_str(cutoff)},
+    )
+    for row in res.mappings().all():
+        try:
+            stored = (json.loads(row["audio_edit"]) if row["audio_edit"] else {}).get("request")
+        except (TypeError, ValueError, AttributeError):
+            stored = None
+        if stored == edit_request:
+            return row
+    return None
+
+
 async def _create_recording_and_run(
     file_path: str,
     original_filename: str,
@@ -51,6 +221,9 @@ async def _create_recording_and_run(
     participant_voice_ids: Optional[List[str]] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    rom_settings: Optional[str] = None,
+    expected_speakers: Optional[int] = None,
+    audio_edit: Optional[dict] = None,
 ) -> str:
     """Create recording row and schedule pipeline."""
     try:
@@ -71,12 +244,14 @@ async def _create_recording_and_run(
                     id, user_id, filename, file_path, duration, status, progress,
                     transcript, raw_text, summary, key_points, action_items, speakers_detected,
                     language, error_message, created_at, processed_at,
-                    meeting_prompt, participant_voice_ids, use_vocabulary
+                    meeting_prompt, participant_voice_ids, use_vocabulary,
+                    rom_settings, rom_pipeline_status, expected_speakers, audio_edit
                 )
                 VALUES (
                     :id, :user_id, :filename, :file_path, :duration, 'pending', 'queued',
                     '[]', NULL, NULL, '[]', '[]', '[]', 'en', NULL, :created_at, NULL,
-                    :meeting_prompt, :participant_voice_ids, :use_vocabulary
+                    :meeting_prompt, :participant_voice_ids, :use_vocabulary,
+                    :rom_settings, :rom_pipeline_status, :expected_speakers, :audio_edit
                 )
             """),
             {
@@ -89,6 +264,9 @@ async def _create_recording_and_run(
                 "meeting_prompt": meeting_prompt or "",
                 "participant_voice_ids": pv_json,
                 "use_vocabulary": 1 if use_vocabulary else 0,
+                "expected_speakers": _clean_expected_speakers(expected_speakers),
+                "audio_edit": to_json(audio_edit) if audio_edit else None,
+                **_rom_settings_columns(rom_settings),
             },
         )
         await db.commit()
@@ -122,6 +300,9 @@ async def _create_recording_and_run_chunked(
     participant_voice_ids: Optional[List[str]] = None,
     use_vocabulary: bool = False,
     speaker_summary: bool = False,
+    rom_settings: Optional[str] = None,
+    expected_speakers: Optional[int] = None,
+    audio_edit: Optional[dict] = None,
 ) -> str:
     """Create recording row and schedule chunked upload pipeline."""
     recording_id = str(uuid.uuid4())
@@ -137,12 +318,14 @@ async def _create_recording_and_run_chunked(
                     id, user_id, filename, file_path, duration, status, progress,
                     transcript, raw_text, summary, key_points, action_items, speakers_detected,
                     language, error_message, created_at, processed_at,
-                    meeting_prompt, participant_voice_ids, use_vocabulary
+                    meeting_prompt, participant_voice_ids, use_vocabulary,
+                    rom_settings, rom_pipeline_status, expected_speakers, audio_edit
                 )
                 VALUES (
                     :id, :user_id, :filename, :file_path, :duration, 'pending', 'queued',
                     '[]', NULL, NULL, '[]', '[]', '[]', 'en', NULL, :created_at, NULL,
-                    :meeting_prompt, :participant_voice_ids, :use_vocabulary
+                    :meeting_prompt, :participant_voice_ids, :use_vocabulary,
+                    :rom_settings, :rom_pipeline_status, :expected_speakers, :audio_edit
                 )
             """),
             {
@@ -155,6 +338,9 @@ async def _create_recording_and_run_chunked(
                 "meeting_prompt": meeting_prompt or "",
                 "participant_voice_ids": pv_json,
                 "use_vocabulary": 1 if use_vocabulary else 0,
+                "expected_speakers": _clean_expected_speakers(expected_speakers),
+                "audio_edit": to_json(audio_edit) if audio_edit else None,
+                **_rom_settings_columns(rom_settings),
             },
         )
         await db.commit()
@@ -185,10 +371,13 @@ async def upload_audio(
     participant_voice_ids: Optional[str] = Form(default="[]"),  # JSON array string
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    rom_settings: Optional[str] = Form(default=None),  # JSON RomPipelineSettings (models/rom_pipeline.py)
+    expected_speakers: Optional[int] = Form(default=None),  # known speaker count → pyannote num_speakers
     trim_start_sec: Optional[float] = Form(default=None),
     trim_end_sec: Optional[float] = Form(default=None),
     cut_start_sec: Optional[float] = Form(default=None),
     cut_end_sec: Optional[float] = Form(default=None),
+    source_duration_sec: Optional[float] = Form(default=None),  # duration the browser trimmer saw
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -196,26 +385,13 @@ async def upload_audio(
     import json as _json
     user_id = current_user["id"]
     logger.info(f"[Audio] Upload request from user {user_id}, filename={file.filename}")
+    edit_request = build_edit_request(trim_start_sec, trim_end_sec, cut_start_sec, cut_end_sec, source_duration_sec)
 
     # ── Deduplication check ────────────────────────────────────────────────
-    # If the user submitted the exact same filename within the last 20 seconds
-    # and that recording is still active (pending/processing/transcript_ready),
-    # return the existing recording ID to prevent double-submissions/duplicate history entries.
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
-    existing_res = await db.execute(
-        text("""
-            SELECT id, status, progress
-            FROM recordings
-            WHERE user_id = :user_id
-              AND filename = :filename
-              AND status IN ('pending', 'processing', 'transcript_ready', 'pending_transcript_review')
-              AND created_at >= :cutoff
-            ORDER BY created_at DESC
-            LIMIT 1
-        """),
-        {"user_id": user_id, "filename": file.filename, "cutoff": dt_to_str(cutoff)},
-    )
-    existing_row = existing_res.mappings().first()
+    # If the user submitted the exact same filename with the same trim selection
+    # within the last 20 seconds and that recording is still active, return the
+    # existing recording ID to prevent double-submissions/duplicate history entries.
+    existing_row = await find_duplicate_upload(db, user_id, file.filename, edit_request)
     if existing_row:
         logger.info(f"[Audio] Deduplicating upload: reusing active recording {existing_row['id']} for {file.filename}")
         return {
@@ -242,40 +418,18 @@ async def upload_audio(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
 
+    # ── Optional trim / middle-cut (before validation: validate what we process) ──
+    try:
+        wav_path, audio_edit = apply_edit_request(wav_path, edit_request, log_tag="[Audio] Upload")
+    except HTTPException:
+        delete_file(wav_path)
+        raise
+
     valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
     if not valid:
         logger.warning(f"[Audio] Audio validation failed: {reason}")
         delete_file(wav_path)
         raise HTTPException(status_code=422, detail=reason)
-
-    logger.info(f"[Audio] Audio validated OK: {wav_path}")
-
-    # ── Optional trim / middle-cut ────────────────────────────────────────
-    raw_duration = get_duration(wav_path)
-    has_cut = cut_start_sec is not None and cut_end_sec is not None and cut_end_sec > cut_start_sec
-    has_trim = (
-        trim_start_sec is not None
-        and trim_end_sec is not None
-        and trim_end_sec > trim_start_sec
-        # If trim boundaries cover the entire file without middle-cut, bypass trimming
-        and not (trim_start_sec <= 0.05 and trim_end_sec >= raw_duration - 0.05 and not has_cut)
-    )
-    has_edit = has_trim or has_cut
-    if has_edit:
-        try:
-            edited_path = process_audio_edit(
-                wav_path,
-                start_sec=trim_start_sec if has_trim else None,
-                end_sec=trim_end_sec if has_trim else None,
-                cut_start_sec=cut_start_sec if has_cut else None,
-                cut_end_sec=cut_end_sec if has_cut else None,
-            )
-            if edited_path != wav_path:
-                delete_file(wav_path)
-                wav_path = edited_path
-                logger.info(f"[Audio] Edited upload (trim: {trim_start_sec}-{trim_end_sec}, cut: {cut_start_sec}-{cut_end_sec}) → {wav_path}")
-        except Exception as edit_err:
-            logger.warning(f"[Audio] Audio edit failed (non-fatal): {edit_err}; using original audio.")
 
     # Get duration (header-only read — no RAM spike regardless of file size)
     duration = get_duration(wav_path)
@@ -297,6 +451,9 @@ async def upload_audio(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            rom_settings=rom_settings,
+            expected_speakers=expected_speakers,
+            audio_edit=audio_edit,
         )
     else:
         recording_id = await _create_recording_and_run(
@@ -308,6 +465,9 @@ async def upload_audio(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            rom_settings=rom_settings,
+            expected_speakers=expected_speakers,
+            audio_edit=audio_edit,
         )
 
     return {
@@ -326,10 +486,13 @@ async def submit_recording(
     participant_voice_ids: Optional[str] = Form(default="[]"),
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    rom_settings: Optional[str] = Form(default=None),  # JSON RomPipelineSettings (models/rom_pipeline.py)
+    expected_speakers: Optional[int] = Form(default=None),  # known speaker count → pyannote num_speakers
     trim_start_sec: Optional[float] = Form(default=None),
     trim_end_sec: Optional[float] = Form(default=None),
     cut_start_sec: Optional[float] = Form(default=None),
     cut_end_sec: Optional[float] = Form(default=None),
+    source_duration_sec: Optional[float] = Form(default=None),  # duration the browser trimmer saw
     current_user: dict = Depends(get_current_user),
     db = Depends(get_db),
 ):
@@ -340,6 +503,7 @@ async def submit_recording(
     import json as _json
     user_id = current_user["id"]
     logger.info(f"[Audio] Record submission from user {user_id}, content_type={file.content_type}")
+    edit_request = build_edit_request(trim_start_sec, trim_end_sec, cut_start_sec, cut_end_sec, source_duration_sec)
 
     try:
         pv_ids: List[str] = _json.loads(participant_voice_ids or "[]")
@@ -357,29 +521,18 @@ async def submit_recording(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Conversion failed: {e}")
 
+    # ── Optional trim / middle-cut (before validation: validate what we process) ──
+    try:
+        wav_path, audio_edit = apply_edit_request(wav_path, edit_request, log_tag="[Audio] Record")
+    except HTTPException:
+        delete_file(wav_path)
+        raise
+
     valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
     if not valid:
         logger.warning(f"[Audio] Audio validation failed: {reason}")
         delete_file(wav_path)
         raise HTTPException(status_code=422, detail=reason)
-
-    # ── Optional trim / middle-cut ────────────────────────────────────────
-    has_edit = (trim_start_sec is not None and trim_end_sec is not None) or (cut_start_sec is not None and cut_end_sec is not None)
-    if has_edit:
-        try:
-            edited_path = process_audio_edit(
-                wav_path,
-                start_sec=trim_start_sec,
-                end_sec=trim_end_sec,
-                cut_start_sec=cut_start_sec,
-                cut_end_sec=cut_end_sec,
-            )
-            if edited_path != wav_path:
-                delete_file(wav_path)
-                wav_path = edited_path
-                logger.info(f"[Audio] Edited recording (trim: {trim_start_sec}-{trim_end_sec}, cut: {cut_start_sec}-{cut_end_sec}) → {wav_path}")
-        except Exception as edit_err:
-            logger.warning(f"[Audio] Audio edit failed (non-fatal): {edit_err}; using original audio.")
 
     # Get duration (header-only read — no RAM spike regardless of file size)
     duration = get_duration(wav_path)
@@ -401,6 +554,9 @@ async def submit_recording(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            rom_settings=rom_settings,
+            expected_speakers=expected_speakers,
+            audio_edit=audio_edit,
         )
     else:
         recording_id = await _create_recording_and_run(
@@ -412,6 +568,9 @@ async def submit_recording(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            rom_settings=rom_settings,
+            expected_speakers=expected_speakers,
+            audio_edit=audio_edit,
         )
 
     return {
@@ -511,10 +670,13 @@ async def finalize_recording(
     participant_voice_ids: Optional[str] = Form(default="[]"),
     use_vocabulary: Optional[bool] = Form(default=False),
     speaker_summary: Optional[bool] = Form(default=False),
+    rom_settings: Optional[str] = Form(default=None),  # JSON RomPipelineSettings (models/rom_pipeline.py)
+    expected_speakers: Optional[int] = Form(default=None),  # known speaker count → pyannote num_speakers
     trim_start_sec: Optional[float] = Form(default=None),
     trim_end_sec: Optional[float] = Form(default=None),
     cut_start_sec: Optional[float] = Form(default=None),
     cut_end_sec: Optional[float] = Form(default=None),
+    source_duration_sec: Optional[float] = Form(default=None),  # duration the browser trimmer saw
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -523,9 +685,14 @@ async def finalize_recording(
     Saves the full audio, creates the recording row, then schedules
     the finalize pipeline which: waits for chunks, merges transcripts,
     runs diarization on full audio, assigns speakers, generates AI insights.
+
+    The chunks were transcribed on the untrimmed timeline while recording, so
+    a trim/cut is applied to the full audio here and its keep ranges are
+    handed to the pipeline, which remaps the chunk transcripts onto it.
     """
     user_id = current_user["id"]
     logger.info(f"[Audio] Finalize request from user {user_id}")
+    edit_request = build_edit_request(trim_start_sec, trim_end_sec, cut_start_sec, cut_end_sec, source_duration_sec)
 
     # Parse chunk_ids JSON
     try:
@@ -551,29 +718,19 @@ async def finalize_recording(
         delete_file(raw_path)
         raise HTTPException(status_code=422, detail=f"Audio conversion failed: {e}")
 
+    # ── Optional trim / middle-cut (before validation: validate what we process) ──
+    try:
+        wav_path, audio_edit = apply_edit_request(wav_path, edit_request, log_tag="[Audio] Finalize")
+    except HTTPException:
+        delete_file(wav_path)
+        raise
+    edit_keep_ranges = (audio_edit or {}).get("keep_ranges")
+
     async with get_db_context() as db:
         valid, reason = await _validate_audio_for_user(wav_path, user_id, db)
         if not valid:
             delete_file(wav_path)
             raise HTTPException(status_code=422, detail=reason)
-
-    # ── Optional trim / middle-cut ────────────────────────────────────────
-    has_edit = (trim_start_sec is not None and trim_end_sec is not None) or (cut_start_sec is not None and cut_end_sec is not None)
-    if has_edit:
-        try:
-            edited_path = process_audio_edit(
-                wav_path,
-                start_sec=trim_start_sec,
-                end_sec=trim_end_sec,
-                cut_start_sec=cut_start_sec,
-                cut_end_sec=cut_end_sec,
-            )
-            if edited_path != wav_path:
-                delete_file(wav_path)
-                wav_path = edited_path
-                logger.info(f"[Audio] Edited finalized recording (trim: {trim_start_sec}-{trim_end_sec}, cut: {cut_start_sec}-{cut_end_sec}) → {wav_path}")
-        except Exception as edit_err:
-            logger.warning(f"[Audio] Finalize audio edit failed (non-fatal): {edit_err}; using original audio.")
 
     # Get duration
     try:
@@ -593,12 +750,14 @@ async def finalize_recording(
                     transcript, raw_text, summary, key_points, action_items, speakers_detected,
                     language, error_message, created_at, processed_at,
                     meeting_prompt, participant_voice_ids, use_vocabulary,
-                    chunk_ids, is_chunked
+                    chunk_ids, is_chunked, rom_settings, rom_pipeline_status, expected_speakers,
+                    audio_edit
                 ) VALUES (
                     :id, :user_id, :filename, :file_path, :duration, 'pending', 'queued',
                     '[]', NULL, NULL, '[]', '[]', '[]', 'en', NULL, :created_at, NULL,
                     :meeting_prompt, :participant_voice_ids, :use_vocabulary,
-                    :chunk_ids, 1
+                    :chunk_ids, 1, :rom_settings, :rom_pipeline_status, :expected_speakers,
+                    :audio_edit
                 )
             """),
             {
@@ -612,6 +771,9 @@ async def finalize_recording(
                 "participant_voice_ids": json.dumps(pv_ids),
                 "use_vocabulary": 1 if use_vocabulary else 0,
                 "chunk_ids": json.dumps(parsed_chunk_ids),
+                "expected_speakers": _clean_expected_speakers(expected_speakers),
+                "audio_edit": to_json(audio_edit) if audio_edit else None,
+                **_rom_settings_columns(rom_settings),
             },
         )
         await db.commit()
@@ -639,6 +801,7 @@ async def finalize_recording(
             participant_voice_ids=pv_ids,
             use_vocabulary=use_vocabulary or False,
             speaker_summary=speaker_summary or False,
+            edit_keep_ranges=edit_keep_ranges,
         )
     )
     register_task(recording_id, task)

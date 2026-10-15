@@ -7,6 +7,7 @@ import AIChatPanel from '../components/AIChatPanel'
 import ProcessingOverlay from '../components/ProcessingOverlay'
 import PDFButton from '../components/PDFButton'
 import AdvancedOptionsPanel, { type AdvancedOptions } from '../components/AdvancedOptions'
+import RomSettingsPanel, { useRomPipelineSettings } from '../components/rom/RomSettingsPanel'
 import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
@@ -15,6 +16,7 @@ import type { ProcessingResult } from '../types/recording'
 import { useJobsStore } from '../store/jobs'
 
 import AudioTrimmer from '../components/AudioTrimmer'
+import { appendAudioEdit, type AudioEditSelection } from '../lib/audioEdit'
 import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
 import ErrorBoundary from '../components/ErrorBoundary'
 
@@ -48,6 +50,7 @@ export default function UploadPage() {
   const [isGeneratingMom, setIsGeneratingMom] = useState(false)
   const [momData, setMomData] = useState<Record<string, unknown> | null>(null)
   const [isGeneratingInsights, setIsGeneratingInsights] = useState(false)
+  const romSettings = useRomPipelineSettings()
   const [advancedOpts, setAdvancedOpts] = useState<AdvancedOptions>({
     meetingPrompt: '', expectedSpeakers: null, selectedVoiceIds: [],
     useDictionary: false, useVocabularyInPrompt: false, speakerSummary: false,
@@ -236,12 +239,7 @@ export default function UploadPage() {
     }
   }
 
-  const handleUpload = async (
-    trimStartSec?: number,
-    trimEndSec?: number,
-    cutStartSec?: number,
-    cutEndSec?: number
-  ) => {
+  const handleUpload = async (edit?: AudioEditSelection) => {
     if (!file || isUploadingRef.current || uploading) return
     isUploadingRef.current = true
     setUploading(true); setError('')
@@ -253,17 +251,13 @@ export default function UploadPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
-      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
-        form.append('trim_start_sec', String(trimStartSec))
-        form.append('trim_end_sec', String(trimEndSec))
-      }
-      if (cutStartSec !== undefined && cutEndSec !== undefined && cutEndSec > cutStartSec) {
-        form.append('cut_start_sec', String(cutStartSec))
-        form.append('cut_end_sec', String(cutEndSec))
-      }
+      if (advancedOpts.expectedSpeakers) form.append('expected_speakers', String(advancedOpts.expectedSpeakers))
+      appendAudioEdit(form, edit)
+      await romSettings.appendTo(form)
       const res = await api.post('/audio/upload', form)
       const rId = res.data.recording_id
       setRecordingId(rId)
+      romSettings.resetMeetingInputs()
       addJob({
         jobId: rId,
         source: 'upload',
@@ -527,11 +521,12 @@ export default function UploadPage() {
                     file={file}
                     fileName={file.name}
                     isProcessing={uploading || isProcessingActive}
-                    onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
+                    onConfirm={(edit) => handleUpload(edit)}
                     onSkip={() => handleUpload()}
                   />
                 </ErrorBoundary>
                 <AdvancedOptionsPanel onChange={setAdvancedOpts} />
+                <RomSettingsPanel state={romSettings} />
               </div>
             )}
           </div>

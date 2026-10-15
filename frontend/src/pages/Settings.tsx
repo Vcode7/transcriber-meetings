@@ -3,7 +3,7 @@ import {
   Settings, Mic, Trash2, Pencil, Save, Loader, Sliders, Sparkles, User, CheckCircle,
   MessageSquare, RotateCcw, Upload, Download, FileText, Code, Cpu, Database, Volume2, Activity,
   Layers, Target, RefreshCw, Zap, Shield, Search, ChevronRight, SlidersHorizontal, Copy, Maximize2, Minimize2, Check,
-  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info, Play, Pause, Plus, PlusCircle, Brain
+  AlertTriangle, CheckCircle2, XCircle, Clock, Loader2, Info, Play, Pause, Plus, PlusCircle, Brain, Users
 } from 'lucide-react'
 import api from '../api/client'
 import { toast } from 'sonner'
@@ -53,6 +53,8 @@ interface UserSettings {
   embedding_model?: string
   speaker_embedding_model?: string
   restrict_reassignment_to_meeting_speakers?: boolean
+  overlap_separation_enabled?: boolean
+  overlap_separation_available?: boolean
 
   // Ollama settings
   ollama_num_ctx?: number
@@ -78,6 +80,7 @@ interface UserSettings {
   rom_separate_action_extraction?: boolean
   rom_action_owner_verification?: boolean
   rom_action_generation_chunk_size?: number
+  action_point_min_importance?: number
   rom_pipeline_mode?: string
   rom_short_model_mode?: 'base' | 'trained'
   rom_short_model_variant_id?: string | null
@@ -1044,7 +1047,7 @@ export default function SettingsPage() {
                     <SettingCard
                       title="Stage 2 Min Similarity Threshold"
                       description="Minimum cosine similarity threshold (0.50 - 0.98) required for context chunks. Chunks below this score are ignored."
-                      value={settings.rom_min_similarity_threshold ?? 0.80}
+                      value={settings.rom_min_similarity_threshold ?? 0.60}
                       min={0.50} max={0.98} step={0.01}
                       onChange={v => setSettings({ ...settings, rom_min_similarity_threshold: Number(v.toFixed(2)) })}
                     />
@@ -1068,6 +1071,13 @@ export default function SettingsPage() {
                       value={settings.rom_action_generation_chunk_size ?? 10}
                       min={1} max={50} step={1}
                       onChange={v => setSettings({ ...settings, rom_action_generation_chunk_size: Math.round(v) })}
+                    />
+                    <SettingCard
+                      title="Minimum Action Point Importance (%)"
+                      description="Final ROM and MoM action points scored below this importance (40–100%) are hidden and left out of DOCX exports. 0 shows all. Points without a score are always shown."
+                      value={settings.action_point_min_importance ?? 0}
+                      min={0} max={100} step={5}
+                      onChange={v => setSettings({ ...settings, action_point_min_importance: Math.round(v) })}
                     />
                   </div>
                 )}
@@ -1698,6 +1708,76 @@ export default function SettingsPage() {
                           position: 'absolute',
                           top: 2,
                           left: settings.restrict_reassignment_to_meeting_speakers ? 22 : 2,
+                          width: 16,
+                          height: 16,
+                          borderRadius: '50%',
+                          background: '#fff',
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+                          transition: 'left .2s',
+                        }} />
+                      </button>
+                    </div>
+
+                    {/* Overlap separation (re-transcribe crosstalk) */}
+                    <div style={{
+                      padding: '1rem 1.25rem',
+                      borderRadius: 10,
+                      background: 'hsl(var(--paper)/.5)',
+                      border: '1px solid hsl(var(--border)/.6)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 16,
+                      flexWrap: 'wrap'
+                    }}>
+                      <div style={{ flex: 1, minWidth: 260 }}>
+                        <div style={{ fontSize: '.84rem', fontWeight: 700, color: 'hsl(var(--ink))', display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Users size={15} style={{ color: settings.overlap_separation_enabled ? 'hsl(142,70%,45%)' : 'hsl(var(--pencil))' }} />
+                          Recover overlapping speech
+                          <span style={{
+                            fontSize: '.68rem',
+                            fontWeight: 700,
+                            padding: '2px 8px',
+                            borderRadius: 12,
+                            background: settings.overlap_separation_enabled ? 'hsl(142,70%,45%/.15)' : 'hsl(var(--muted)/.6)',
+                            color: settings.overlap_separation_enabled ? 'hsl(142,70%,45%)' : 'hsl(var(--pencil))',
+                          }}>
+                            {settings.overlap_separation_enabled ? 'Enabled' : 'OFF (Default)'}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '.72rem', color: 'hsl(var(--pencil))', marginTop: 4, lineHeight: 1.4 }}>
+                          Separates moments where people talk at the same time and transcribes each voice, so interruptions are attributed to the right speaker. Slower processing.
+                          {settings.overlap_separation_available === false && (
+                            <span style={{ color: 'hsl(var(--destructive))' }}>
+                              {' '}Separation model not installed — run tools/download_speaker_models.py --with-separation.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        role="switch"
+                        id="toggle-overlap-separation"
+                        aria-checked={Boolean(settings.overlap_separation_enabled)}
+                        onClick={() => setSettings({ ...settings, overlap_separation_enabled: !settings.overlap_separation_enabled })}
+                        style={{
+                          position: 'relative',
+                          width: 44,
+                          height: 24,
+                          borderRadius: 12,
+                          background: settings.overlap_separation_enabled ? 'hsl(142,70%,45%)' : 'hsl(var(--muted)/.8)',
+                          border: '1.5px solid hsl(var(--border))',
+                          cursor: 'pointer',
+                          transition: 'background-color .2s',
+                          padding: 0,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <span style={{
+                          position: 'absolute',
+                          top: 2,
+                          left: settings.overlap_separation_enabled ? 22 : 2,
                           width: 16,
                           height: 16,
                           borderRadius: '50%',

@@ -12,6 +12,7 @@ from database import get_db, get_db_context, dt_to_str
 from routers.auth import get_current_user
 from pydantic import BaseModel
 from models.settings import UserSettingsUpdate
+from services.action_importance import clamp_min_importance
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
         "rom_separate_action_extraction": False,
         "rom_action_owner_verification": False,
         "rom_action_generation_chunk_size": 10,
+        "action_point_min_importance": 0,
         "rom_stage2_process_all_together": False,
         "rom_pipeline_mode": "base",
         "rom_short_model_mode": "base",
@@ -187,6 +189,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["rom_separate_action_extraction"] = bool(res.get("rom_separate_action_extraction", 0))
     res["rom_action_owner_verification"] = bool(res.get("rom_action_owner_verification", 0))
     res["rom_action_generation_chunk_size"] = int(res.get("rom_action_generation_chunk_size") or 10)
+    res["action_point_min_importance"] = clamp_min_importance(res.get("action_point_min_importance"))
     res["rom_stage2_process_all_together"] = bool(res.get("rom_stage2_process_all_together", 0))
     res["rom_pipeline_mode"] = str(res.get("rom_pipeline_mode") or "base")
     res["missing_transcript_recovery_enabled"] = bool(res.get("missing_transcript_recovery_enabled", 0))
@@ -194,6 +197,13 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     res["restrict_reassignment_to_meeting_speakers"] = bool(res.get("restrict_reassignment_to_meeting_speakers", 0))
     res["reasoning_mode_short_rom"] = bool(res.get("reasoning_mode_short_rom", 0))
     res["reasoning_mode_action_points"] = bool(res.get("reasoning_mode_action_points", 0))
+    if res.get("overlap_separation_enabled") is None:
+        from config import settings as _cfg
+        res["overlap_separation_enabled"] = bool(getattr(_cfg, "OVERLAP_SEPARATION_ENABLED", False))
+    else:
+        res["overlap_separation_enabled"] = bool(res["overlap_separation_enabled"])
+    from services.overlap_separation import is_separation_available
+    res["overlap_separation_available"] = is_separation_available()
 
     if res.get("embedding_model"):
         # Keep the runtime model in sync with this user's selection — through the
@@ -279,10 +289,14 @@ async def update_settings(
             patch["rom_action_generation_chunk_size"] = max(1, min(val, 100))
         except (ValueError, TypeError):
             patch["rom_action_generation_chunk_size"] = 10
+    if "action_point_min_importance" in patch:
+        patch["action_point_min_importance"] = clamp_min_importance(patch["action_point_min_importance"])
     if "rom_stage2_process_all_together" in patch:
         patch["rom_stage2_process_all_together"] = 1 if patch["rom_stage2_process_all_together"] else 0
     if "missing_transcript_recovery_enabled" in patch:
         patch["missing_transcript_recovery_enabled"] = 1 if patch["missing_transcript_recovery_enabled"] else 0
+    if "overlap_separation_enabled" in patch:
+        patch["overlap_separation_enabled"] = 1 if patch["overlap_separation_enabled"] else 0
     if "restrict_reassignment_to_meeting_speakers" in patch:
         patch["restrict_reassignment_to_meeting_speakers"] = 1 if patch["restrict_reassignment_to_meeting_speakers"] else 0
     if "missing_segment_min_duration_sec" in patch:
@@ -360,7 +374,7 @@ async def update_settings(
                         max_tokens_collection_chat, max_tokens_collection_compare, max_tokens_collection_topic_growth, max_tokens_vocab_extractor,
                         restrict_reassignment_to_meeting_speakers, rom_short_model_mode, rom_short_model_variant_id,
                         max_tokens_rom_version_short, max_tokens_rom_version_medium,
-                        reasoning_mode_short_rom, reasoning_mode_action_points,
+                        reasoning_mode_short_rom, reasoning_mode_action_points, action_point_min_importance,
                         updated_at)
                     VALUES (:user_id, :threshold, :low, :mid, :min_dur, :use_ollama, :ollama_server_url, :ollama_port, :ollama_model_priority,
                         :rag_chunk_size, :rag_chunk_overlap, :rag_retrieval_k_global, :rag_retrieval_k_meeting,
@@ -375,7 +389,7 @@ async def update_settings(
                         :max_tokens_collection_chat, :max_tokens_collection_compare, :max_tokens_collection_topic_growth, :max_tokens_vocab_extractor,
                         :restrict_reassignment_to_meeting_speakers, :rom_short_model_mode, :rom_short_model_variant_id,
                         :max_tokens_rom_version_short, :max_tokens_rom_version_medium,
-                        :reasoning_mode_short_rom, :reasoning_mode_action_points,
+                        :reasoning_mode_short_rom, :reasoning_mode_action_points, :action_point_min_importance,
                         :updated_at)
                 """),
                 {
@@ -435,6 +449,7 @@ async def update_settings(
                     "max_tokens_rom_version_medium": patch.get("max_tokens_rom_version_medium", 4096),
                     "reasoning_mode_short_rom": patch.get("reasoning_mode_short_rom", 0),
                     "reasoning_mode_action_points": patch.get("reasoning_mode_action_points", 0),
+                    "action_point_min_importance": patch.get("action_point_min_importance", 0),
                     "updated_at": dt_to_str(now),
                 },
             )
@@ -458,6 +473,8 @@ async def update_settings(
         patch["reasoning_mode_short_rom"] = bool(patch["reasoning_mode_short_rom"])
     if "reasoning_mode_action_points" in patch:
         patch["reasoning_mode_action_points"] = bool(patch["reasoning_mode_action_points"])
+    if "overlap_separation_enabled" in patch:
+        patch["overlap_separation_enabled"] = bool(patch["overlap_separation_enabled"])
 
     response = {"message": "Settings updated.", **patch}
     if embedding_model_changed:

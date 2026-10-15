@@ -137,6 +137,47 @@ def split_into_slides(extracted_text: str, filename: str = "", pages: Optional[L
     return sections
 
 
+def extract_document_slides(content: bytes, filename: str) -> Tuple[str, List[Slide]]:
+    """
+    Extract a PPT/PPTX/PDF/DOC/DOCX upload into (full text, slides). Blocking (OCR).
+    PDFs go page by page through the production PDF path (text layer + scanned-page OCR);
+    everything else through doc_extractor, then split_into_slides.
+    Shared by PPT Testing and the Stage 3 agenda document.
+    """
+    import os
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        import tempfile
+        from services.doc_extractor import ocr_pdf_pages_detailed
+        from services.ocr_engine import unload_ocr_engine
+        from services.ocr_settings import get_ocr_settings
+        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(content)
+            text_all, details, total = ocr_pdf_pages_detailed(tmp_path, get_ocr_settings(), max_pages=10_000)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            unload_ocr_engine()
+        pages = [details[i]["text"] if i in details else "" for i in range(1, total + 1)]
+        return text_all, split_into_slides(text_all, filename, pages=pages)
+    from services.doc_extractor import extract_text_from_bytes
+    text_all = extract_text_from_bytes(content, filename)
+    return text_all, split_into_slides(text_all, filename)
+
+
+def slides_to_dicts(slides: List[Slide]) -> List[Dict[str, Any]]:
+    return [{"number": s.number, "title": s.title, "text": s.text, "kind": s.kind} for s in slides]
+
+
+def slides_from_dicts(stored: Iterable[Dict[str, Any]]) -> List[Slide]:
+    return [Slide(number=s["number"], title=s.get("title", ""), text=s.get("text", ""), kind=s.get("kind", "slide"))
+            for s in stored if isinstance(s, dict)]
+
+
 # ── 2. Conclusion cutoff ──────────────────────────────────────────────────────
 
 _CONCLUSION_TITLE = re.compile(
@@ -546,6 +587,27 @@ def phase_summary(ctx: Dict[str, Any]) -> str:
 
 # ── 4. LLM helpers ────────────────────────────────────────────────────────────
 
+def _close_brackets(text: str) -> str:
+    """Append the closing brackets a truncated JSON value is missing (strings are respected)."""
+    stack: List[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack and stack[-1] == ch:
+            stack.pop()
+    return text.rstrip().rstrip(",") + "".join(reversed(stack))
+
+
 def parse_json_object(raw: str) -> Dict[str, Any]:
     """Tolerant JSON extraction from LLM output."""
     if not raw:
@@ -556,6 +618,9 @@ def parse_json_object(raw: str) -> Dict[str, Any]:
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start != -1 and end > start:
         candidates.append(cleaned[start:end + 1])
+    if start != -1:
+        # Small local models sometimes stop before the final closing brackets.
+        candidates.append(_close_brackets(cleaned[start:]))
     for cand in candidates:
         for attempt in (cand, re.sub(r",\s*([\]}])", r"\1", cand)):
             try:
@@ -1001,6 +1066,7 @@ def analyze_presentation(
     for p_idx, group in enumerate(projects, 1):
         report("projects", p_idx, len(projects), f"Summarising {group['name']}")
         group["summary"], group["needs_attention"] = "", []
+        group["insight_ids"] = [i["id"] for i in group["insights"]]
         if len(group["insights"]) == 1:
             only = group["insights"][0]
             group["summary"] = only["summary"]
@@ -1015,7 +1081,6 @@ def analyze_presentation(
             logger.warning(f"[PPTInsights] Project summary failed for {group['name']}: {exc}")
         if not group["summary"]:
             group["summary"] = " ".join(i["summary"] for i in group["insights"][:2])
-        group["insight_ids"] = [i["id"] for i in group["insights"]]
 
     overview = ""
     if projects:

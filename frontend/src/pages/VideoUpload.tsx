@@ -15,6 +15,7 @@ import type { ProcessingResult } from '../types/recording'
 import { useJobsStore } from '../store/jobs'
 
 import AudioTrimmer from '../components/AudioTrimmer'
+import { appendAudioEdit, type AudioEditSelection } from '../lib/audioEdit'
 import TranscriptReviewPanel from '../components/TranscriptReviewPanel'
 import ErrorBoundary from '../components/ErrorBoundary'
 
@@ -411,12 +412,7 @@ export default function VideoUploadPage() {
     }
   }
 
-  const handleUpload = async (
-    trimStartSec?: number,
-    trimEndSec?: number,
-    cutStartSec?: number,
-    cutEndSec?: number
-  ) => {
+  const handleUpload = async (edit?: AudioEditSelection) => {
     if (!file || isUploadingRef.current || uploading) return
     isUploadingRef.current = true
     setUploading(true); setError('')
@@ -428,14 +424,8 @@ export default function VideoUploadPage() {
       form.append('participant_voice_ids', JSON.stringify(advancedOpts.selectedVoiceIds))
       form.append('use_vocabulary', advancedOpts.useVocabularyInPrompt ? 'true' : 'false')
       form.append('speaker_summary', advancedOpts.speakerSummary ? 'true' : 'false')
-      if (trimStartSec !== undefined && trimEndSec !== undefined && trimEndSec > trimStartSec) {
-        form.append('trim_start_sec', String(trimStartSec))
-        form.append('trim_end_sec', String(trimEndSec))
-      }
-      if (cutStartSec !== undefined && cutEndSec !== undefined && cutEndSec > cutStartSec) {
-        form.append('cut_start_sec', String(cutStartSec))
-        form.append('cut_end_sec', String(cutEndSec))
-      }
+      if (advancedOpts.expectedSpeakers) form.append('expected_speakers', String(advancedOpts.expectedSpeakers))
+      appendAudioEdit(form, edit)
       const res = await api.post('/video/upload', form)
       const rId = res.data.recording_id
       setRecordingId(rId)
@@ -712,7 +702,7 @@ export default function VideoUploadPage() {
                     file={file}
                     fileName={file.name}
                     isProcessing={uploading || isProcessingActive}
-                    onConfirm={(start, end, cutStart, cutEnd) => handleUpload(start, end, cutStart, cutEnd)}
+                    onConfirm={(edit) => handleUpload(edit)}
                     onSkip={() => handleUpload()}
                   />
                 </ErrorBoundary>

@@ -4,39 +4,35 @@
  * Features:
  * - 100% Memory & Crash Safe (Zero AudioContext native decode crashes).
  * - Full Light / Dark theme integration.
- * - Draggable start/end trim boundary handles.
+ * - Draggable start/end trim boundary handles (mouse, touch and pen).
  * - Draggable "Remove Middle Section" cut feature.
  * - Smooth Preview Playback with automatic cut-section skipping and Stop control.
  * - Fast & lightweight waveform rendering.
+ *
+ * Selection rules live in lib/audioEdit.ts. Only boundaries the user moved are
+ * reported, so an inaccurate browser duration can never clip the recording.
  */
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Play, Pause, Square, Scissors, SkipForward, Clock, RotateCcw, Volume2, Loader, Check } from 'lucide-react'
 import { useUIStore } from '../store/ui'
+import {
+  buildEditSelection,
+  effectiveCut,
+  fmtTime,
+  fmtTimePrecise,
+  initialTrimState,
+  keptDuration,
+  moveHandle,
+  parseTime,
+  toggleCut,
+  withDuration,
+  type AudioEditSelection,
+  type TrimHandle,
+  type TrimState,
+} from '../lib/audioEdit'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function fmtTime(sec: number): string {
-  if (!isFinite(sec) || isNaN(sec) || sec < 0) return '0:00'
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = Math.floor(sec % 60)
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-function parseTime(v: string): number | null {
-  try {
-    if (!v || typeof v !== 'string') return null
-    const parts = v.trim().split(':').map(Number)
-    if (parts.some(isNaN)) return null
-    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-    if (parts.length === 2) return parts[0] * 60 + parts[1]
-    return parts[0]
-  } catch {
-    return null
-  }
-}
 
 // Generate organic, realistic, deterministic waveform peaks based on seed
 function generateDeterministicPeaks(count: number, seedStr: string): number[] {
@@ -68,36 +64,76 @@ function generateDeterministicPeaks(count: number, seedStr: string): number[] {
 const HANDLE_W = 16       // handle bar width px
 const CANVAS_H = 104      // waveform canvas height px
 const PEAK_BINS = 400     // number of amplitude buckets to draw
+const PROBE_TIMEOUT_MS = 10000
+
+// ── Time input ────────────────────────────────────────────────────────────────
+
+/**
+ * Text field for a time value. Typing edits a draft that is applied on Enter or
+ * blur (Escape reverts), so half-typed values like "1:" are never applied and
+ * the field doesn't snap back while the user types.
+ */
+function TimeInput({ value, onCommit, ariaLabel, style }: {
+  value: number
+  onCommit: (sec: number) => void
+  ariaLabel: string
+  style: React.CSSProperties
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const cancelRef = useRef(false)
+
+  const commit = () => {
+    const text = draft
+    setDraft(null)
+    if (cancelRef.current) {
+      cancelRef.current = false
+      return
+    }
+    if (text === null) return
+    const t = parseTime(text)
+    if (t !== null) onCommit(t)
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      aria-label={ariaLabel}
+      title="m:ss.s — press Enter to apply"
+      value={draft ?? fmtTimePrecise(value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur()
+        } else if (e.key === 'Escape') {
+          cancelRef.current = true
+          e.currentTarget.blur()
+        }
+      }}
+      style={style}
+    />
+  )
+}
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
 export interface AudioTrimmerProps {
   file: File | Blob
   fileName?: string
-  onConfirm: (
-    startSec: number,
-    endSec: number,
-    cutStartSec?: number,
-    cutEndSec?: number
-  ) => void
+  /** The user's selection; boundaries the user left at the file edges are omitted. */
+  onConfirm: (edit: AudioEditSelection) => void
   onSkip: () => void
   isProcessing?: boolean
 }
-
-type DragHandle = 'start' | 'end' | 'cut-start' | 'cut-end' | null
 
 export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProcessing = false }: AudioTrimmerProps) {
   const theme = useUIStore((s) => s.theme)
   const isDark = theme === 'dark'
 
-  const [duration, setDuration] = useState(0)
-  const [trimStart, setTrimStart] = useState(0)
-  const [trimEnd, setTrimEnd] = useState(0)
-
-  // Middle cut section state
-  const [isCutEnabled, setIsCutEnabled] = useState(false)
-  const [cutStart, setCutStart] = useState(0)
-  const [cutEnd, setCutEnd] = useState(0)
+  const [sel, setSel] = useState<TrimState>(() => initialTrimState(0))
+  const { duration, trimStart, trimEnd, cutEnabled: isCutEnabled, cutStart, cutEnd } = sel
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [playHead, setPlayHead] = useState(0)
@@ -108,27 +144,13 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
   const blobUrlRef = useRef<string | null>(null)
   const rafRef = useRef<number>(0)
   const containerRef = useRef<HTMLDivElement>(null)
+  const dragCleanupRef = useRef<(() => void) | null>(null)
 
-  // Live state refs to avoid stale closures during RAF / audio events
-  const trimStartRef = useRef(0)
-  const trimEndRef = useRef(0)
-  const isCutEnabledRef = useRef(false)
-  const cutStartRef = useRef(0)
-  const cutEndRef = useRef(0)
+  // Live state refs to avoid stale closures during RAF / media events
+  const selRef = useRef(sel)
+  selRef.current = sel
   const isPlayingRef = useRef(false)
-
-  trimStartRef.current = trimStart
-  trimEndRef.current = trimEnd
-  isCutEnabledRef.current = isCutEnabled
-  cutStartRef.current = cutStart
-  cutEndRef.current = cutEnd
   isPlayingRef.current = isPlaying
-
-  // Track dragging state
-  const dragging = useRef<DragHandle>(null)
-  const containerRectRef = useRef<DOMRect | null>(null)
-  // Track whether the user explicitly moved the trimmer boundaries or activated cut
-  const userAdjustedRef = useRef(false)
 
   // Waveform peaks (computed safely in-memory without AudioContext decode crashes)
   const peaks = useMemo(() => {
@@ -139,8 +161,12 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
   // ── Safe Media Probe ────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true)
+    setSel(initialTrimState(0))
+    setPlayHead(0)
+    setIsPlaying(false)
     let cancelled = false
     let resolved = false
+    let seekingForDuration = false
     let url = ''
 
     try {
@@ -148,9 +174,6 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
       blobUrlRef.current = url
     } catch (e) {
       console.warn('[AudioTrimmer] Blob URL creation failed:', e)
-      setDuration(0)
-      setTrimStart(0)
-      setTrimEnd(0)
       setLoading(false)
       return
     }
@@ -165,43 +188,61 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
     media.preload = 'metadata'
     mediaRef.current = media
 
-    const applyDuration = (dur: number) => {
+    const finiteDuration = () => {
+      const d = media.duration
+      return Number.isFinite(d) && d > 0 ? d : 0
+    }
+
+    const resolveWith = (dur: number) => {
       if (cancelled || resolved) return
       resolved = true
-      const validDur = isFinite(dur) && !isNaN(dur) && dur > 0 ? dur : 0
-      setDuration(validDur)
-      setTrimStart(0)
-      setTrimEnd(validDur)
-      setCutStart(validDur * 0.35)
-      setCutEnd(validDur * 0.65)
+      setSel(initialTrimState(dur))
       setLoading(false)
+    }
+
+    // Accept a finite duration whenever the browser reports one. Later reports
+    // (e.g. a WebM stream finishing its scan) refine it; an end handle the user
+    // left at the end follows the refined value.
+    const tryResolve = () => {
+      const d = finiteDuration()
+      if (!d) return false
+      if (seekingForDuration) {
+        seekingForDuration = false
+        try { media.currentTime = 0 } catch {}
+      }
+      if (resolved) {
+        setSel((prev) => withDuration(prev, d))
+      } else {
+        resolveWith(d)
+      }
+      return true
     }
 
     const onLoadedMetadata = () => {
       if (cancelled) return
-      let dur = media.duration
-      if (!isFinite(dur) || dur <= 0) {
-        // Fallback: seek to near-end to force WebM / stream duration calculation
-        media.currentTime = 1e101
-        media.ontimeupdate = () => {
-          media.ontimeupdate = null
-          const resolvedDur = media.duration
-          try { media.currentTime = 0 } catch {}
-          applyDuration(resolvedDur)
-        }
-      } else {
-        applyDuration(dur)
+      if (!tryResolve()) {
+        // MediaRecorder WebM has no duration in its header: seek far past the
+        // end so the browser scans the stream and reports the real duration.
+        seekingForDuration = true
+        try { media.currentTime = 1e101 } catch {}
       }
+    }
+
+    const onDurationChange = () => {
+      if (!cancelled) tryResolve()
+    }
+
+    const onTimeUpdate = () => {
+      if (!cancelled && seekingForDuration) tryResolve()
     }
 
     const onEnded = () => {
       if (cancelled) return
       setIsPlaying(false)
       isPlayingRef.current = false
-      if (mediaRef.current) {
-        try { mediaRef.current.currentTime = trimStartRef.current } catch {}
-      }
-      setPlayHead(trimStartRef.current)
+      const start = selRef.current.trimStart
+      try { media.currentTime = start } catch {}
+      setPlayHead(start)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
 
@@ -215,10 +256,12 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
     const onError = () => {
       if (cancelled) return
       console.warn('[AudioTrimmer] Media probe fallback (system codec unavailable):', media.error)
-      applyDuration(0)
+      resolveWith(0)
     }
 
     media.addEventListener('loadedmetadata', onLoadedMetadata)
+    media.addEventListener('durationchange', onDurationChange)
+    media.addEventListener('timeupdate', onTimeUpdate)
     media.addEventListener('ended', onEnded)
     media.addEventListener('pause', onPause)
     media.addEventListener('error', onError)
@@ -227,21 +270,21 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
       media.src = url
     } catch (e) {
       console.warn('[AudioTrimmer] Setting media src error:', e)
-      applyDuration(0)
+      resolveWith(0)
     }
 
     // Safety timeout: wait up to 10 seconds for large media files to probe metadata
     const timeoutId = setTimeout(() => {
-      if (cancelled || resolved) return
-      const d = media.duration
-      applyDuration(isFinite(d) && !isNaN(d) && d > 0 ? d : 0)
-    }, 10000)
+      if (!cancelled && !resolved) resolveWith(finiteDuration())
+    }, PROBE_TIMEOUT_MS)
 
     return () => {
       cancelled = true
       clearTimeout(timeoutId)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       media.removeEventListener('loadedmetadata', onLoadedMetadata)
+      media.removeEventListener('durationchange', onDurationChange)
+      media.removeEventListener('timeupdate', onTimeUpdate)
       media.removeEventListener('ended', onEnded)
       media.removeEventListener('pause', onPause)
       media.removeEventListener('error', onError)
@@ -255,7 +298,10 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
         blobUrlRef.current = null
       }
     }
-  }, [file, fileName]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [file, fileName])
+
+  // Drop any in-flight drag listeners on unmount
+  useEffect(() => () => dragCleanupRef.current?.(), [])
 
   // ── High precision animation loop for Preview Playback ─────────────────────
   const loopPlayback = useCallback(() => {
@@ -263,31 +309,26 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
     if (!media || !isPlayingRef.current) return
 
     const cur = media.currentTime || 0
-    const tStart = trimStartRef.current
-    const tEnd = trimEndRef.current
-    const isCut = isCutEnabledRef.current
-    const cStart = cutStartRef.current
-    const cEnd = cutEndRef.current
+    const s = selRef.current
+    const cut = effectiveCut(s)
 
-    // Check if entered middle cut section -> immediately skip forward to cutEnd
-    if (isCut && cEnd > cStart) {
-      if (cur >= cStart && cur < cEnd) {
-        try { media.currentTime = cEnd } catch {}
-        setPlayHead(cEnd)
-        rafRef.current = requestAnimationFrame(loopPlayback)
-        return
-      }
+    // Entered the removed middle section -> skip forward to its end
+    if (cut && cur >= cut[0] && cur < cut[1]) {
+      try { media.currentTime = cut[1] } catch {}
+      setPlayHead(cut[1])
+      rafRef.current = requestAnimationFrame(loopPlayback)
+      return
     }
 
-    // Check if reached trimEnd boundary -> stop playback smoothly
-    if (cur >= tEnd) {
+    // Reached trimEnd boundary -> stop playback smoothly
+    if (cur >= s.trimEnd) {
       try {
         media.pause()
-        media.currentTime = tStart
+        media.currentTime = s.trimStart
       } catch {}
       setIsPlaying(false)
       isPlayingRef.current = false
-      setPlayHead(tStart)
+      setPlayHead(s.trimStart)
       return
     }
 
@@ -298,54 +339,58 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
   // ── Play / Pause / Stop ───────────────────────────────────────────────────
   const togglePlay = useCallback(() => {
     const media = mediaRef.current
-    if (!media || duration <= 0) return
+    const s = selRef.current
+    if (!media || s.duration <= 0) return
 
-    if (isPlaying) {
+    if (isPlayingRef.current) {
       try { media.pause() } catch {}
       setIsPlaying(false)
       isPlayingRef.current = false
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    } else {
-      let targetTime = media.currentTime || 0
-      if (targetTime < trimStart || targetTime >= trimEnd - 0.05) {
-        targetTime = trimStart
-      }
-      if (isCutEnabled && targetTime >= cutStart && targetTime < cutEnd) {
-        targetTime = cutEnd
-      }
-
-      try {
-        media.currentTime = targetTime
-      } catch {}
-      setPlayHead(targetTime)
-
-      media.play()
-        .then(() => {
-          setIsPlaying(true)
-          isPlayingRef.current = true
-          if (rafRef.current) cancelAnimationFrame(rafRef.current)
-          rafRef.current = requestAnimationFrame(loopPlayback)
-        })
-        .catch((err) => {
-          console.warn('[AudioTrimmer] Preview play error (handled):', err)
-          setIsPlaying(false)
-          isPlayingRef.current = false
-        })
+      return
     }
-  }, [isPlaying, duration, trimStart, trimEnd, isCutEnabled, cutStart, cutEnd, loopPlayback])
+
+    let targetTime = media.currentTime || 0
+    if (targetTime < s.trimStart || targetTime >= s.trimEnd - 0.05) {
+      targetTime = s.trimStart
+    }
+    const cut = effectiveCut(s)
+    if (cut && targetTime >= cut[0] && targetTime < cut[1]) {
+      targetTime = cut[1]
+    }
+
+    try {
+      media.currentTime = targetTime
+    } catch {}
+    setPlayHead(targetTime)
+
+    media.play()
+      .then(() => {
+        setIsPlaying(true)
+        isPlayingRef.current = true
+        if (rafRef.current) cancelAnimationFrame(rafRef.current)
+        rafRef.current = requestAnimationFrame(loopPlayback)
+      })
+      .catch((err) => {
+        console.warn('[AudioTrimmer] Preview play error (handled):', err)
+        setIsPlaying(false)
+        isPlayingRef.current = false
+      })
+  }, [loopPlayback])
 
   const handleStop = useCallback(() => {
     const media = mediaRef.current
     if (!media) return
+    const start = selRef.current.trimStart
     try {
       media.pause()
-      media.currentTime = trimStart
+      media.currentTime = start
     } catch {}
     setIsPlaying(false)
     isPlayingRef.current = false
-    setPlayHead(trimStart)
+    setPlayHead(start)
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
-  }, [trimStart])
+  }, [])
 
   useEffect(() => {
     if (isProcessing) {
@@ -354,83 +399,60 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
   }, [isProcessing, handleStop])
 
   const handleResetAll = useCallback(() => {
-    userAdjustedRef.current = false
-    setTrimStart(0)
-    setTrimEnd(duration)
-    setIsCutEnabled(false)
-    setCutStart(duration * 0.35)
-    setCutEnd(duration * 0.65)
+    setSel((prev) => initialTrimState(prev.duration))
     if (mediaRef.current) {
       try { mediaRef.current.currentTime = 0 } catch {}
     }
     setPlayHead(0)
-  }, [duration])
+  }, [])
 
   // ── Canvas click → seek ───────────────────────────────────────────────────
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || duration <= 0) return
+    const s = selRef.current
+    if (!canvasRef.current || s.duration <= 0) return
     const rect = canvasRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const frac = Math.max(0, Math.min(1, x / rect.width))
-    let t = frac * duration
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    let t = frac * s.duration
 
-    if (isCutEnabled && t >= cutStart && t < cutEnd) {
-      t = cutEnd
+    const cut = effectiveCut(s)
+    if (cut && t >= cut[0] && t < cut[1]) {
+      t = cut[1]
     }
 
     if (mediaRef.current) {
       try { mediaRef.current.currentTime = t } catch {}
     }
     setPlayHead(t)
-  }, [duration, isCutEnabled, cutStart, cutEnd])
-
-  // ── Handle dragging ───────────────────────────────────────────────────────
-  const getCanvasFrac = useCallback((clientX: number): number => {
-    const rect = containerRectRef.current
-    if (!rect || rect.width === 0) return 0
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
   }, [])
 
-  const onMouseDown = useCallback((handle: DragHandle) => (e: React.MouseEvent) => {
+  // ── Handle dragging ───────────────────────────────────────────────────────
+  const onHandlePointerDown = useCallback((handle: TrimHandle) => (e: React.PointerEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    dragging.current = handle
-    if (containerRef.current) {
-      containerRectRef.current = containerRef.current.getBoundingClientRect()
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect || rect.width === 0 || selRef.current.duration <= 0) return
+
+    const onMove = (ev: PointerEvent) => {
+      const frac = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width))
+      setSel((prev) => moveHandle(prev, handle, frac * prev.duration))
+    }
+    const stop = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', stop)
+      window.removeEventListener('pointercancel', stop)
+      dragCleanupRef.current = null
     }
 
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current || duration <= 0) return
-      userAdjustedRef.current = true
-      const frac = getCanvasFrac(ev.clientX)
-      const t = frac * duration
+    dragCleanupRef.current?.()
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+    dragCleanupRef.current = stop
+  }, [])
 
-      if (dragging.current === 'start') {
-        const maxStart = isCutEnabled ? Math.min(trimEnd - 0.5, cutStart - 0.2) : trimEnd - 0.5
-        setTrimStart(Math.max(0, Math.min(t, maxStart)))
-      } else if (dragging.current === 'end') {
-        const minEnd = isCutEnabled ? Math.max(trimStart + 0.5, cutEnd + 0.2) : trimStart + 0.5
-        setTrimEnd(Math.min(duration, Math.max(t, minEnd)))
-      } else if (dragging.current === 'cut-start') {
-        const minCutStart = trimStart + 0.1
-        const maxCutStart = cutEnd - 0.3
-        setCutStart(Math.max(minCutStart, Math.min(t, maxCutStart)))
-      } else if (dragging.current === 'cut-end') {
-        const minCutEnd = cutStart + 0.3
-        const maxCutEnd = trimEnd - 0.1
-        setCutEnd(Math.max(minCutEnd, Math.min(t, maxCutEnd)))
-      }
-    }
-
-    const onUp = () => {
-      dragging.current = null
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [duration, trimStart, trimEnd, isCutEnabled, cutStart, cutEnd, getCanvasFrac])
+  const commitHandle = useCallback((handle: TrimHandle) => (t: number) => {
+    setSel((prev) => moveHandle(prev, handle, t))
+  }, [])
 
   // ── Computed handle positions (%) ──────────────────────────────────────────
   const safeDur = duration > 0 ? duration : 1
@@ -439,9 +461,11 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
   const cutStartPct = Math.max(0, Math.min(100, (cutStart / safeDur) * 100))
   const cutEndPct = Math.max(0, Math.min(100, (cutEnd / safeDur) * 100))
 
-  const totalTrimmed = Math.max(0, trimEnd - trimStart)
-  const cutDuration = isCutEnabled ? Math.max(0, cutEnd - cutStart) : 0
-  const effectiveDuration = Math.max(0, totalTrimmed - cutDuration)
+  const activeCut = effectiveCut(sel)
+  const cutDuration = activeCut ? activeCut[1] - activeCut[0] : 0
+  const effectiveDuration = keptDuration(sel)
+  const editSelection = buildEditSelection(sel)
+  const hasEdit = editSelection !== null
 
   // ── Waveform Canvas Rendering ─────────────────────────────────────────────
   useEffect(() => {
@@ -596,6 +620,38 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
     sectionBorder: '1px solid hsl(220 20% 88%)',
   }
 
+  const trimInputStyle: React.CSSProperties = {
+    width: '76px',
+    background: themeStyles.inputBg,
+    border: themeStyles.inputBorder,
+    color: themeStyles.inputText,
+    padding: '4px 6px', borderRadius: '6px',
+    fontSize: '.8rem', fontFamily: 'JetBrains Mono, monospace',
+    textAlign: 'center', fontWeight: 600,
+  }
+
+  const cutInputStyle: React.CSSProperties = {
+    width: '76px',
+    background: themeStyles.inputBg,
+    border: `1.5px solid ${isDark ? 'hsl(0 75% 55% / 0.4)' : 'hsl(0 80% 60% / 0.4)'}`,
+    color: themeStyles.inputText,
+    padding: '3px 6px', borderRadius: '6px',
+    fontSize: '.78rem', fontFamily: 'JetBrains Mono, monospace',
+    textAlign: 'center', fontWeight: 600,
+  }
+
+  const handleStyle = (pct: number, zIndex: number): React.CSSProperties => ({
+    position: 'absolute',
+    top: 0, bottom: 0,
+    left: `calc(${pct}% - ${HANDLE_W / 2}px)`,
+    width: `${HANDLE_W}px`,
+    cursor: 'ew-resize',
+    touchAction: 'none',
+    display: 'flex', flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'center',
+    zIndex,
+  })
+
   return (
     <div style={{
       background: themeStyles.containerBg,
@@ -722,19 +778,7 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
           {duration > 0 && (
             <>
               {/* Start Trim Handle (Amber) */}
-              <div
-                onMouseDown={onMouseDown('start')}
-                style={{
-                  position: 'absolute',
-                  top: 0, bottom: 0,
-                  left: `calc(${startPct}% - ${HANDLE_W / 2}px)`,
-                  width: `${HANDLE_W}px`,
-                  cursor: 'ew-resize',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center',
-                  zIndex: 10,
-                }}
-              >
+              <div onPointerDown={onHandlePointerDown('start')} style={handleStyle(startPct, 10)}>
                 <div style={{
                   width: '4px', height: '100%',
                   background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
@@ -750,24 +794,12 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
                   whiteSpace: 'nowrap',
                   boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
                 }}>
-                  Start {fmtTime(trimStart)}
+                  Start {fmtTimePrecise(trimStart)}
                 </div>
               </div>
 
               {/* End Trim Handle (Amber) */}
-              <div
-                onMouseDown={onMouseDown('end')}
-                style={{
-                  position: 'absolute',
-                  top: 0, bottom: 0,
-                  left: `calc(${endPct}% - ${HANDLE_W / 2}px)`,
-                  width: `${HANDLE_W}px`,
-                  cursor: 'ew-resize',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center',
-                  zIndex: 10,
-                }}
-              >
+              <div onPointerDown={onHandlePointerDown('end')} style={handleStyle(endPct, 10)}>
                 <div style={{
                   width: '4px', height: '100%',
                   background: isDark ? 'hsl(45 100% 55%)' : 'hsl(38 95% 48%)',
@@ -783,25 +815,13 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
                   whiteSpace: 'nowrap',
                   boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
                 }}>
-                  End {fmtTime(trimEnd)}
+                  End {fmtTimePrecise(trimEnd)}
                 </div>
               </div>
 
               {/* Cut Start Handle (Red / Coral) */}
               {isCutEnabled && (
-                <div
-                  onMouseDown={onMouseDown('cut-start')}
-                  style={{
-                    position: 'absolute',
-                    top: 0, bottom: 0,
-                    left: `calc(${cutStartPct}% - ${HANDLE_W / 2}px)`,
-                    width: `${HANDLE_W}px`,
-                    cursor: 'ew-resize',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 11,
-                  }}
-                >
+                <div onPointerDown={onHandlePointerDown('cut-start')} style={handleStyle(cutStartPct, 11)}>
                   <div style={{
                     width: '3.5px', height: '100%',
                     background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
@@ -817,26 +837,14 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
                     whiteSpace: 'nowrap',
                     boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
                   }}>
-                    ✂ Cut In {fmtTime(cutStart)}
+                    ✂ Cut In {fmtTimePrecise(cutStart)}
                   </div>
                 </div>
               )}
 
               {/* Cut End Handle (Red / Coral) */}
               {isCutEnabled && (
-                <div
-                  onMouseDown={onMouseDown('cut-end')}
-                  style={{
-                    position: 'absolute',
-                    top: 0, bottom: 0,
-                    left: `calc(${cutEndPct}% - ${HANDLE_W / 2}px)`,
-                    width: `${HANDLE_W}px`,
-                    cursor: 'ew-resize',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 11,
-                  }}
-                >
+                <div onPointerDown={onHandlePointerDown('cut-end')} style={handleStyle(cutEndPct, 11)}>
                   <div style={{
                     width: '3.5px', height: '100%',
                     background: isDark ? 'hsl(0 85% 60%)' : 'hsl(0 85% 50%)',
@@ -852,7 +860,7 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
                     whiteSpace: 'nowrap',
                     boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
                   }}>
-                    ✂ Cut Out {fmtTime(cutEnd)}
+                    ✂ Cut Out {fmtTimePrecise(cutEnd)}
                   </div>
                 </div>
               )}
@@ -926,25 +934,11 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
               }}>
                 Trim Start:
               </span>
-              <input
-                type="text"
-                value={fmtTime(trimStart)}
-                onChange={(e) => {
-                  const t = parseTime(e.target.value)
-                  if (t !== null && t >= 0 && t < trimEnd - 0.5) {
-                    userAdjustedRef.current = true
-                    setTrimStart(t)
-                  }
-                }}
-                style={{
-                  width: '68px',
-                  background: themeStyles.inputBg,
-                  border: themeStyles.inputBorder,
-                  color: themeStyles.inputText,
-                  padding: '4px 6px', borderRadius: '6px',
-                  fontSize: '.8rem', fontFamily: 'JetBrains Mono, monospace',
-                  textAlign: 'center', fontWeight: 600,
-                }}
+              <TimeInput
+                value={trimStart}
+                onCommit={commitHandle('start')}
+                ariaLabel="Trim start time"
+                style={trimInputStyle}
               />
             </div>
 
@@ -959,40 +953,17 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
               }}>
                 Trim End:
               </span>
-              <input
-                type="text"
-                value={fmtTime(trimEnd)}
-                onChange={(e) => {
-                  const t = parseTime(e.target.value)
-                  if (t !== null && t > trimStart + 0.5 && t <= duration) {
-                    userAdjustedRef.current = true
-                    setTrimEnd(t)
-                  }
-                }}
-                style={{
-                  width: '68px',
-                  background: themeStyles.inputBg,
-                  border: themeStyles.inputBorder,
-                  color: themeStyles.inputText,
-                  padding: '4px 6px', borderRadius: '6px',
-                  fontSize: '.8rem', fontFamily: 'JetBrains Mono, monospace',
-                  textAlign: 'center', fontWeight: 600,
-                }}
+              <TimeInput
+                value={trimEnd}
+                onCommit={commitHandle('end')}
+                ariaLabel="Trim end time"
+                style={trimInputStyle}
               />
             </div>
 
             {/* Toggle Remove Middle Section */}
             <button
-              onClick={() => {
-                const next = !isCutEnabled
-                setIsCutEnabled(next)
-                userAdjustedRef.current = true
-                if (next && (cutEnd <= cutStart || cutStart < trimStart || cutEnd > trimEnd)) {
-                  const segDur = trimEnd - trimStart
-                  setCutStart(trimStart + segDur * 0.3)
-                  setCutEnd(trimStart + segDur * 0.7)
-                }
-              }}
+              onClick={() => setSel(toggleCut)}
               style={{
                 marginLeft: 'auto',
                 display: 'flex', alignItems: 'center', gap: '6px',
@@ -1045,25 +1016,11 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
             <span style={{ fontSize: '.74rem', color: themeStyles.textMuted, fontWeight: 600 }}>
               From
             </span>
-            <input
-              type="text"
-              value={fmtTime(cutStart)}
-              onChange={(e) => {
-                const t = parseTime(e.target.value)
-                if (t !== null && t >= trimStart && t < cutEnd - 0.3) {
-                  userAdjustedRef.current = true
-                  setCutStart(t)
-                }
-              }}
-              style={{
-                width: '68px',
-                background: themeStyles.inputBg,
-                border: `1.5px solid ${isDark ? 'hsl(0 75% 55% / 0.4)' : 'hsl(0 80% 60% / 0.4)'}`,
-                color: themeStyles.inputText,
-                padding: '3px 6px', borderRadius: '6px',
-                fontSize: '.78rem', fontFamily: 'JetBrains Mono, monospace',
-                textAlign: 'center', fontWeight: 600,
-              }}
+            <TimeInput
+              value={cutStart}
+              onCommit={commitHandle('cut-start')}
+              ariaLabel="Cut start time"
+              style={cutInputStyle}
             />
           </div>
 
@@ -1074,25 +1031,11 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
             <span style={{ fontSize: '.74rem', color: themeStyles.textMuted, fontWeight: 600 }}>
               To
             </span>
-            <input
-              type="text"
-              value={fmtTime(cutEnd)}
-              onChange={(e) => {
-                const t = parseTime(e.target.value)
-                if (t !== null && t > cutStart + 0.3 && t <= trimEnd) {
-                  userAdjustedRef.current = true
-                  setCutEnd(t)
-                }
-              }}
-              style={{
-                width: '68px',
-                background: themeStyles.inputBg,
-                border: `1.5px solid ${isDark ? 'hsl(0 75% 55% / 0.4)' : 'hsl(0 80% 60% / 0.4)'}`,
-                color: themeStyles.inputText,
-                padding: '3px 6px', borderRadius: '6px',
-                fontSize: '.78rem', fontFamily: 'JetBrains Mono, monospace',
-                textAlign: 'center', fontWeight: 600,
-              }}
+            <TimeInput
+              value={cutEnd}
+              onCommit={commitHandle('cut-end')}
+              ariaLabel="Cut end time"
+              style={cutInputStyle}
             />
           </div>
 
@@ -1107,7 +1050,7 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
           </div>
 
           <button
-            onClick={() => setIsCutEnabled(false)}
+            onClick={() => setSel((prev) => ({ ...prev, cutEnabled: false }))}
             style={{
               background: 'transparent',
               border: 'none',
@@ -1131,13 +1074,13 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Volume2 size={13} style={{ color: isDark ? 'hsl(215 80% 65%)' : 'hsl(215 90% 48%)' }} />
           <span>Keeps:</span>
-          {isCutEnabled ? (
+          {activeCut ? (
             <span style={{ fontWeight: 600, color: themeStyles.textPrimary }}>
-              [{fmtTime(trimStart)} – {fmtTime(cutStart)}] + [{fmtTime(cutEnd)} – {fmtTime(trimEnd)}]
+              [{fmtTimePrecise(trimStart)} – {fmtTimePrecise(activeCut[0])}] + [{fmtTimePrecise(activeCut[1])} – {fmtTimePrecise(trimEnd)}]
             </span>
           ) : (
             <span style={{ fontWeight: 600, color: themeStyles.textPrimary }}>
-              [{fmtTime(trimStart)} – {fmtTime(trimEnd)}]
+              [{fmtTimePrecise(trimStart)} – {fmtTimePrecise(trimEnd)}]
             </span>
           )}
         </div>
@@ -1194,63 +1137,49 @@ export default function AudioTrimmer({ file, fileName, onConfirm, onSkip, isProc
         </button>
 
         {/* Process Recording / Full Audio */}
-        {(() => {
-          const hasManualTrim = duration > 0 && userAdjustedRef.current && (trimStart > 0.05 || Math.abs(trimEnd - duration) > 0.05)
-          const hasCut = isCutEnabled && cutEnd > cutStart + 0.05
-          const hasEdit = hasManualTrim || hasCut
-
-          return (
-            <button
-              onClick={() => {
-                if (hasEdit && duration > 0) {
-                  onConfirm(
-                    hasManualTrim && trimStart > 0.05 ? trimStart : 0,
-                    hasManualTrim && Math.abs(trimEnd - duration) > 0.05 ? trimEnd : duration,
-                    hasCut ? cutStart : undefined,
-                    hasCut ? cutEnd : undefined
-                  )
-                } else {
-                  // User did not intentionally trim the audio or preview probe was unconstrained.
-                  // Skip appending trim boundaries so backend processes the complete recording.
-                  onSkip()
-                }
-              }}
-              disabled={loading || isProcessing || (duration > 0 && effectiveDuration < 0.5)}
-              style={{
-                flex: 1,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-                padding: '0.62rem 1.25rem',
-                borderRadius: '10px',
-                background: isDark
-                  ? 'linear-gradient(135deg, hsl(215 80% 50%), hsl(255 75% 58%))'
-                  : 'linear-gradient(135deg, hsl(215 85% 48%), hsl(250 80% 54%))',
-                border: 'none',
-                color: '#ffffff',
-                fontSize: '.88rem', fontWeight: 700,
-                cursor: loading || isProcessing || (duration > 0 && effectiveDuration < 0.5) ? 'not-allowed' : 'pointer',
-                opacity: loading || isProcessing || (duration > 0 && effectiveDuration < 0.5) ? 0.55 : 1,
-                transition: 'all .16s ease',
-                boxShadow: isDark
-                  ? '0 4px 16px hsl(215 80% 50% / 0.4)'
-                  : '0 4px 14px hsl(215 80% 45% / 0.28)',
-              }}
-            >
-              {isProcessing ? <Loader size={15} className="animate-spin" /> : (hasEdit ? <Scissors size={15} /> : <Check size={15} />)}
-              {isProcessing
-                ? 'Processing Recording…'
-                : (hasEdit ? 'Process Trimmed Audio' : 'Process Full Recording')}
-              {!isProcessing && (hasEdit ? effectiveDuration : duration) > 0 && (
-                <span style={{
-                  fontSize: '.72rem', fontWeight: 700,
-                  background: 'rgba(255, 255, 255, 0.22)',
-                  padding: '2px 8px', borderRadius: '999px', marginLeft: '4px',
-                }}>
-                  {fmtTime(hasEdit ? effectiveDuration : duration)}
-                </span>
-              )}
-            </button>
-          )
-        })()}
+        <button
+          onClick={() => {
+            if (editSelection) {
+              onConfirm(editSelection)
+            } else {
+              // Nothing trimmed (or duration unknown): let the server process the complete recording.
+              onSkip()
+            }
+          }}
+          disabled={loading || isProcessing || (duration > 0 && effectiveDuration < 0.5)}
+          style={{
+            flex: 1,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+            padding: '0.62rem 1.25rem',
+            borderRadius: '10px',
+            background: isDark
+              ? 'linear-gradient(135deg, hsl(215 80% 50%), hsl(255 75% 58%))'
+              : 'linear-gradient(135deg, hsl(215 85% 48%), hsl(250 80% 54%))',
+            border: 'none',
+            color: '#ffffff',
+            fontSize: '.88rem', fontWeight: 700,
+            cursor: loading || isProcessing || (duration > 0 && effectiveDuration < 0.5) ? 'not-allowed' : 'pointer',
+            opacity: loading || isProcessing || (duration > 0 && effectiveDuration < 0.5) ? 0.55 : 1,
+            transition: 'all .16s ease',
+            boxShadow: isDark
+              ? '0 4px 16px hsl(215 80% 50% / 0.4)'
+              : '0 4px 14px hsl(215 80% 45% / 0.28)',
+          }}
+        >
+          {isProcessing ? <Loader size={15} className="animate-spin" /> : (hasEdit ? <Scissors size={15} /> : <Check size={15} />)}
+          {isProcessing
+            ? 'Processing Recording…'
+            : (hasEdit ? 'Process Trimmed Audio' : 'Process Full Recording')}
+          {!isProcessing && (hasEdit ? effectiveDuration : duration) > 0 && (
+            <span style={{
+              fontSize: '.72rem', fontWeight: 700,
+              background: 'rgba(255, 255, 255, 0.22)',
+              padding: '2px 8px', borderRadius: '999px', marginLeft: '4px',
+            }}>
+              {fmtTime(hasEdit ? effectiveDuration : duration)}
+            </span>
+          )}
+        </button>
       </div>
     </div>
   )

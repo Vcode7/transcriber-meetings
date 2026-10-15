@@ -47,6 +47,8 @@ from tasks.pipeline import (
     _recover_gpu_and_run_llm,
     _generic_speaker_labels,
     _speaker_confidence,
+    _load_speaker_hints,
+    _copy_turn_flags,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,7 +235,8 @@ async def _run_reidentify_impl(
     await _update_status_safe(recording_id, "processing", {"progress": "diarizing"})
 
     try:
-        diar_segs = await loop.run_in_executor(None, diarize, file_path)
+        speaker_hints = await _load_speaker_hints(recording_id, participant_voice_ids)
+        diar_segs = await loop.run_in_executor(None, lambda: diarize(file_path, **speaker_hints))
         logger.info(
             f"[ReID] {recording_id} — Diarization OK: {len(diar_segs)} segments "
             f"({'pyannote' if is_pyannote_available() else 'energy'})"
@@ -346,6 +349,8 @@ async def _run_reidentify_impl(
                 voice_profiles=voice_profiles,
                 similarity_threshold=threshold,
                 embedding_model=active_embedding_model,
+                # Profiles are only the meeting's participants when restricted.
+                participants_selected=bool(restrict_to_meeting and participant_voice_ids),
             ),
         )
         logger.info(f"[ReID] {recording_id} — Speaker ID OK: {len(identified_segs)} segments")
@@ -421,8 +426,7 @@ async def _run_reidentify_impl(
             "avg_logprob": seg.get("avg_logprob", 0.0),
             "speaker_confidence": _speaker_confidence(seg),
         }
-        if seg.get("speaker_refined"):
-            final_seg["speaker_refined"] = True
+        _copy_turn_flags(seg, final_seg)
         final_segments.append(final_seg)
 
     speakers_detected = []

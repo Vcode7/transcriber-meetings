@@ -42,4 +42,6 @@ def test_generate_mom_from_rom_schema_fields(monkeypatch):
     assert len(mom_out["points_discussed"]) > 0
     assert len(mom_out["action_items"]) > 0
     assert mom_out["action_items"][0]["owner"] == "Vikas"
-    assert mom_out["action_items"][0]["deadline"] == "2026-08-07"
+    # The action item states no deadline; a date mentioned elsewhere in the point is not its deadline.
+    from services.agenda_action_points import NOT_SPECIFIED
+    assert mom_out["action_items"][0]["deadline"] == NOT_SPECIFIED

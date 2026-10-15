@@ -124,6 +124,22 @@ def test_stage2_carry_attribution_unions_owners_and_drops_llm_only_names():
     assert ep["owner_transcript_excerpt"].splitlines()[0].startswith("[T1 |")
 
 
+def test_stage2_action_sources_limit_inherited_actions_but_not_owners():
+    s1 = [
+        {"id": "a", "speakers": ["Ravi"], "action_owner": "Ravi", "owner_confidence": "high",
+         "action_items": [{"task": "Float the tender", "assignee": "Ravi"}]},
+        {"id": "b", "speakers": ["Meena"], "action_owner": None, "action_items": []},
+    ]
+    ep = {"speakers": [], "action_items": [{"task": "LLM-proposed task", "assignee": "Ravi"}]}
+
+    # "a" already gave its action items to another point: none are inherited, and the LLM's
+    # own proposal is not used as a substitute.
+    _carry_stage1_attribution(ep, s1, allow_llm_actions=True, action_sources=[])
+
+    assert ep["action_items"] == []
+    assert ep["action_owner"] == "Ravi"
+
+
 def test_stage2_llm_invented_owner_is_marked_low():
     ep = {"speakers": [], "action_owner": "Bob"}
     _carry_stage1_attribution(ep, [{"id": "a", "speakers": ["Alice"], "action_owner": None}])

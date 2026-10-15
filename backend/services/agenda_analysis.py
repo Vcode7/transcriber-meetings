@@ -5,7 +5,8 @@ Before agendas are finalised the whole discussion (Stage 2 points) is analysed:
 
 1. every point is embedded with the active embedding model (trained variant if selected);
 2. related points are grouped chronologically and near-duplicates are flagged;
-3. points are classified as decision / action item / question / risk / discussion;
+3. points are classified as decision / action item / question / risk / discussion (from their
+   Stage 2 type when the enhancement model or the user set one);
 4. the LLM writes one titled topic per group, citing the points behind every statement;
 5. topics are validated for relevance, duplication, coverage and unsupported facts;
 6. topics are matched to existing agendas by semantic similarity, with scores and evidence.
@@ -24,12 +25,14 @@ import numpy as np
 
 from services.fact_grounding import (
     content_tokens,
+    drop_unsupported_sentences,
     fact_tokens,
     source_facts,
     split_sentences,
     token_overlap,
     unsupported_facts,
 )
+from services.point_classification import ACTION_RE, DECISION_RE, QUESTION_RE, RISK_RE, analysis_type_from_stage2
 
 logger = logging.getLogger(__name__)
 
@@ -76,19 +79,6 @@ _TYPE_ALIASES = {
     "discussion": "discussion", "general_discussion": "discussion", "update": "discussion", "information": "discussion",
     "info": "discussion", "status_update": "discussion",
 }
-_DECISION_RE = re.compile(
-    r"\b(decided|decision|agreed|approved|approval\s+(?:was\s+)?(?:given|granted)|finali[sz]ed|confirmed|"
-    r"resolved|concluded|rejected|signed\s+off|sign-off)\b", re.IGNORECASE)
-_ACTION_RE = re.compile(
-    r"\b(will\s+(?:send|share|prepare|submit|update|review|complete|arrange|provide|check|coordinate|schedule|draft|"
-    r"finali[sz]e|follow)|to\s+be\s+(?:done|completed|shared|sent|prepared|submitted|reviewed)|assigned|"
-    r"responsible\s+for|needs?\s+to|has\s+to|have\s+to|action\s+item|was\s+asked\s+to|committed\s+to)\b", re.IGNORECASE)
-_RISK_RE = re.compile(
-    r"\b(risks?|concerns?|issues?|delay(?:s|ed)?|blockers?|blocked|dependenc(?:y|ies)|bottlenecks?|shortages?|overruns?|"
-    r"escalat\w*|problems?|challenges?|threats?|non-?compliance)\b", re.IGNORECASE)
-_QUESTION_RE = re.compile(
-    r"\?|\b(open\s+question|unclear|to\s+be\s+clarified|clarification|unresolved|pending\s+decision|whether)\b",
-    re.IGNORECASE)
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*|[^\sA-Za-z0-9]+|\s+")
 
 
@@ -236,14 +226,14 @@ def _normalize_type(value: Any) -> Optional[str]:
 def heuristic_classification(point: Dict[str, Any]) -> Dict[str, Any]:
     text = _point_text(point)
     types = []
-    if _DECISION_RE.search(text):
+    if DECISION_RE.search(text):
         types.append("decision")
     owner = str(point.get("action_owner") or "").strip().lower()
-    if point.get("action_items") or (owner and owner not in ("none", "null", "n/a", "unassigned")) or _ACTION_RE.search(text):
+    if point.get("action_items") or (owner and owner not in ("none", "null", "n/a", "unassigned")) or ACTION_RE.search(text):
         types.append("action_item")
-    if _RISK_RE.search(text):
+    if RISK_RE.search(text):
         types.append("risk")
-    if _QUESTION_RE.search(text):
+    if QUESTION_RE.search(text):
         types.append("question")
     primary = types[0] if types else "discussion"
     return {"primary_type": primary, "types": types or ["discussion"], "evidence": "", "source": "heuristic"}
@@ -266,10 +256,19 @@ def _classification_batches(points: List[Dict[str, Any]]) -> List[List[Dict[str,
 
 
 def classify_points(provider, points: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """{point_id: {primary_type, types, evidence, source}}; LLM first, heuristic fallback."""
+    """{point_id: {primary_type, types, evidence, source}}: the Stage 2 type when a model or a
+    person set it, otherwise LLM classification with a heuristic fallback."""
     results: Dict[str, Dict[str, Any]] = {}
     by_id = {str(p["id"]): p for p in points}
-    for batch in _classification_batches(points):
+    pending = []
+    for p in points:
+        stage2 = analysis_type_from_stage2(p)
+        if stage2:
+            results[str(p["id"])] = stage2
+        else:
+            pending.append(p)
+    pending_ids = {str(p["id"]) for p in pending}
+    for batch in _classification_batches(pending):
         payload = [{"id": str(p["id"]), "text": _point_text(p)} for p in batch]
         try:
             data = provider.classify_discussion_points(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -281,7 +280,7 @@ def classify_points(provider, points: List[Dict[str, Any]]) -> Dict[str, Dict[st
                 continue
             pid = str(item.get("point_id") or item.get("id") or "").strip()
             primary = _normalize_type(item.get("primary_type") or item.get("type"))
-            if pid not in by_id or primary is None:
+            if pid not in pending_ids or primary is None:
                 continue
             types = [t for t in (_normalize_type(v) for v in item.get("types") or []) if t]
             types = list(dict.fromkeys([primary] + types))
@@ -439,13 +438,6 @@ def _strip_unsupported_words(text: str, facts: set) -> str:
     return re.sub(r"\s+", " ", "".join(kept)).strip(" -–—:,;")
 
 
-def _filter_sentences(text: str, facts: set) -> Tuple[str, List[str]]:
-    kept, removed = [], []
-    for sentence in split_sentences(text):
-        (removed if unsupported_facts(sentence, facts) else kept).append(sentence)
-    return " ".join(kept), removed
-
-
 def validate_topics(
     topics: List[Dict[str, Any]],
     points_by_id: Dict[str, Dict[str, Any]],
@@ -582,7 +574,7 @@ def validate_topics(
                                                       "text": topic["title"], "unsupported": missing})
             topic["title"] = stripped if len(stripped.split()) >= 2 else _fallback_title(members)
         for field in ("description", "supporting_context"):
-            text, removed = _filter_sentences(topic[field], facts)
+            text, removed = drop_unsupported_sentences(topic[field], facts)
             if removed:
                 report["unsupported_removed"].append({"topic": topic["title"], "field": field,
                                                       "text": " ".join(removed), "unsupported": unsupported_facts(" ".join(removed), facts)})

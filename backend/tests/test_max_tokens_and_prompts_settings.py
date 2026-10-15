@@ -367,7 +367,8 @@ Third paragraph sentence seven. Third paragraph sentence eight. Third paragraph 
     assert sentences[0] == "First paragraph sentence one."
     assert sentences[6] == "Third paragraph sentence seven."
 
-    # Test 2: Fallback in generate_mom_overview produces single paragraph with 5-7 sentences
+    # Test 2: Fallback in generate_mom_overview (no LLM text) is a single paragraph that states only
+    # known facts — it never pads to 5-7 sentences with invented outcomes or consensus.
     with patch("services.ai_provider.get_provider", side_effect=RuntimeError("Provider offline")):
         overview = rom_srv.generate_mom_overview(
             ["Discussion point 1", "Discussion point 2"],
@@ -376,15 +377,14 @@ Third paragraph sentence seven. Third paragraph sentence eight. Third paragraph 
     intro = overview["introduction"]
     conclusion = overview["conclusion"]
 
-    assert "\n" not in intro
-    assert "\r" not in intro
-    intro_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', intro) if s.strip()]
-    assert 5 <= len(intro_sentences) <= 7
-
-    assert "\n" not in conclusion
-    assert "\r" not in conclusion
-    conclusion_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', conclusion) if s.strip()]
-    assert 5 <= len(conclusion_sentences) <= 7
+    for text_value in (intro, conclusion):
+        assert text_value
+        assert "\n" not in text_value
+        assert "\r" not in text_value
+        assert 1 <= len([s for s in re.split(r'(?<=[.!?])\s+', text_value) if s.strip()]) <= 7
+    assert intro == "This record covers 2 discussion point(s) from 'Test Recording' with Alice, Bob."
+    for invented in ("consensus", "finalized", "alignment", "milestone"):
+        assert invented not in (intro + " " + conclusion).lower()
 
     # Test 3: QwenProvider._parse_mom_json also enforces single paragraph 5-7 sentences
     provider = QwenProvider.__new__(QwenProvider)

@@ -113,6 +113,8 @@ class VectorStore:
         # Model / dimension the stored vectors were produced with (from collection metadata).
         self._stored_model: Optional[str] = None
         self._stored_dim: int = 0
+        # (vector count, model) -> mean embedding, see centroid()
+        self._centroid_cache: Optional[tuple] = None
 
     # ── Model consistency ─────────────────────────────────────────────────────
 
@@ -646,6 +648,41 @@ class VectorStore:
             expanded.append(entry)
 
         return expanded
+
+    def centroid(self) -> Optional[np.ndarray]:
+        """Mean of the collection's L2-normalised embeddings (None when empty or unavailable).
+
+        For a normalised query q, ``q @ centroid()`` is exactly q's average cosine similarity to
+        every chunk in the collection — the baseline a relevant chunk must clearly exceed (see
+        services/rom_retrieval.py). Cached until the vector count or the active model changes.
+        """
+        with collection_lock(self._collection_name):
+            try:
+                # The query vectors come from the active model, so the stored vectors must too.
+                self._ensure_current()
+            except Exception as e:
+                logger.warning(f"[VectorStore] '{self._collection_name}' centroid unavailable: {e}")
+                return None
+            if self._collection is None:
+                return None
+            count = self._collection.count()
+            if count == 0:
+                return None
+            key = (count, _active_model_name())
+            if self._centroid_cache and self._centroid_cache[0] == key:
+                return self._centroid_cache[1]
+            try:
+                embeddings = self._collection.get(include=["embeddings"]).get("embeddings")
+            except Exception as e:
+                logger.warning(f"[VectorStore] '{self._collection_name}' could not read embeddings: {e}")
+                return None
+            if embeddings is None or len(embeddings) == 0:
+                return None
+            vecs = np.asarray(embeddings, dtype=np.float32)
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            mean = (vecs / np.where(norms < 1e-9, 1.0, norms)).mean(axis=0)
+            self._centroid_cache = (key, mean)
+            return mean
 
     def total_vectors(self) -> int:
         """Return the number of vectors currently in the collection."""

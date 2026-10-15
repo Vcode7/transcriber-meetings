@@ -24,6 +24,9 @@ Models downloaded
      ecapa_tdnn/classifier.ckpt
      ecapa_tdnn/mean_var_norm_emb.ckpt
 
+3. (optional, --with-separation) pyannote/speech-separation-ami-1.0 → runtime/models/speech_separation/
+   Used when OVERLAP_SEPARATION_ENABLED=true to re-transcribe overlapping speech.
+
 NOTE: The community-1 pipeline bundles its own segmentation and embedding
 sub-models as sub-directories. We do NOT download separate wespeaker ONNX
 or segmentation-3.0 repos — everything lives inside audio_context/.
@@ -273,6 +276,52 @@ def download_eres2net_large(models_dir: Path) -> None:
         sys.exit(1)
 
 
+def download_speech_separation(models_dir: Path, token: str) -> None:
+    """
+    Download pyannote/speech-separation-ami-1.0 (ToTaToNet joint diarization +
+    separation, used to re-transcribe overlapping speech) as a self-contained
+    offline snapshot:
+
+      speech_separation/config.yaml                    (pipeline config, rewritten to $model/ paths)
+      speech_separation/separation/pytorch_model.bin   (pyannote/separation-ami-1.0)
+      speech_separation/embedding/pytorch_model.bin    (pyannote/wespeaker-voxceleb-resnet34-LM)
+
+    All three repos are gated: accept their conditions on huggingface.co first.
+    """
+    dest = models_dir / "speech_separation"
+    required = [
+        dest / "config.yaml",
+        dest / "separation" / "pytorch_model.bin",
+        dest / "embedding" / "pytorch_model.bin",
+    ]
+    if all(p.exists() for p in required):
+        logger.info(f"[SKIP] speech-separation-ami-1.0 — all required files present at {dest}")
+        return
+
+    ignore = ["*.gif", "*.png", "*.jpg", "*.md", ".gitattributes"]
+    _hf_snapshot("pyannote/speech-separation-ami-1.0", dest, token, ignore_patterns=ignore)
+    _hf_snapshot("pyannote/separation-ami-1.0", dest / "separation", token, ignore_patterns=ignore)
+    _hf_snapshot("pyannote/wespeaker-voxceleb-resnet34-LM", dest / "embedding", token, ignore_patterns=ignore)
+
+    # Point the pipeline at the local sub-models so nothing is fetched at runtime.
+    import yaml
+    config_path = dest / "config.yaml"
+    with open(config_path, encoding="utf-8") as fp:
+        config = yaml.safe_load(fp)
+    params = config.setdefault("pipeline", {}).setdefault("params", {})
+    params["segmentation"] = "$model/separation"
+    params["embedding"] = "$model/embedding"
+    with open(config_path, "w", encoding="utf-8") as fp:
+        yaml.safe_dump(config, fp, sort_keys=False)
+    logger.info(f"[OK] speech_separation/config.yaml rewritten for offline use")
+
+    still_missing = [p for p in required if not p.exists()]
+    if still_missing:
+        logger.error("[ERROR] After download, still missing:\n" + "\n".join(f"  {p}" for p in still_missing))
+    else:
+        logger.info("[OK] speech_separation/ — all required files present ✓")
+
+
 def verify_models(models_dir: Path) -> bool:
     """Print a summary of all required files and whether they exist."""
     checks = [
@@ -288,6 +337,8 @@ def verify_models(models_dir: Path) -> bool:
     optional_checks = [
         ("eres2net_large/configuration.json",           "ERes2Net-Large config (optional)"),
         ("eres2net_large/eres2net_large_model.ckpt",    "ERes2Net-Large weights (optional)"),
+        ("speech_separation/config.yaml",               "Overlap separation pipeline (optional)"),
+        ("speech_separation/separation/pytorch_model.bin", "Overlap separation model (optional)"),
     ]
     all_ok = True
     print("\n================== Model Verification ==================")
@@ -342,6 +393,11 @@ def main() -> None:
         dest="with_eres2net",
         help="Also download 3D-Speaker ERes2Net-Large speaker embedding model (eres2net_large/)",
     )
+    parser.add_argument(
+        "--with-separation",
+        action="store_true",
+        help="Also download pyannote/speech-separation-ami-1.0 for overlap re-transcription (speech_separation/)",
+    )
     args = parser.parse_args()
 
     token = args.hf_token
@@ -353,7 +409,7 @@ def main() -> None:
 
     mdir = _models_dir(args.models_dir)
 
-    step_count = 3 if args.with_eres2net else 2
+    step_count = 2 + int(args.with_eres2net) + int(args.with_separation)
 
     if not args.skip_diarization:
         logger.info(f"=== Step 1/{step_count}: pyannote/speaker-diarization-community-1 (complete snapshot) ===")
@@ -370,6 +426,10 @@ def main() -> None:
     if args.with_eres2net:
         logger.info(f"=== Step 3/{step_count}: 3D-Speaker ERes2Net-Large (alternative speaker embedding) ===")
         download_eres2net_large(mdir)
+
+    if args.with_separation:
+        logger.info(f"=== Step {step_count}/{step_count}: pyannote/speech-separation-ami-1.0 (overlap separation) ===")
+        download_speech_separation(mdir, token)
 
     ok = verify_models(mdir)
     if ok:

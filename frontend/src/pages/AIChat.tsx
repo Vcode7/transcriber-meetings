@@ -244,9 +244,12 @@ export default function AIChat() {
     }
   }, [editingSessionId])
 
-  // Auto-scroll messages smoothly
+  // Auto-scroll messages smoothly. Scroll only the messages container —
+  // scrollIntoView() also scrolls every ancestor (incl. overflow:hidden layout
+  // wrappers and the page), which pushes the sidebar/header off-screen.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = chatScrollRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [currentMessages, streamedText])
 
   // Close dropdown on click outside

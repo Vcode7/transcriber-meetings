@@ -52,10 +52,12 @@ except ImportError:
 
 try:
     from services.ocr_settings import OcrSettings, get_ocr_settings, settings_fingerprint, use_ocr_settings
+    from services.text_tables import format_markdown_table, strip_layout_markup
 except ImportError:
     from backend.services.ocr_settings import (  # type: ignore[no-redef]
         OcrSettings, get_ocr_settings, settings_fingerprint, use_ocr_settings,
     )
+    from backend.services.text_tables import format_markdown_table, strip_layout_markup  # type: ignore[no-redef]
 
 # Image formats PIL decodes reliably; anything else (JBIG2, JPX, CCITT…) is re-rendered by PyMuPDF.
 _PIL_SAFE_IMAGE_EXTS = {"png", "jpeg", "jpg", "bmp", "gif", "tif", "tiff", "webp"}
@@ -90,6 +92,7 @@ def _ocr_image_file(path: str) -> str:
 
 def _is_duplicate(selectable_text: str, ocr_text: str) -> bool:
     """Check if the OCR extracted text is already contained/duplicated in the selectable text."""
+    ocr_text = strip_layout_markup(ocr_text)  # compare words, not table markers
     clean_sel = re.sub(r'[^a-z0-9]', '', selectable_text.lower())
     clean_ocr = re.sub(r'[^a-z0-9]', '', ocr_text.lower())
     if not clean_ocr:
@@ -212,53 +215,8 @@ def _run_parallel_image_ocr(
 
 
 def _format_table_matrix_to_markdown(matrix: list[list[str]], title: str = "Table") -> str:
-    r"""
-    Format a 2D matrix of cell strings into a clean, structured Markdown table.
-    Ensures:
-      - All rows have the same number of columns (padded with empty strings).
-      - Multi-line cell text (newlines) is converted to '<br>' to preserve single-line row structure.
-      - Pipe characters '|' in cell content are escaped as '\|'.
-      - Header separator row '| --- | --- | ... |' is generated.
-      - Completely empty rows are omitted.
-    """
-    if not matrix:
-        return ""
-
-    cleaned_rows: list[list[str]] = []
-    for row in matrix:
-        cleaned_row = []
-        for cell in row:
-            c_str = str(cell).strip() if cell is not None else ""
-            # Escape pipe characters
-            c_str = c_str.replace("|", "\\|")
-            # Replace internal newlines with <br>
-            c_str = re.sub(r'\r?\n', '<br>', c_str)
-            cleaned_row.append(c_str)
-        # Keep row if at least one cell has non-whitespace text
-        if any(c for c in cleaned_row):
-            cleaned_rows.append(cleaned_row)
-
-    if not cleaned_rows:
-        return ""
-
-    num_cols = max(len(r) for r in cleaned_rows)
-    if num_cols == 0:
-        return ""
-
-    # Pad all rows to num_cols
-    for row in cleaned_rows:
-        while len(row) < num_cols:
-            row.append("")
-
-    lines = []
-    header_row = cleaned_rows[0]
-    lines.append(f"[{title}: {len(cleaned_rows)} rows x {num_cols} cols]")
-    lines.append("| " + " | ".join(header_row) + " |")
-    lines.append("| " + " | ".join(["---"] * num_cols) + " |")
-    for row in cleaned_rows[1:]:
-        lines.append("| " + " | ".join(row) + " |")
-
-    return "\n".join(lines)
+    """Markdown table in the shared format of services/text_tables.py (also used for OCR'd tables)."""
+    return format_markdown_table(matrix, title=title)
 
 
 def _page_image_coverage(page) -> float:

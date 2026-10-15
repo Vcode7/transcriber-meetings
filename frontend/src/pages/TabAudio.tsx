@@ -13,6 +13,7 @@ import TranscriptViewer from '../components/TranscriptViewer'
 import AIChatPanel from '../components/AIChatPanel'
 import ProcessingOverlay from '../components/ProcessingOverlay'
 import PDFButton from '../components/PDFButton'
+import RomSettingsPanel, { useRomPipelineSettings } from '../components/rom/RomSettingsPanel'
 import { useProcessingStore, type ProcessingStage } from '../store/processing'
 import api from '../api/client'
 import { getApiErrorDetail } from '../lib/errors'
@@ -215,6 +216,7 @@ export default function TabAudioPage() {
   }, [recorder.state, recorder.error, stage])
 
   const handleStop = () => { recorder.stop(); setStage('stopped') }
+  const romSettings = useRomPipelineSettings()
 
   const handleSubmit = async () => {
     if (!recorder.audioBlob) return
@@ -224,9 +226,11 @@ export default function TabAudioPage() {
     try {
       const form = new FormData()
       form.append('file', recorder.audioBlob, 'tab_recording.webm')
+      await romSettings.appendTo(form)
       const res = await api.post('/audio/record', form)
       const rId = res.data.recording_id
       setRecordingId(rId)
+      romSettings.resetMeetingInputs()
       addJob({
         jobId: rId,
         source: 'tab-audio',
@@ -679,6 +683,11 @@ export default function TabAudioPage() {
                 </button>
               )}
             </div>
+
+            {/* ROM settings — chosen before or while recording; the ROM pipeline starts after transcription */}
+            {(stage === 'idle' || isRecording || stage === 'stopped') && (
+              <RomSettingsPanel state={romSettings} />
+            )}
 
             {/* How it works */}
             {stage === 'idle' && !recorder.error && (

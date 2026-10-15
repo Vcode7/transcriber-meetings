@@ -22,6 +22,7 @@ from docx import Document as DocxDocument
 from docx.shared import Inches
 
 from services.rom_service import rom_service, get_stage1_progress as _get_stage1_progress
+from services.action_importance import carry_importance, format_importance, load_min_importance, passes_importance
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/rom", tags=["rom"])
@@ -67,18 +68,27 @@ def _owner_with_marker(owner: str, owner_confidence: Optional[str]) -> str:
 
 
 def _action_point_owner_cell(ap: dict, agenda_mode: bool) -> str:
-    """Owner/deadline cell of an action point row in the DOCX export.
+    """Owner/deadline (and importance) cell of an action point row in the DOCX export.
     Agenda-level action points always state both ("Not specified" when the meeting did not)."""
     assignee = ap.get("assignee") or ap.get("owner") or ""
     deadline = ap.get("deadline") or ""
+    importance = format_importance(ap)
+    importance_str = f" [Importance: {importance}]" if importance else ""
     if agenda_mode:
         from services.agenda_action_points import NOT_SPECIFIED
         owner_str = _owner_with_marker(assignee or NOT_SPECIFIED, ap.get("owner_confidence"))
-        return f"{owner_str} [Due: {deadline or NOT_SPECIFIED}]"
+        return f"{owner_str} [Due: {deadline or NOT_SPECIFIED}]{importance_str}"
     owner_str = _owner_with_marker(assignee, ap.get("owner_confidence")) if assignee else "-"
     if deadline and str(deadline).lower() not in ("none", "n/a", "null", "asap", ""):
         owner_str += f" [Due: {deadline}]"
-    return owner_str
+    return owner_str + importance_str
+
+
+def _mom_deadline(item: dict) -> str:
+    """Deadline stored in the MoM table: "Not specified" when the meeting stated none (never an invented "ASAP")."""
+    from services.agenda_action_points import NOT_SPECIFIED, is_unspecified
+    value = item.get("deadline")
+    return NOT_SPECIFIED if is_unspecified(value) else str(value).strip()
 
 
 def style_table_header_bold(table):
@@ -112,7 +122,7 @@ class Stage2Request(BaseModel):
     meeting_context_top_k: int = Field(default=5, ge=0, le=30)
     global_context_top_k: int = Field(default=3, ge=0, le=30)
     discussion_window_size: int = Field(default=5, ge=3, le=50)
-    min_similarity_threshold: Optional[float] = Field(default=0.80, ge=0.0, le=1.0)
+    min_similarity_threshold: Optional[float] = Field(default=0.60, ge=0.0, le=1.0, description="Optional raw-cosine floor; relevance is decided by the store-relative cutoff")
     process_all_together: Optional[bool] = Field(default=None, description="If True, process all discussion points together in a single call")
     reference_example_points: Optional[List[str]] = Field(default=None, description="Style-only reference example points")
     previous_meeting_mode: str = Field(default="auto", description="Dual mode: 'auto' | 'select' | 'off'")
@@ -130,6 +140,7 @@ class Stage3Request(BaseModel):
     previous_mom_texts: Optional[List[str]] = Field(default=None, description="Extracted text content from previous meeting MoM files (optional)")
     previous_mom_char_limit: int = Field(default=20000, ge=1000, le=100000)
     batch_size: int = Field(default=20, ge=5, le=100, description="Number of discussion points per LLM assignment batch")
+    agenda_from_tables: bool = Field(default=True, description="Extract agenda items from the agenda text's tables only (whole text when it has none)")
 
 class CreateAgendaRequest(BaseModel):
     agenda_text: Optional[str] = None
@@ -139,6 +150,8 @@ class CreateAgendaRequest(BaseModel):
     previous_mom_texts: Optional[List[str]] = Field(default=None)
     previous_mom_char_limit: int = Field(default=20000, ge=1000, le=100000)
     analyze_discussion: bool = Field(default=True, description="Analyse the Stage 2 discussion (group, classify, summarise, validate) before finalising agendas. Without an agenda document the resulting topics become the agendas; otherwise unmatched topics are suggested.")
+    agendas: Optional[List[dict]] = Field(default=None, description="Agendas already extracted/edited by the user (e.g. on the upload page); used as-is instead of extracting from agenda_text")
+    agenda_from_tables: bool = Field(default=True, description="Extract Agenda from Tables: agenda items come from the tables / table-like blocks of agenda_text, ignoring headings and other text. Off (or no table found): the whole text is scanned for lists and other formats.")
 
 class GenerateFinalRomRequest(BaseModel):
     meeting_context_top_k: int = Field(default=5, ge=0, le=30)
@@ -246,6 +259,11 @@ class ManualEditPointRequest(BaseModel):
     polished_text: str = Field(..., min_length=1)
 
 
+class PointClassificationRequest(BaseModel):
+    type: Optional[str] = None
+    include_action_point: Optional[bool] = None
+
+
 class AiEditPointsRequest(BaseModel):
     point_ids: List[str] = Field(..., min_length=1)
     point_details: List[Dict] = Field(..., description="Full point objects for selected points")
@@ -258,6 +276,17 @@ class ConcludePointsRequest(BaseModel):
     point_ids: List[str] = Field(..., min_length=2)
     point_details: List[Dict] = Field(..., description="Full point objects for selected points")
     agenda_context: Optional[str] = None
+
+
+class CondensedPointRequest(BaseModel):
+    version: str = Field(..., description="'short' or 'medium'")
+    point_id: str = Field(..., min_length=1)
+    point_text: Optional[str] = Field(default=None, description="The point's current text (may include unsaved edits)")
+    source_point_ids: Optional[List[str]] = Field(default=None, description="The point's current original point IDs")
+
+
+class ExplainPointRequest(CondensedPointRequest):
+    regenerate: bool = Field(default=False, description="Generate again even if the point has a saved explanation")
 
 
 class AiChatRequest(BaseModel):
@@ -550,6 +579,12 @@ async def generate_stage1(recording_id: str, req: Stage1Request, current_user: d
         "transcript_window_minutes": req.transcript_window_minutes,
         "discussion_points": result.get("discussion_points", []),
         "windows_processed": result.get("windows_processed", 0),
+        # Windows the LLM could not extract, windows re-extracted in parts, and the share of
+        # speech the points cite (None when the points cite no turns).
+        "failed_windows": result.get("failed_windows", []),
+        "split_windows": result.get("split_windows", 0),
+        "coverage": result.get("coverage"),
+        "window_report": result.get("window_report", []),
         "video_ocr_blocks_used": len(video_transcript) if video_transcript else 0,
         "source_type": source_type,
     }
@@ -877,7 +912,7 @@ async def generate_stage2(recording_id: str, req: Stage2Request, current_user: d
     us_row = r.fetchone()
     parallel_concurrency = us_row[0] if us_row and us_row[0] is not None else 2
     
-    # Priority: explicitly passed in request body -> DB user_settings -> default 0.80
+    # Priority: explicitly passed in request body -> DB user_settings -> default 0.60
     min_sim_thresh = req.min_similarity_threshold
     if min_sim_thresh is None and us_row and us_row[1] is not None:
         min_sim_thresh = us_row[1]
@@ -980,6 +1015,11 @@ async def preview_stage2_context(
     elif proc_all_together is None:
         proc_all_together = False
 
+    # Previous-meeting context only counts meetings held on or before this one.
+    rec_row = await _get_recording_or_404(recording_id, user_id, db)
+    created_at_val = rec_row.get("created_at")
+    meeting_date = str(created_at_val)[:10] if created_at_val else ""
+
     loop = asyncio.get_event_loop()
     preview_result = await loop.run_in_executor(
         None,
@@ -996,6 +1036,7 @@ async def preview_stage2_context(
             previous_meeting_id=req.previous_meeting_id,
             previous_meeting_top_k=req.previous_meeting_top_k,
             max_preview_groups=3,
+            meeting_date=meeting_date,
         )
     )
 
@@ -1242,6 +1283,67 @@ async def upload_previous_mom(recording_id: str, file: UploadFile = File(...), c
     return {"mom_text": text_content, "filename": filename}
 
 
+@router.post("/{recording_id}/stage3/agenda-document")
+async def upload_stage3_agenda_document(
+    recording_id: str,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Agenda file for Stage 3: returns its text (for agenda creation, as before). PPT/PDF/DOC(X)
+    files are also kept slide by slide, so Generate Final ROM can extract doc points from them
+    with the PPT Testing logic (services/agenda_doc_points.py)."""
+    user_id = _validate_user_id(current_user)
+    await _get_recording_or_404(recording_id, user_id, db)
+    filename = file.filename or "agenda_document"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    from services.agenda_doc_points import is_agenda_document
+    from services.ppt_insights import extract_document_slides, slides_to_dicts
+
+    loop = asyncio.get_event_loop()
+    try:
+        if is_agenda_document(filename):
+            extracted_text, slides = await loop.run_in_executor(None, lambda: extract_document_slides(content, filename))
+        else:
+            from services.doc_extractor import extract_text_from_bytes
+            extracted_text = await loop.run_in_executor(None, lambda: extract_text_from_bytes(content, filename))
+            slides = []
+    except Exception as exc:
+        logger.error(f"[ROM S3-AgendaDoc] Extraction failed for '{filename}': {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract content from '{filename}': {str(exc)}")
+    if not extracted_text or not extracted_text.strip():
+        raise HTTPException(status_code=422, detail="No usable text could be extracted from the uploaded document.")
+
+    if slides:
+        data = await _get_rom_data(recording_id, user_id, db)
+        docs = [d for d in data.get("agenda_documents") or [] if isinstance(d, dict) and d.get("filename") != filename]
+        docs.append({"filename": filename, "extracted_text": extracted_text, "slides": slides_to_dicts(slides)})
+        data["agenda_documents"] = docs
+        if data.get("final_rom"):
+            data.setdefault("outdated_warnings", {})["final_rom"] = "A new agenda document was uploaded. Regenerate the Final ROM to use its points."
+        await _save_rom_data(recording_id, user_id, data, db)
+
+    return {"filename": filename, "text": extracted_text, "char_count": len(extracted_text), "slide_count": len(slides)}
+
+
+@router.delete("/{recording_id}/stage3/agenda-document")
+async def delete_stage3_agenda_documents(
+    recording_id: str,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Forget the Stage 3 agenda document(s); Final ROM generation then behaves as without one."""
+    user_id = _validate_user_id(current_user)
+    await _get_recording_or_404(recording_id, user_id, db)
+    data = await _get_rom_data(recording_id, user_id, db)
+    if data.pop("agenda_documents", None) is not None:
+        await _save_rom_data(recording_id, user_id, data, db)
+    return {"status": "success"}
+
+
 @router.post("/{recording_id}/stage3/create-agenda")
 async def create_agenda(recording_id: str, req: CreateAgendaRequest, current_user: dict = Depends(get_current_user), db=Depends(get_db)):
     """Step 1 of Stage 3: Generate agendas only. Does NOT map discussion points."""
@@ -1275,6 +1377,8 @@ async def create_agenda(recording_id: str, req: CreateAgendaRequest, current_use
             previous_mom_texts=previous_mom_texts,
             polished_points=data["stage2"]["polished_points"],
             analyze_discussion=req.analyze_discussion,
+            provided_agendas=req.agendas,
+            agenda_from_tables=req.agenda_from_tables,
         )
     )
 
@@ -1288,6 +1392,8 @@ async def create_agenda(recording_id: str, req: CreateAgendaRequest, current_use
         # Discussion analysis (point types, validated topics, matches) and topics offered as new agendas
         "discussion_analysis": result.get("discussion_analysis"),
         "suggested_agendas": result.get("suggested_agendas", []),
+        # How the agenda text was read: {"mode": "tables" | "document", "table_count": n}
+        "agenda_extraction": result.get("agenda_extraction"),
         # Preserve existing doc points if any
         "agenda_doc_points": existing_s3.get("agenda_doc_points", {}),
         # Reset mapping data since agendas changed
@@ -1529,6 +1635,7 @@ def _action_point_source_agendas(data: dict) -> List[dict]:
         for point in agenda.get("discussion_points") or []:
             if isinstance(point, dict):
                 present.update(x for x in (point.get("id"), point.get("original_point_id")) if x)
+                present.update(x for x in point.get("original_point_ids") or [] if x)
     sources = []
     for agenda in agendas:
         missing = [p for p in polished if p.get("id") not in present and mappings.get(p.get("id")) == agenda.get("agenda_id")]
@@ -1581,12 +1688,31 @@ async def generate_final_rom_from_agendas(
     Optionally includes agenda document points.
     Supports skipping agendas from point mapping and including action points."""
     user_id = _validate_user_id(current_user)
-    await _get_recording_or_404(recording_id, user_id, db)
+    rec_row = await _get_recording_or_404(recording_id, user_id, db)
     data = await _get_rom_data(recording_id, user_id, db)
 
     polished_points = data.get("stage2", {}).get("polished_points", [])
     if not polished_points:
         raise HTTPException(status_code=400, detail="Stage 2 must be completed first")
+
+    loop = asyncio.get_event_loop()
+
+    # Agenda document uploaded for Stage 3 → doc points via the PPT Testing analysis (cached on the
+    # document entry). Without one, mapping is exactly as before.
+    agenda_documents = [d for d in data.get("agenda_documents") or [] if isinstance(d, dict) and d.get("slides")]
+    agenda_doc_insights: List[dict] = []
+    meeting_day = None
+    if agenda_documents:
+        from services.agenda_doc_points import analyze_agenda_documents
+        meeting_dt = _parse_meeting_date(str(rec_row.get("created_at") or "")) or datetime.now()
+        meeting_day = meeting_dt.date()
+        infer = _ppt_infer_fn()
+        try:
+            agenda_doc_insights = await loop.run_in_executor(
+                None, lambda: analyze_agenda_documents(agenda_documents, meeting_day, infer))
+        except Exception as exc:
+            logger.warning(f"[ROM S3-Final] Agenda document analysis failed, mapping without doc points: {exc}", exc_info=True)
+            agenda_doc_insights = []
 
     stage3_data = data.get("stage3", {})
     if req.agendas:
@@ -1612,7 +1738,6 @@ async def generate_final_rom_from_agendas(
     mapping_agendas = [a for a in agendas if a.get("agenda_id", "") not in skipped_agenda_ids]
     mapping_expanded = [ea for ea in expanded_agendas if ea.get("agenda_id", "") not in skipped_agenda_ids]
 
-    loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None,
         lambda: rom_service.map_points_to_agendas(
@@ -1629,6 +1754,9 @@ async def generate_final_rom_from_agendas(
             discussion_order=effective_order,
             agenda_timeline=effective_timeline,
             point_types=(stage3_data.get("discussion_analysis") or {}).get("point_types"),
+            agenda_doc_insights=agenda_doc_insights or None,
+            meeting_date=meeting_day,
+            doc_detail="long",  # generate-final-rom produces the long version
         )
     )
 
@@ -1653,6 +1781,10 @@ async def generate_final_rom_from_agendas(
         stage3_updates["skipped_agendas"] = skipped_agendas_map
 
     data["stage3"].update(stage3_updates)
+    if result.get("agenda_document_insights"):
+        data["stage3"]["agenda_document_insights"] = result["agenda_document_insights"]
+    else:
+        data["stage3"].pop("agenda_document_insights", None)
 
     from services.rom_service import apply_speaker_mappings_to_final_rom
 
@@ -1678,6 +1810,9 @@ async def generate_final_rom_from_agendas(
             fallback = dict(a)
             fallback["discussion_points"] = []
             final_agendas_ordered.append(fallback)
+    # Agendas the mapping added itself ("Other Discussion": points matching no agenda) go last.
+    known_agenda_ids = {a.get("agenda_id", "") for a in agendas}
+    final_agendas_ordered.extend(a for a in mapped_agendas if a.get("agenda_id", "") not in known_agenda_ids)
 
     # Action points per agenda: every non-skipped agenda when requested globally, otherwise the
     # agendas individually selected in the previous Final ROM (regenerated from the new points).
@@ -1765,6 +1900,7 @@ async def generate_stage3(recording_id: str, req: Stage3Request, current_user: d
             transcript=transcript,
             previous_mom_texts=previous_mom_texts,
             batch_size=req.batch_size,
+            agenda_from_tables=req.agenda_from_tables,
         )
     )
 
@@ -2436,6 +2572,216 @@ async def conclude_points(
     }
 
 
+# ── Short/Medium points: explanation and Expand Point ───────────────────────
+
+_CONDENSED_VERSIONS = ("short", "medium")
+
+
+def _condensed_version(version: str) -> str:
+    version = (version or "").strip().lower()
+    if version not in _CONDENSED_VERSIONS:
+        raise HTTPException(status_code=400, detail="version must be 'short' or 'medium'.")
+    return version
+
+
+def _condense_source_index(data: dict, version: str) -> Dict[str, dict]:
+    """Original (long) points by ID for the points of one Short/Medium version: the snapshot each
+    condensed agenda keeps (``condense_sources``, labelled P1.. as the condense call saw them);
+    for versions generated before snapshots, the long version's points (labelled by agenda
+    position), then the Stage 2 points."""
+    versions = data.get("final_rom_versions") or {}
+    index: Dict[str, dict] = {}
+    for agenda in (versions.get(version) or {}).get("agendas") or []:
+        for src in agenda.get("condense_sources") or []:
+            if isinstance(src, dict) and src.get("id"):
+                index.setdefault(str(src["id"]), src)
+    for agenda in (versions.get("long") or {}).get("agendas") or []:
+        for i, point in enumerate(agenda.get("discussion_points") or [], 1):
+            if isinstance(point, dict) and point.get("id"):
+                index.setdefault(str(point["id"]), {
+                    **point, "label": f"P{i}", "text": point.get("polished_text") or point.get("text") or ""})
+    for point in (data.get("stage2") or {}).get("polished_points") or []:
+        if isinstance(point, dict) and point.get("id"):
+            index.setdefault(str(point["id"]), {**point, "text": point.get("polished_text") or point.get("text") or ""})
+    return index
+
+
+def _find_version_point(data: dict, version: str, point_id: str):
+    """(agenda, point) of a point in one Final ROM version, or (None, None)."""
+    for agenda in ((data.get("final_rom_versions") or {}).get(version) or {}).get("agendas") or []:
+        for point in agenda.get("discussion_points") or []:
+            if isinstance(point, dict) and str(point.get("id")) == str(point_id):
+                return agenda, point
+    return None, None
+
+
+def _patch_version_point(data: dict, version: str, point_id: str, updates: dict, remove: tuple = ()) -> bool:
+    """Apply ``updates`` (and drop the ``remove`` keys) to a point of one Final ROM version, and to
+    the same point in ``final_rom`` when that version is active. False if the version lacks the point."""
+    version_rom = (data.get("final_rom_versions") or {}).get(version)
+    roms = [version_rom]
+    if (data.get("final_rom_active_version") or "long") == version:
+        roms.append(data.get("final_rom"))
+    found = False
+    for rom in roms:
+        for agenda in (rom or {}).get("agendas") or []:
+            for point in agenda.get("discussion_points") or []:
+                if isinstance(point, dict) and str(point.get("id")) == str(point_id):
+                    point.update(copy.deepcopy(updates))
+                    for key in remove:
+                        point.pop(key, None)
+                    found = found or rom is version_rom
+    return found
+
+
+def _condensed_point_request(data: dict, req: CondensedPointRequest):
+    """(version, agenda, stored point, current text, source IDs, sources) of a Short/Medium point
+    request. The client's text and source IDs win (they include unsaved edits); the original
+    points' text always comes from the stored ROM."""
+    version = _condensed_version(req.version)
+    agenda, stored = _find_version_point(data, version, req.point_id)
+    stored = stored or {}
+    point_text = req.point_text if req.point_text is not None else (stored.get("text") or stored.get("polished_text") or "")
+    point_text = point_text.strip()
+    if not point_text:
+        raise HTTPException(status_code=400, detail="The point has no text.")
+    source_ids = [str(s) for s in dict.fromkeys(req.source_point_ids or stored.get("source_point_ids") or []) if s]
+    index = _condense_source_index(data, version)
+    sources = [index[sid] for sid in source_ids if sid in index]
+    if not sources:
+        raise HTTPException(status_code=400, detail="This point has no mapped original points.")
+    return version, agenda or {}, stored, point_text, source_ids, sources
+
+
+async def _save_condensed_point_change(recording_id: str, user_id: str, data: dict, db, version: str) -> None:
+    await _save_rom_data(recording_id, user_id, data, db)
+    if (data.get("final_rom_active_version") or "long") == version:
+        await _sync_final_rom_embeddings(recording_id, user_id, data, db, version=version)
+
+
+@router.post("/{recording_id}/final/explain-point")
+async def explain_condensed_point(
+    recording_id: str,
+    req: ExplainPointRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Explain (on demand) what a Short/Medium point retained, removed and merged from its original
+    points, and why. The explanation is saved on the point; later calls return it unless
+    ``regenerate`` is set.
+    """
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    version, agenda, stored, point_text, _, sources = _condensed_point_request(data, req)
+    notes = stored.get("condense_notes") or []
+    if stored.get("condense_explanation") and not req.regenerate:
+        return {"status": "success", "explanation": stored["condense_explanation"], "notes": notes, "persisted": True}
+
+    loop = asyncio.get_event_loop()
+    try:
+        explanation = await loop.run_in_executor(
+            None,
+            lambda: rom_service.explain_condensed_point(
+                point_text=point_text,
+                sources=sources,
+                notes=notes,
+                version=version,
+                agenda_title=agenda.get("title") or "",
+                is_very_important=bool(stored.get("is_very_important")),
+            )
+        )
+    except Exception as exc:
+        logger.error(f"[ROM] explain-point failed for {req.point_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not generate the explanation: {exc}")
+
+    explanation = {**explanation, "generated_at": datetime.now(timezone.utc).isoformat()}
+    persisted = _patch_version_point(data, version, req.point_id, {"condense_explanation": explanation})
+    if persisted:
+        await _save_rom_data(recording_id, user_id, data, db)
+    return {"status": "success", "explanation": explanation, "notes": notes, "persisted": persisted}
+
+
+@router.post("/{recording_id}/final/expand-point")
+async def expand_condensed_point(
+    recording_id: str,
+    req: CondensedPointRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Expand Point: add 2-3 sentences of detail to a Short/Medium point, taken only from the original
+    points mapped to it and fact-checked, and save the point. ``pre_expand_text`` keeps the text
+    from before the first expansion (Revert).
+    """
+    from services.rom_condense import refresh_mentions
+
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    version, agenda, stored, point_text, source_ids, sources = _condensed_point_request(data, req)
+    if stored.get("is_very_important"):
+        raise HTTPException(status_code=400, detail="Very Important points are kept verbatim and cannot be expanded.")
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: rom_service.expand_condensed_point(
+                point_text=point_text, sources=sources, agenda_title=agenda.get("title") or "")
+        )
+    except Exception as exc:
+        logger.error(f"[ROM] expand-point failed for {req.point_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not expand the point: {exc}")
+
+    added = result["added_sentences"]
+    if not added:
+        return {"status": "success", "point": None, "added_sentences": [],
+                "dropped_sentences": result["dropped_sentences"], "persisted": False}
+
+    updates = {
+        "text": result["text"],
+        "polished_text": result["text"],
+        "source_point_ids": source_ids,
+        "expanded_sentences": list(stored.get("expanded_sentences") or []) + added,
+        "pre_expand_text": stored.get("pre_expand_text") or point_text,
+    }
+    refresh_mentions(updates, sources)
+    persisted = _patch_version_point(data, version, req.point_id, updates)
+    if persisted:
+        await _save_condensed_point_change(recording_id, user_id, data, db, version)
+    return {"status": "success", "point": updates, "added_sentences": added,
+            "dropped_sentences": result["dropped_sentences"], "persisted": persisted}
+
+
+@router.post("/{recording_id}/final/expand-point/revert")
+async def revert_expanded_point(
+    recording_id: str,
+    req: CondensedPointRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """Restore a Short/Medium point's text from before its first expansion and save it."""
+    from services.rom_condense import refresh_mentions
+
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    version = _condensed_version(req.version)
+    _, stored = _find_version_point(data, version, req.point_id)
+    original = (stored or {}).get("pre_expand_text")
+    if not original:
+        raise HTTPException(status_code=400, detail="This point has not been expanded.")
+
+    updates = {"text": original, "polished_text": original}
+    index = _condense_source_index(data, version)
+    sources = [index[str(s)] for s in stored.get("source_point_ids") or [] if str(s) in index]
+    if sources:
+        refresh_mentions(updates, sources)
+    removed = ("pre_expand_text", "expanded_sentences")
+    _patch_version_point(data, version, req.point_id, updates, remove=removed)
+    await _save_condensed_point_change(recording_id, user_id, data, db, version)
+    return {"status": "success", "point": updates, "removed_fields": list(removed)}
+
+
 # ── AI Chat Endpoint ─────────────────────────────────────────────────────────
 
 @router.post("/{recording_id}/final/ai-chat")
@@ -2590,11 +2936,15 @@ async def download_final_docx(
     recording_id: str,
     version: Optional[str] = Query(None),
     include_action_points: Optional[bool] = Query(None),
+    min_importance: Optional[int] = Query(None, ge=0, le=100),
     current_user: dict = Depends(get_current_user),
     db=Depends(get_db)
 ):
     user_id = _validate_user_id(current_user)
     data = await _get_rom_data(recording_id, user_id, db)
+    # Action points below the minimum importance (the query, else the user's setting) are left out.
+    if not isinstance(min_importance, int):
+        min_importance = await load_min_importance(db, user_id)
     from services.rom_service import apply_speaker_mappings_to_final_rom, normalize_action_item, format_action_point_display_text, normalize_action_owner
 
     target_rom = None
@@ -2660,7 +3010,8 @@ async def download_final_docx(
 
                 # Action points of this agenda (shown only when the agenda includes them)
                 agenda_action_points = (
-                    collect_agenda_action_points(a) if _agenda_shows_action_points(a) else []
+                    [ap for ap in collect_agenda_action_points(a) if passes_importance(ap, min_importance)]
+                    if _agenda_shows_action_points(a) else []
                 )
 
                 # First: List all agenda discussion points
@@ -2758,7 +3109,8 @@ async def download_final_docx(
 
                 # Action points of this agenda (shown only when the agenda includes them)
                 agenda_action_points = (
-                    collect_agenda_action_points(a) if _agenda_shows_action_points(a) else []
+                    [ap for ap in collect_agenda_action_points(a) if passes_importance(ap, min_importance)]
+                    if _agenda_shows_action_points(a) else []
                 )
 
                 # First: List all agenda discussion points
@@ -3481,7 +3833,7 @@ async def generate_mom_from_rom(
         if isinstance(item, dict):
             task_str = str(item.get("task") or item.get("item") or item.get("description") or "").strip()
             owner_str = str(item.get("owner", "Unassigned") or "Unassigned").strip()
-            deadline_str = str(item.get("deadline", "ASAP") or "ASAP").strip()
+            deadline_str = _mom_deadline(item)
             if task_str:
                 act_entry = {
                     "task": task_str,
@@ -3491,9 +3843,9 @@ async def generate_mom_from_rom(
                 }
                 if "raw_json" in item:
                     act_entry["raw_json"] = item["raw_json"]
-                norm_actions.append(act_entry)
+                norm_actions.append(carry_importance(item, act_entry))
         elif isinstance(item, str) and item.strip():
-            norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP", "status": "open"})
+            norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": _mom_deadline({}), "status": "open"})
 
     if existing_mom:
         existing_versions = from_json(existing_mom._mapping.get("versions"), [])
@@ -3668,7 +4020,7 @@ async def generate_advanced_mom(
         if isinstance(item, dict):
             task_str = str(item.get("task") or item.get("item") or item.get("description") or "").strip()
             owner_str = str(item.get("owner", "Unassigned") or "Unassigned").strip()
-            deadline_str = str(item.get("deadline", "ASAP") or "ASAP").strip()
+            deadline_str = _mom_deadline(item)
             if task_str:
                 act_entry = {
                     "task": task_str,
@@ -3678,9 +4030,9 @@ async def generate_advanced_mom(
                 }
                 if "raw_json" in item:
                     act_entry["raw_json"] = item["raw_json"]
-                norm_actions.append(act_entry)
+                norm_actions.append(carry_importance(item, act_entry))
         elif isinstance(item, str) and item.strip():
-            norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": "ASAP", "status": "open"})
+            norm_actions.append({"task": item.strip(), "owner": "Unassigned", "deadline": _mom_deadline({}), "status": "open"})
 
     title = advanced_mom.get("title") or existing_mom_dict.get("title") or row.get("filename") or "Minutes of Meeting"
     intro = advanced_mom.get("introduction") or existing_mom_dict.get("introduction") or ""
@@ -3826,17 +4178,21 @@ async def download_enhanced_mom_docx(
             else:
                 doc.add_paragraph(f"• {str(pt)}")
 
-    # Action Items
-    actions = mom_data.get("action_items", [])
+    # Action Items (those below the user's minimum importance are left out)
+    min_importance = await load_min_importance(db, user_id)
+    actions = [a for a in mom_data.get("action_items", []) if passes_importance(a, min_importance)]
     if actions:
         add_bold_heading(doc, "3. Action Items", level=1)
-        tbl = doc.add_table(rows=1, cols=4)
+        show_importance = any(format_importance(a) for a in actions)
+        tbl = doc.add_table(rows=1, cols=5 if show_importance else 4)
         tbl.style = 'Table Grid'
         hdr = tbl.rows[0].cells
         hdr[0].text = "#"
         hdr[1].text = "Action Item"
         hdr[2].text = "Owner"
         hdr[3].text = "Deadline"
+        if show_importance:
+            hdr[4].text = "Importance"
         style_table_header_bold(tbl)
 
         for idx, act in enumerate(actions, 1):
@@ -3845,6 +4201,8 @@ async def download_enhanced_mom_docx(
             r[1].text = act.get("task") or act.get("item") or act.get("description") or "-"
             r[2].text = _owner_with_marker(act.get("owner"), act.get("owner_confidence")) or "Unassigned"
             r[3].text = act.get("deadline") or "ASAP"
+            if show_importance:
+                r[4].text = format_importance(act) or "-"
 
     # Conclusion
     if mom_data.get("conclusion"):
@@ -3956,6 +4314,9 @@ async def merge_stage2_points(
         "references": (merged_result.get("references") if isinstance(merged_result, dict) else None) or list(set(r for p in selected for r in (p.get("references") or []))),
         "action_items": (merged_result.get("action_items") if isinstance(merged_result, dict) else None) or [ai for p in selected for ai in (p.get("action_items") or [])],
     }
+    # Strongest type of the merged points; flagged when any of them contained an action.
+    from services.point_classification import classify_stage2_point
+    classify_stage2_point(merged_point, selected)
 
     # Replace: remove selected points, insert merged at earliest position
     # Unselected points remain completely unchanged and in their original order
@@ -4105,6 +4466,9 @@ async def split_stage2_point(
             "references": sp.get("references", []),
             "action_items": sp.get("action_items", []),
         }
+        for key in ("type", "type_source", "include_action_point", "action_flag_source"):
+            if key in original:
+                new_pt[key] = original[key]
         new_points.append(new_pt)
     
     # Replace original with two new points
@@ -4425,6 +4789,43 @@ async def manual_edit_stage2_point(
     
     return {"status": "success", "updated_point": pt, "change_id": change_id, "rom_data": data}
 
+
+@router.post("/{recording_id}/stage2/point/{point_id}/classification")
+async def set_stage2_point_classification(
+    recording_id: str,
+    point_id: str,
+    req: PointClassificationRequest,
+    current_user: dict = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Set a Stage 2 point's type and/or action flag by hand. The action flag decides which
+    points action points are generated from, so a wrong flag can be corrected here."""
+    from services.point_classification import DISCUSSION_TYPES, normalize_discussion_type
+
+    user_id = _validate_user_id(current_user)
+    data = await _get_rom_data(recording_id, user_id, db)
+    pts = data.get("stage2", {}).get("polished_points", [])
+    pt = next((p for p in pts if p.get("id") == point_id), None)
+    if not pt:
+        raise HTTPException(404, "Point not found")
+    if req.type is None and req.include_action_point is None:
+        raise HTTPException(400, "Provide type and/or include_action_point")
+
+    if req.type is not None:
+        point_type = normalize_discussion_type(req.type)
+        if not point_type:
+            raise HTTPException(400, f"type must be one of: {', '.join(DISCUSSION_TYPES)}")
+        pt["type"], pt["type_source"] = point_type, "user"
+    if req.include_action_point is not None:
+        pt["include_action_point"], pt["action_flag_source"] = bool(req.include_action_point), "user"
+
+    if data.get("final_rom"):
+        data.setdefault("outdated_warnings", {})["final_rom"] = (
+            "Stage 2 point types or action flags were changed. Regenerate the Final ROM or its action points to apply them."
+        )
+    await _save_rom_data(recording_id, user_id, data, db)
+    return {"status": "success", "updated_point": pt, "rom_data": data}
+
 @router.get("/{recording_id}/stage2/training-edits")
 async def get_training_edits(
     recording_id: str,
@@ -4582,18 +4983,16 @@ def _ppt_clear_progress(recording_id: str) -> None:
 
 def _ppt_infer_fn():
     """Synchronous `infer(prompt, max_tokens)` bound to the configured LLM (thinking disabled)."""
-    from services.ai_provider import get_provider
-    provider = get_provider()
-    return lambda prompt, max_tokens: provider._infer(prompt, max_tokens, None, False)
+    from services.agenda_doc_points import provider_infer_fn
+    return provider_infer_fn()
 
 
 def _ppt_slides(uploaded: dict) -> list:
     """Slides for the uploaded document (stored at upload; re-derived for older uploads)."""
-    from services.ppt_insights import Slide, split_into_slides
+    from services.ppt_insights import slides_from_dicts, split_into_slides
     stored = uploaded.get("slides") or []
     if stored:
-        return [Slide(number=s["number"], title=s.get("title", ""), text=s.get("text", ""), kind=s.get("kind", "slide"))
-                for s in stored if isinstance(s, dict)]
+        return slides_from_dicts(stored)
     return split_into_slides(uploaded.get("extracted_text", ""), uploaded.get("filename", ""))
 
 
@@ -4634,34 +5033,11 @@ async def ppt_testing_upload(
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    from services.ppt_insights import split_into_slides
-
-    def _extract() -> tuple:
-        if ext == "pdf":
-            # Page-by-page through the production PDF path (text layer + scanned-page OCR)
-            import tempfile
-            from services.doc_extractor import ocr_pdf_pages_detailed
-            from services.ocr_engine import unload_ocr_engine
-            from services.ocr_settings import get_ocr_settings
-            fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
-            try:
-                with os.fdopen(fd, "wb") as fh:
-                    fh.write(content)
-                text_all, details, total = ocr_pdf_pages_detailed(tmp_path, get_ocr_settings(), max_pages=10_000)
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                unload_ocr_engine()
-            pages = [details[i]["text"] if i in details else "" for i in range(1, total + 1)]
-            return text_all, split_into_slides(text_all, filename, pages=pages)
-        from services.doc_extractor import extract_text_from_bytes
-        text_all = extract_text_from_bytes(content, filename)
-        return text_all, split_into_slides(text_all, filename)
+    from services.ppt_insights import extract_document_slides, slides_to_dicts
 
     try:
-        extracted_text, slides = await asyncio.get_event_loop().run_in_executor(None, _extract)
+        extracted_text, slides = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: extract_document_slides(content, filename))
     except Exception as exc:
         logger.error(f"[PPTTesting] Extraction failed for '{filename}': {exc}")
         raise HTTPException(status_code=500, detail=f"Failed to extract content from '{filename}': {str(exc)}")
@@ -4674,7 +5050,7 @@ async def ppt_testing_upload(
     ppt_testing["uploaded_file"] = {
         "filename": filename,
         "extracted_text": extracted_text,
-        "slides": [{"number": s.number, "title": s.title, "text": s.text, "kind": s.kind} for s in slides],
+        "slides": slides_to_dicts(slides),
     }
     # Clear downstream data when a new file is uploaded
     for key in ("summarization_points", "insight_points", "analysis", "comparison_groups", "final_points",

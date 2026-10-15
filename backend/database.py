@@ -189,6 +189,7 @@ async def connect_db():
                 whisper_parallel_processing INTEGER NOT NULL DEFAULT 1,
                 whisper_parallel_chunk_minutes INTEGER NOT NULL DEFAULT 10,
                 rom_action_generation_chunk_size INTEGER NOT NULL DEFAULT 10,
+                action_point_min_importance INTEGER NOT NULL DEFAULT 0,
                 rom_pipeline_mode TEXT NOT NULL DEFAULT 'base',
                 restrict_reassignment_to_meeting_speakers INTEGER NOT NULL DEFAULT 0,
                 max_tokens_rom_version_short INTEGER NOT NULL DEFAULT 4096,
@@ -384,6 +385,7 @@ async def connect_db():
             "participant_voice_ids TEXT DEFAULT '[]'",
             "use_vocabulary INTEGER DEFAULT 0",
             "speaker_summary TEXT DEFAULT NULL",
+            "expected_speakers INTEGER DEFAULT NULL",
         ):
             try:
                 await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
@@ -444,6 +446,8 @@ async def connect_db():
             ("max_tokens_rom_version_medium", "INTEGER NOT NULL DEFAULT 4096"),
             ("reasoning_mode_short_rom", "INTEGER NOT NULL DEFAULT 0"),
             ("reasoning_mode_action_points", "INTEGER NOT NULL DEFAULT 0"),
+            # NULL = follow the global OVERLAP_SEPARATION_ENABLED setting
+            ("overlap_separation_enabled", "INTEGER DEFAULT NULL"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))
@@ -568,6 +572,19 @@ async def connect_db():
         except Exception:
             pass  # column already exists
 
+        # ── Migration: ROM pipeline settings chosen at capture time + auto-run status ──
+        # rom_settings        — JSON RomPipelineSettings (models/rom_pipeline.py); read by the
+        #                       background ROM run and the ROM page.
+        # rom_pipeline_status — JSON {state, stage, stage_label, message, started_at, finished_at, error}
+        for col_def in (
+            "rom_settings TEXT DEFAULT NULL",
+            "rom_pipeline_status TEXT DEFAULT NULL",
+        ):
+            try:
+                await conn.execute(text(f"ALTER TABLE recordings ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # column already exists
+
         # ── ROM Metadata table & migration (for standalone ROM queries) ───────
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS rom_metadata (
@@ -612,6 +629,15 @@ async def connect_db():
             except Exception:
                 pass  # column already exists
 
+        # ── Migration: audio trim / middle-cut record ─────────────────────────
+        # audio_edit — JSON of the trim/cut applied at upload (routers/audio.py
+        #              apply_edit_request): the client request, keep_ranges on the
+        #              source timeline, and the edited WAV path.  NULL = unedited.
+        try:
+            await conn.execute(text("ALTER TABLE recordings ADD COLUMN audio_edit TEXT DEFAULT NULL"))
+        except Exception:
+            pass  # column already exists
+
 
         # ── Migration: Add ROM settings columns to user_settings ─────────────
         for col_name, col_type in [
@@ -623,8 +649,10 @@ async def connect_db():
             ("rom_separate_action_extraction", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_action_owner_verification", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_action_generation_chunk_size", "INTEGER NOT NULL DEFAULT 10"),
+            # Minimum action-point importance shown/exported (0 = show all), services/action_importance.py
+            ("action_point_min_importance", "INTEGER NOT NULL DEFAULT 0"),
             ("rom_stage2_process_all_together", "INTEGER NOT NULL DEFAULT 0"),
-            ("rom_min_similarity_threshold", "REAL DEFAULT 0.80"),
+            ("rom_min_similarity_threshold", "REAL DEFAULT 0.60"),
             ("rom_pipeline_mode", "TEXT NOT NULL DEFAULT 'base'"),
             ("whisper_batch_size", "INTEGER NOT NULL DEFAULT 8"),
             ("max_tokens_rom_discussion", "INTEGER NOT NULL DEFAULT 4096"),
@@ -640,6 +668,7 @@ async def connect_db():
             ("max_tokens_rom_mom_expansion", "INTEGER NOT NULL DEFAULT 3000"),
             ("max_tokens_rom_agenda_assign_batch", "INTEGER NOT NULL DEFAULT 4096"),
             ("max_tokens_rom_agenda_doc_points", "INTEGER NOT NULL DEFAULT 1024"),
+            ("rom_pipeline_defaults", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_type}"))

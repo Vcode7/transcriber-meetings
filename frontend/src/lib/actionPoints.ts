@@ -1,6 +1,14 @@
 export const NOT_SPECIFIED = 'Not specified'
 
-export interface AgendaActionPoint {
+/** Importance score (40-100%) of an action point, set by backend services/action_importance.py. */
+export interface ActionImportance {
+  importance?: number
+  importance_source?: 'llm' | 'heuristic'
+  importance_reason?: string
+  importance_adjusted?: string
+}
+
+export interface AgendaActionPoint extends ActionImportance {
   task: string
   assignee?: string | null
   owner?: string | null
@@ -15,13 +23,57 @@ export interface AgendaActionPoint {
   description?: string
 }
 
+export interface ImportanceSummary {
+  source: 'llm' | 'heuristic' | 'llm_with_fallback' | 'none'
+  scored: number
+  llm_scored: number
+  capped: number
+}
+
+/** Minimum-importance choices; 0 shows every action point. */
+export const IMPORTANCE_THRESHOLDS = [0, 50, 60, 70, 80, 90] as const
+
+export type ImportanceBand = 'critical' | 'moderate' | 'general'
+
+/** Same bands as the scoring prompt: 80-100 critical, 60-79 moderate, below 60 general. */
+export function importanceBand(score: number): ImportanceBand {
+  if (score >= 80) return 'critical'
+  if (score >= 60) return 'moderate'
+  return 'general'
+}
+
+/** Same rule as the backend: unscored items (built before scoring existed) and a threshold of 0 always pass. */
+export function passesImportance(ap: ActionImportance | null | undefined, minImportance: number): boolean {
+  if (!ap || !(minImportance > 0) || ap.importance === undefined || ap.importance === null) return true
+  const score = Number(ap.importance)
+  return !Number.isFinite(score) || score >= minImportance
+}
+
+/** The action points shown under the threshold, and how many it hides. */
+export function filterByImportance<T extends ActionImportance>(items: T[], minImportance: number): { visible: T[]; hidden: number } {
+  const visible = items.filter(item => passesImportance(item, minImportance))
+  return { visible, hidden: items.length - visible.length }
+}
+
+/** "3 action points below 70% importance hidden" (empty when nothing is hidden). */
+export function hiddenByImportanceText(hidden: number, minImportance: number): string {
+  if (hidden <= 0) return ''
+  return `${hidden} action point${hidden === 1 ? '' : 's'} below ${minImportance}% importance hidden`
+}
+
 export interface ActionPointAudit {
   source: string
+  // flagged_groups: only points Stage 2 flagged, in groups of 5; all_points: older Final ROMs without flags
+  mode?: 'flagged_groups' | 'all_points' | 'none'
+  groups?: number
+  groups_called?: number
+  flagged_points?: number | null
   generated: number
   kept: number
   rejected: Array<{ task: string; reason: string }>
   adjusted: Array<{ task: string; field: string; value: string; reason: string }>
   generated_at?: string
+  importance?: ImportanceSummary
 }
 
 interface AgendaLike {

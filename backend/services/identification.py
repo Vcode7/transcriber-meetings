@@ -132,6 +132,255 @@ def _average_embeddings(embeddings: List[np.ndarray]) -> Optional[np.ndarray]:
 
 
 
+def _setting(name: str, default):
+    try:
+        from config import settings
+        return getattr(settings, name, default)
+    except Exception:
+        return default
+
+
+def _clean_speech_spans(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """
+    Sub-spans of ``seg`` that lie outside its overlap windows (``overlap_regions``).
+
+    A long turn with a short interruption keeps everything but the interruption, so
+    it still contributes to its speaker's embedding.
+    """
+    spans = [(float(seg["start"]), float(seg["end"]))]
+    for region in seg.get("overlap_regions") or []:
+        o_start, o_end = float(region["start"]), float(region["end"])
+        next_spans = []
+        for s, e in spans:
+            if o_end <= s or o_start >= e:
+                next_spans.append((s, e))
+                continue
+            if o_start > s:
+                next_spans.append((s, o_start))
+            if o_end < e:
+                next_spans.append((o_end, e))
+        spans = next_spans
+    return [(s, e) for s, e in spans if e - s > 0.05]
+
+
+def _segment_clean_audio(
+    audio: np.ndarray, sr: int, seg: Dict[str, Any], mask_overlap: bool
+) -> np.ndarray:
+    """
+    Single-speaker audio of a segment for embedding.
+
+    mask_overlap=True  → concatenation of the segment's non-overlapping spans.
+    mask_overlap=False → legacy behaviour: whole segment, or nothing if it is flagged
+                         as overlapping.
+    """
+    if not mask_overlap:
+        if seg.get("is_overlap"):
+            return audio[:0]
+        return audio[int(seg["start"] * sr):int(seg["end"] * sr)]
+    pieces = [audio[int(s * sr):int(e * sr)] for s, e in _clean_speech_spans(seg)]
+    if not pieces:
+        return audio[:0]
+    return pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
+
+
+def _embed_audio(audio: np.ndarray, sr: int, model: str) -> Optional[np.ndarray]:
+    emb = embedding_router.vad_extract_speaker_embedding(audio, sr=sr, model=model)
+    if emb is None:
+        emb = embedding_router.extract_embedding(audio, sr=sr, model=model)
+    return emb
+
+
+def compute_speaker_embeddings(
+    audio: np.ndarray,
+    sr: int,
+    segments: List[Dict[str, Any]],
+    model: str,
+    mask_overlap: Optional[bool] = None,
+) -> Tuple[Dict[str, Optional[np.ndarray]], Dict[int, np.ndarray]]:
+    """
+    Embed every diarization speaker.
+
+    Returns (speaker_to_embedding, segment_embeddings):
+      speaker_to_embedding : raw speaker id → L2-normalised mean embedding (None if no
+                             usable audio).
+      segment_embeddings   : index into ``segments`` → embedding, for segments whose
+                             clean audio is at least MIN_SEGMENT_DURATION long.
+
+    A speaker with no turn long enough is embedded from its short turns concatenated,
+    provided they add up to SPEAKER_SHORT_TURN_CONCAT_MIN_SEC — short-reply speakers
+    then still get identified instead of falling back to "Speaker N".
+    """
+    if mask_overlap is None:
+        mask_overlap = bool(_setting("SPEAKER_EMBED_MASK_OVERLAP", True))
+    min_embed_samples = int(sr * float(_setting("MIN_SEGMENT_DURATION", 1.5)))
+    concat_min_samples = int(sr * float(_setting("SPEAKER_SHORT_TURN_CONCAT_MIN_SEC", 3.0)))
+
+    by_speaker: Dict[str, List[int]] = {}
+    for i, seg in enumerate(segments):
+        by_speaker.setdefault(seg["speaker"], []).append(i)
+
+    speaker_to_embedding: Dict[str, Optional[np.ndarray]] = {}
+    segment_embeddings: Dict[int, np.ndarray] = {}
+    for raw_id, indices in by_speaker.items():
+        seg_embs = []
+        short_pieces: List[np.ndarray] = []
+        masked_sec = 0.0
+        for i in indices:
+            seg = segments[i]
+            seg_audio = _segment_clean_audio(audio, sr, seg, mask_overlap)
+            if seg.get("is_overlap"):
+                masked_sec += (seg["end"] - seg["start"]) - len(seg_audio) / sr
+            if len(seg_audio) < min_embed_samples:
+                if len(seg_audio) > 0:
+                    short_pieces.append(seg_audio)
+                continue
+            emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=model)
+            if emb is not None:
+                seg_embs.append(emb)
+                segment_embeddings[i] = emb
+
+        source = "segments"
+        if not seg_embs and short_pieces:
+            joined = np.concatenate(short_pieces)
+            if len(joined) >= concat_min_samples:
+                emb = _embed_audio(joined, sr, model)
+                if emb is not None:
+                    seg_embs.append(emb)
+                    source = f"{len(short_pieces)} short turns concatenated ({len(joined) / sr:.1f}s)"
+
+        mean_emb = _average_embeddings(seg_embs) if seg_embs else None
+        speaker_to_embedding[raw_id] = mean_emb
+        logger.info(
+            f"[Identify] Speaker '{raw_id}': mean embedding from {source} "
+            f"({len(seg_embs)} embeddings / {len(indices)} turns, {masked_sec:.1f}s overlap masked) "
+            f"{'OK' if mean_emb is not None else 'FAILED — too little clean speech'}"
+        )
+    return speaker_to_embedding, segment_embeddings
+
+
+def _snorm_scores(
+    raw: np.ndarray, query_cohort: np.ndarray, profile_cohort: np.ndarray
+) -> np.ndarray:
+    """
+    Symmetric score normalisation.
+
+    raw            : (S, P) speaker × profile cosine scores
+    query_cohort   : (S, P) — same matrix; for (s, p) the cohort is row s without column p
+    profile_cohort : (P, P) profile-centroid × profile-centroid scores; cohort for p is
+                     row p without the diagonal
+    """
+    S, P = raw.shape
+    out = np.zeros_like(raw)
+    sd_floor = 0.05  # small cohorts can have ~0 spread; don't let that explode the z-score
+    for p in range(P):
+        others = [q for q in range(P) if q != p]
+        p_scores = profile_cohort[p, others]
+        mu_p, sd_p = float(np.mean(p_scores)), max(float(np.std(p_scores)), sd_floor)
+        for s in range(S):
+            s_scores = query_cohort[s, others]
+            mu_s, sd_s = float(np.mean(s_scores)), max(float(np.std(s_scores)), sd_floor)
+            out[s, p] = 0.5 * ((raw[s, p] - mu_s) / sd_s + (raw[s, p] - mu_p) / sd_p)
+    return out
+
+
+def _assign_one_to_one(accept: np.ndarray, scores: np.ndarray, hungarian: bool) -> List[Tuple[int, int]]:
+    """
+    One-to-one speaker↔profile assignment restricted to accepted pairs.
+
+    hungarian=True maximises the total score of accepted pairs, so one speaker can no
+    longer take a profile that a second speaker matches almost as well while leaving
+    that second speaker with nothing. Falls back to greedy if scipy is unavailable.
+    """
+    if not accept.any():
+        return []
+    if hungarian:
+        try:
+            from scipy.optimize import linear_sum_assignment
+            weights = np.where(accept, scores + 1.0, 0.0)  # +1: an accepted pair always beats no pair
+            rows, cols = linear_sum_assignment(-weights)
+            return [(int(r), int(c)) for r, c in zip(rows, cols) if accept[r, c]]
+        except ImportError:
+            logger.warning("[Identify] scipy unavailable — greedy speaker assignment.")
+    pairs = []
+    used_s, used_p = set(), set()
+    order = np.dstack(np.unravel_index(np.argsort(-scores, axis=None), scores.shape))[0]
+    for s, p in order:
+        if s in used_s or p in used_p or not accept[s, p]:
+            continue
+        pairs.append((int(s), int(p)))
+        used_s.add(s)
+        used_p.add(p)
+    return pairs
+
+
+def _split_merged_clusters(
+    segments: List[Dict[str, Any]],
+    segment_embeddings: Dict[int, np.ndarray],
+    speaker_to_embedding: Dict[str, Optional[np.ndarray]],
+    resolution: Dict[str, tuple],
+    unmatched_profiles: List[Tuple[str, str, np.ndarray]],
+    profile_centroid_by_id: Dict[str, np.ndarray],
+    threshold: float,
+) -> Tuple[List[Dict[str, Any]], Dict[str, tuple]]:
+    """
+    Profile-guided split of clusters that pyannote merged.
+
+    When a selected participant is left unmatched, it was most likely clustered
+    together with someone else. Every turn with its own embedding is scored against
+    its cluster's current identity (matched profile centroid, else cluster mean) and
+    against each unmatched profile; turns that clearly sound like an unmatched
+    participant move to a new speaker id. A split is only accepted with enough turns
+    and seconds behind it — otherwise nothing changes.
+
+    Returns (segments, new_resolutions) — segments are copies with ``speaker`` updated.
+    """
+    from services.embedding import cosine_similarity
+    from config import settings
+
+    margin = float(getattr(settings, "SPEAKER_SPLIT_MARGIN", 0.10))
+    min_segs = int(getattr(settings, "SPEAKER_SPLIT_MIN_SEGMENTS", 2))
+    min_sec = float(getattr(settings, "SPEAKER_SPLIT_MIN_SECONDS", 4.0))
+
+    moves: Dict[int, List[Tuple[int, float]]] = {}  # unmatched idx → [(segment idx, sim)]
+    for i, emb in segment_embeddings.items():
+        raw_id = segments[i]["speaker"]
+        pid = resolution.get(raw_id, (None, None))[1]
+        reference = profile_centroid_by_id.get(pid) if pid else speaker_to_embedding.get(raw_id)
+        if reference is None:
+            continue
+        current = cosine_similarity(emb, reference)
+        best_u, best_sim = None, -1.0
+        for u, (_label, _pid, centroid) in enumerate(unmatched_profiles):
+            sim = cosine_similarity(emb, centroid)
+            if sim > best_sim:
+                best_u, best_sim = u, sim
+        if best_u is not None and best_sim >= threshold and best_sim - current >= margin:
+            moves.setdefault(best_u, []).append((i, best_sim))
+
+    new_segments = [dict(s) for s in segments]
+    new_resolutions: Dict[str, tuple] = {}
+    for u, moved in moves.items():
+        label, pid, _ = unmatched_profiles[u]
+        seconds = sum(e - s for i, _ in moved for s, e in _clean_speech_spans(segments[i]))
+        if len(moved) < min_segs or seconds < min_sec:
+            logger.info(
+                f"[Identify] Split for '{label}' rejected: {len(moved)} turns / {seconds:.1f}s "
+                f"(need {min_segs} turns and {min_sec:.1f}s)"
+            )
+            continue
+        new_id = f"SPEAKER_SPLIT_{len(new_resolutions):02d}"
+        for i, _ in moved:
+            new_segments[i]["speaker"] = new_id
+        mean_sim = float(np.mean([sim for _, sim in moved]))
+        new_resolutions[new_id] = (label, pid, round(mean_sim, 4), "cluster_split")
+        sources = sorted({segments[i]["speaker"] for i, _ in moved})
+        logger.info(
+            f"[Identify] Split: {len(moved)} turns ({seconds:.1f}s) from {sources} → "
+            f"'{label}' as {new_id} (mean sim={mean_sim:.4f})"
+        )
+    return new_segments, new_resolutions
+
+
 def _compute_profile_centroid(
     stored_embeddings: list,
     expected_dim: int = EMBEDDING_DIM,
@@ -212,6 +461,7 @@ def identify_speakers(
     similarity_threshold: float = 0.75,
     use_model_default_threshold: bool = True,
     embedding_model: str = None,
+    participants_selected: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Perform speaker identification at the SPEAKER level (not per-segment).
@@ -219,11 +469,16 @@ def identify_speakers(
     Workflow:
       1. Resolve the effective similarity threshold (ECAPA-TDNN default or caller value).
       2. Group all segments by raw diarization speaker ID.
-      3. For each unique diarization speaker, extract ECAPA-TDNN embeddings from
-         every non-overlap segment and compute the L2-normalised mean embedding.
+      3. For each unique diarization speaker, embed the single-speaker parts of its
+         turns (overlap windows masked out) and compute the L2-normalised mean
+         embedding; speakers with only short turns use those turns concatenated.
       4. For each voice profile compute its centroid (or use single sample).
-      5. Match the speaker's mean embedding against each profile's centroid.
-      6. Propagate the resolved label to all segments for that speaker.
+      5. Match speakers to profiles one-to-one (Hungarian over accepted pairs,
+         optional S-norm rescue of borderline scores).
+      6. If ``participants_selected`` and a participant stayed unmatched, move turns
+         that clearly sound like that participant out of merged clusters into a new
+         speaker (SPEAKER_SPLIT_xx, scoring_method "cluster_split").
+      7. Propagate the resolved label to all segments for that speaker.
 
     Args:
         file_path:              Path to the audio file.
@@ -237,6 +492,8 @@ def identify_speakers(
         use_model_default_threshold:
                                 When True (default), auto-substitute a better
                                 threshold when the legacy value is detected.
+        participants_selected:  voice_profiles is the meeting's selected
+                                participant list (enables cluster splitting).
 
     Returns:
         Enriched segments:
@@ -262,41 +519,13 @@ def identify_speakers(
 
     audio, sr = load_audio(file_path, target_sr=16000)
 
-    # ── Step 1: Group segments by raw diarization speaker ID ─────────────────
-    speaker_to_segs: Dict[str, List[Dict]] = {}
-    for seg in diarization_segments:
-        if seg.get("is_overlap"):
-            continue
-        raw_id = seg["speaker"]
-        speaker_to_segs.setdefault(raw_id, []).append(seg)
-
-    # ── Step 2: Build a mean ECAPA-TDNN embedding per diarization speaker ────────
-    # Diarization keeps short turns for word assignment; only turns of at least
-    # MIN_SEGMENT_DURATION are reliable enough to contribute to the speaker embedding.
-    from config import settings as _settings
-    min_embed_samples = sr * float(getattr(_settings, "MIN_SEGMENT_DURATION", 1.5))
-    speaker_to_embedding: Dict[str, Optional[np.ndarray]] = {}
-    for raw_id, segs in speaker_to_segs.items():
-        seg_embeddings = []
-        for seg in segs:
-            start = seg["start"]
-            end = seg["end"]
-            s_idx = int(start * sr)
-            e_idx = int(end * sr)
-            seg_audio = audio[s_idx:e_idx]
-            if len(seg_audio) < min_embed_samples:
-                # Too short for a reliable embedding — skip cheaply before VAD
-                continue
-            emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=active_model)
-            if emb is not None:
-                seg_embeddings.append(emb)
-        mean_emb = _average_embeddings(seg_embeddings) if seg_embeddings else None
-        speaker_to_embedding[raw_id] = mean_emb
-        logger.info(
-            f"[Identify] Speaker '{raw_id}': built mean embedding from "
-            f"{len(seg_embeddings)}/{len(segs)} segments "
-            f"({'OK' if mean_emb is not None else 'FAILED — too short'})"
-        )
+    # ── Step 1+2: One mean embedding per diarization speaker ─────────────────
+    # Turns touching an overlap are masked (only their single-speaker parts are
+    # embedded), and speakers with only short turns are embedded from those turns
+    # concatenated — see compute_speaker_embeddings.
+    speaker_to_embedding, segment_embeddings = compute_speaker_embeddings(
+        audio, sr, diarization_segments, active_model
+    )
 
     # ── Step 3: Pre-compute profile centroids (Strict Model Isolation) ───────
     # We only consider profiles that have embeddings matching active_model.
@@ -330,123 +559,153 @@ def identify_speakers(
             f"(expected {active_dim}-d embeddings). Speaker identification will assign generic labels."
         )
 
+    # Unique compatible profiles: (label, profile_id, centroid, method, stored)
+    profiles: List[Tuple[str, str, Optional[np.ndarray], str, list]] = []
+    seen_profile_keys: Set[str] = set()
+    for profile in voice_profiles:
+        label = profile.get("label", "?")
+        if label not in profile_centroids:
+            continue
+        profile_id = str(profile.get("_id", profile.get("id", "")))
+        key = profile_id or label
+        if key in seen_profile_keys:
+            continue
+        seen_profile_keys.add(key)
+        centroid, method, stored = profile_centroids[label]
+        profiles.append((label, profile_id, centroid, method, stored))
+
     # ── Step 4: Match each unique speaker against voice profiles ─────────────
-    sorted_speakers = sorted(speaker_to_segs.keys())
-    generic_counter_map: Dict[str, int] = {
-        spk: idx + 1 for idx, spk in enumerate(sorted_speakers)
-    }
+    all_raw_ids = sorted({seg["speaker"] for seg in diarization_segments})
+    generic_counter_map: Dict[str, int] = {spk: idx + 1 for idx, spk in enumerate(all_raw_ids)}
 
     # Result: raw diarization id → (human_label, profile_id, similarity, scoring_method)
     speaker_resolution: Dict[str, tuple] = {}
 
-    # 1. Compute similarity for all speaker-profile pairs
-    candidates = []
-
-    for raw_id, mean_emb in speaker_to_embedding.items():
+    from services.embedding import cosine_similarity
+    scorable = []
+    for raw_id in all_raw_ids:
+        mean_emb = speaker_to_embedding.get(raw_id)
         if mean_emb is None:
             logger.warning(f"[Identify] Speaker '{raw_id}' has no usable embedding — generic label.")
             continue
-        if not profile_centroids:
-            continue
-
-        # Dimension safety check on query embedding
         if len(mean_emb) != active_dim:
             logger.error(
                 f"[Identify] Speaker '{raw_id}' embedding dimension {len(mean_emb)} does not "
                 f"match expected {active_dim} for {active_model}. Skipping similarity calculation."
             )
             continue
+        scorable.append(raw_id)
 
-        for profile in voice_profiles:
-            label = profile.get("label", "?")
-            if label not in profile_centroids:
-                # Incompatible profile for active model — strictly skip
-                continue
+    best_sim_by_speaker: Dict[str, float] = {}
+    if scorable and profiles:
+        raw_scores = np.zeros((len(scorable), len(profiles)), dtype=np.float64)
+        methods = [[""] * len(profiles) for _ in scorable]
+        for s, raw_id in enumerate(scorable):
+            mean_emb = speaker_to_embedding[raw_id]
+            for p, (label, _pid, centroid, method, stored) in enumerate(profiles):
+                if centroid is not None and len(centroid) == len(mean_emb):
+                    raw_scores[s, p] = cosine_similarity(mean_emb, centroid)
+                    methods[s][p] = method
+                elif stored:
+                    raw_scores[s, p] = best_match_similarity(mean_emb, stored)
+                    methods[s][p] = "sample_max_fallback"
+                logger.info(
+                    f"[Identify] Speaker '{raw_id}' vs profile '{label}': "
+                    f"similarity={raw_scores[s, p]:.4f} (method={methods[s][p]}, "
+                    f"threshold={effective_threshold:.4f})"
+                )
+            best_sim_by_speaker[raw_id] = float(raw_scores[s].max())
 
-            centroid, method, stored = profile_centroids[label]
-            profile_id = str(profile.get("_id", profile.get("id", "")))
+        accept = raw_scores >= effective_threshold
 
-            if centroid is not None:
-                from services.embedding import cosine_similarity
-                if len(centroid) != len(mean_emb):
-                    logger.error(
-                        f"[Identify] Dimension mismatch between centroid ({len(centroid)}) "
-                        f"and query ({len(mean_emb)}). Skipping similarity."
+        # S-norm can only rescue borderline matches (within 0.10 below the threshold)
+        # whose score stands out clearly against the other enrolled profiles.
+        min_cohort = int(_setting("SPEAKER_SNORM_MIN_COHORT", 3))
+        if _setting("SPEAKER_SCORE_NORMALIZATION", False) and len(profiles) - 1 >= min_cohort:
+            centroids = [c for _l, _i, c, _m, _s in profiles]
+            if all(c is not None for c in centroids):
+                profile_cohort = np.array([[cosine_similarity(a, b) for b in centroids] for a in centroids])
+                normed = _snorm_scores(raw_scores, raw_scores, profile_cohort)
+                snorm_thr = float(_setting("SPEAKER_SNORM_THRESHOLD", 2.0))
+                rescued = (~accept) & (normed >= snorm_thr) & (raw_scores >= effective_threshold - 0.10)
+                for s, p in zip(*np.nonzero(rescued)):
+                    logger.info(
+                        f"[Identify] S-norm rescue: '{scorable[s]}' vs '{profiles[p][0]}' "
+                        f"raw={raw_scores[s, p]:.4f} snorm={normed[s, p]:.2f}"
                     )
+                accept = accept | rescued
+
+        pairs = _assign_one_to_one(
+            accept, raw_scores, hungarian=bool(_setting("SPEAKER_ASSIGNMENT_HUNGARIAN", True))
+        )
+        for s, p in pairs:
+            raw_id = scorable[s]
+            label, profile_id, _c, _m, _st = profiles[p]
+            sim = float(raw_scores[s, p])
+            speaker_resolution[raw_id] = (label, profile_id, round(sim, 4), methods[s][p])
+            logger.info(
+                f"[Identify] Speaker '{raw_id}' → MATCHED '{label}' "
+                f"(sim={sim:.4f}, method={methods[s][p]})"
+            )
+
+        # Over-split clusters (one person split in two, e.g. when min_speakers exceeds
+        # the people who actually spoke): an unmatched cluster whose best profile is
+        # already taken and still clears the threshold gets that profile's label too,
+        # instead of a misleading "Speaker N".
+        if _setting("SPEAKER_MERGE_DUPLICATE_CLUSTERS", True):
+            for s, raw_id in enumerate(scorable):
+                if raw_id in speaker_resolution:
                     continue
-                sim = cosine_similarity(mean_emb, centroid)
-                used_method = method
-            elif stored:
-                sim = best_match_similarity(mean_emb, stored)
-                used_method = "sample_max_fallback"
-            else:
-                continue
+                p = int(np.argmax(raw_scores[s]))
+                sim = float(raw_scores[s, p])
+                if sim < effective_threshold:
+                    continue
+                label, profile_id, _c, _m, _st = profiles[p]
+                speaker_resolution[raw_id] = (label, profile_id, round(sim, 4), "merged_duplicate")
+                logger.info(
+                    f"[Identify] Speaker '{raw_id}' → '{label}' as duplicate cluster "
+                    f"(sim={sim:.4f}; profile already matched by another cluster)"
+                )
 
-            logger.info(
-                f"[Identify] Speaker '{raw_id}' vs profile '{label}': "
-                f"similarity={sim:.4f} (method={used_method}, "
-                f"threshold={effective_threshold:.4f})"
-            )
+    # ── Step 4b: Split clusters that merged a selected participant ───────────
+    matched_profile_keys = {res[1] or res[0] for res in speaker_resolution.values()}
+    unmatched_profiles = [
+        (label, pid, centroid)
+        for label, pid, centroid, _m, _s in profiles
+        if centroid is not None and (pid or label) not in matched_profile_keys
+    ]
+    if (
+        participants_selected
+        and unmatched_profiles
+        and segment_embeddings
+        and _setting("SPEAKER_CLUSTER_SPLIT_ENABLED", True)
+    ):
+        profile_centroid_by_id = {pid: c for _l, pid, c, _m, _s in profiles if pid and c is not None}
+        diarization_segments, split_resolutions = _split_merged_clusters(
+            diarization_segments,
+            segment_embeddings,
+            speaker_to_embedding,
+            speaker_resolution,
+            unmatched_profiles,
+            profile_centroid_by_id,
+            effective_threshold,
+        )
+        speaker_resolution.update(split_resolutions)
+        # A cluster whose every turn moved no longer exists; drop its stale entry.
+        remaining = {seg["speaker"] for seg in diarization_segments}
+        speaker_resolution = {k: v for k, v in speaker_resolution.items() if k in remaining}
 
-            candidates.append({
-                "similarity": sim,
-                "raw_id": raw_id,
-                "label": label,
-                "profile_id": profile_id,
-                "method": used_method,
-            })
-
-    # 2. Sort candidates in descending order of similarity
-    candidates.sort(key=lambda x: x["similarity"], reverse=True)
-
-    # 3. Greedy selection of non-overlapping matches above threshold
-    resolved_speakers = set()
-    resolved_profiles = set()
-
-    for cand in candidates:
-        sim = cand["similarity"]
-        raw_id = cand["raw_id"]
-        label = cand["label"]
-        profile_id = cand["profile_id"]
-        method = cand["method"]
-
-        # Once a speaker or profile is matched, skip other options for them
-        if raw_id in resolved_speakers:
+    # Resolve remaining speakers to generic labels
+    for raw_id in sorted({seg["speaker"] for seg in diarization_segments}):
+        if raw_id in speaker_resolution:
             continue
-        profile_key = profile_id or label
-        if profile_key in resolved_profiles:
-            continue
-
-        # Match check
-        if sim >= effective_threshold:
-            speaker_resolution[raw_id] = (label, profile_id, round(sim, 4), method)
-            resolved_speakers.add(raw_id)
-            resolved_profiles.add(profile_key)
-            logger.info(
-                f"[Identify] Speaker '{raw_id}' → MATCHED '{label}' via Greedy Matching "
-                f"(sim={sim:.4f}, method={method})"
-            )
-
-    # 4. Resolve remaining speakers to generic labels
-    for raw_id in speaker_to_segs.keys():
-        if raw_id not in resolved_speakers:
-            generic_n = generic_counter_map.get(raw_id, 1)
-            resolved_label = f"Speaker {generic_n}"
-
-            # Find the best similarity this speaker had (even if below threshold/skipped)
-            best_sim = 0.0
-            for cand in candidates:
-                if cand["raw_id"] == raw_id:
-                    best_sim = max(best_sim, cand["similarity"])
-
-            speaker_resolution[raw_id] = (
-                resolved_label, None, round(best_sim, 4), "no_match"
-            )
-            logger.info(
-                f"[Identify] Speaker '{raw_id}' → NO MATCH (best_sim={best_sim:.4f}) "
-                f"→ assigned '{resolved_label}'"
-            )
-
+        resolved_label = f"Speaker {generic_counter_map.get(raw_id, len(generic_counter_map) + 1)}"
+        best_sim = best_sim_by_speaker.get(raw_id, 0.0)
+        speaker_resolution[raw_id] = (resolved_label, None, round(best_sim, 4), "no_match")
+        logger.info(
+            f"[Identify] Speaker '{raw_id}' → NO MATCH (best_sim={best_sim:.4f}) "
+            f"→ assigned '{resolved_label}'"
+        )
 
     # ── Step 5: Build enriched segment list ──────────────────────────────────
     all_raw_ids = {seg["speaker"] for seg in diarization_segments}
@@ -663,25 +922,27 @@ def refine_transcript_speakers_with_ecapa(
     speaker_key_to_meta: Dict[str, Tuple[str, Optional[str]]] = {}
     segment_embeddings: Dict[int, np.ndarray] = {}
 
+    # Overlapping segments contribute (and can be re-labelled) through their
+    # single-speaker parts only; with masking disabled they are skipped as before.
+    mask_overlap = bool(_setting("SPEAKER_EMBED_MASK_OVERLAP", True))
+
     logger.info("[Refine] Extracting segment embeddings for conversation centroids...")
     for i, seg in enumerate(speaker_segments):
-        if seg.get("is_overlap"):
-            continue
         spk_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
         if _is_multi_speaker_label(spk_label):
             logger.debug(f"[Refine] Skipping multi-speaker segment for centroid: '{spk_label}'")
             continue
-        start = seg["start"]
-        end = seg["end"]
-        if (end - start) < min_seg_sec:
+        if seg.get("from_separation"):
             continue
-        s_idx = int(start * sr)
-        e_idx = int(end * sr)
-        seg_audio = audio[s_idx:e_idx]
+        if mask_overlap:
+            clean_sec = sum(e - s for s, e in _clean_speech_spans(seg))
+        else:
+            clean_sec = 0.0 if seg.get("is_overlap") else seg["end"] - seg["start"]
+        if clean_sec < min_seg_sec:
+            continue
+        seg_audio = _segment_clean_audio(audio, sr, seg, mask_overlap)
 
-        segment_emb = embedding_router.vad_extract_speaker_embedding(seg_audio, sr=sr, model=active_model)
-        if segment_emb is None:
-            segment_emb = embedding_router.extract_embedding(seg_audio, sr=sr, model=active_model)
+        segment_emb = _embed_audio(seg_audio, sr, active_model)
 
         if segment_emb is not None:
             segment_embeddings[i] = segment_emb
@@ -705,9 +966,7 @@ def refine_transcript_speakers_with_ecapa(
     # 5. Process each segment
     logger.info(f"[Refine] Processing {len(speaker_segments)} segments...")
     for i, seg in enumerate(speaker_segments):
-        if seg.get("is_overlap"):
-            continue
-
+        # Segments without an embedding (too little clean speech) are skipped below.
         original_label = seg.get("speaker_label") or seg.get("speaker") or "Speaker 1"
         if _is_multi_speaker_label(original_label):
             logger.debug(f"[Refine] Skipping multi-speaker segment for override: '{original_label}'")

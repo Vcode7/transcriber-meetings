@@ -121,7 +121,8 @@ export default function PptInsightsView({ analysis, onExport, exporting }: Props
       {/* Insights */}
       {view === 'project' ? (
         analysis.projects.map(project => {
-          const items = project.insight_ids.map(id => byId[id]).filter(Boolean).filter(matches)
+          // Analyses saved before the backend fix lack insight_ids on single-insight projects
+          const items = (project.insight_ids ?? []).map(id => byId[id]).filter(Boolean).filter(matches)
           if (!items.length) return null
           return (
             <div key={project.name} style={card(statusColor(project.overall_status))}>
@@ -131,7 +132,7 @@ export default function PptInsightsView({ analysis, onExport, exporting }: Props
                 <SlideChips slides={project.slides} kind={unit} />
               </div>
               <p style={{ margin: '0 0 .5rem', fontSize: '.82rem', lineHeight: 1.55, color: 'hsl(var(--ink))' }}>{project.summary}</p>
-              {project.needs_attention.length > 0 && (
+              {project.needs_attention?.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: '.6rem', fontSize: '.76rem', color: 'hsl(25 85% 40%)' }}>
                   <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 2 }} />
                   <span><strong>Needs attention:</strong> {project.needs_attention.join(' · ')}</span>

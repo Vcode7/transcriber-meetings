@@ -1,13 +1,20 @@
 """
 Final ROM action points, generated per agenda.
 
-When an agenda's "Include Action Points" option is on, all of its discussion points
-(complete Stage 2 detail, never the short/medium rewrite) are analysed together by the
-LLM, and the result is checked deterministically:
+When an agenda's "Include Action Points" option is on, its discussion points (complete
+Stage 2 detail, never the short/medium rewrite) are analysed by the LLM in meeting order.
+Stage 2 flags the points that contain an action (``include_action_point``): the agenda is
+split into groups of ACTION_GROUP_SIZE points, only groups with a flagged point are sent,
+and only flagged points may produce an action; the group's other points and one neighbour
+on each side are context (who accepted, when). Final ROMs built before Stage 2 flagged
+points send every point. The result is checked deterministically:
 
-- vague, unsupported, low-priority and duplicate tasks are dropped;
+- vague, already-completed, unsupported, low-priority and duplicate tasks are dropped;
+- a task must cite a flagged point;
 - dates, numbers and acronyms in a task must come from the cited discussion points;
 - owners and deadlines the meeting did not state become "Not specified".
+
+Every kept action point then gets an importance score (40-100%, services/action_importance.py).
 
 Results are stored on the agenda (``action_points`` with ``action_points_mode ==
 "agenda"``). Older Final ROMs keep their point-level action points and are read
@@ -15,6 +22,7 @@ through ``collect_agenda_action_points`` unchanged.
 """
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -36,6 +44,7 @@ from services.fact_grounding import (
     token_overlap,
     unsupported_facts,
 )
+from services.point_classification import ACTION_RE, normalize_action_flag
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +53,12 @@ ACTION_POINTS_MODE = "agenda"
 PRIORITIES = ("high", "medium", "low")
 _PRIORITY_RANK = {p: r for r, p in enumerate(reversed(PRIORITIES))}
 
-# Characters of discussion-point JSON per LLM call; larger agendas are split chronologically.
+# Points flagged by Stage 2 are sent in chronological groups of this many points, with this
+# many neighbouring points on each side as context.
+ACTION_GROUP_SIZE = 5
+GROUP_CONTEXT_NEIGHBOURS = 1
+# Unflagged points (Final ROMs built before Stage 2 flagged points): characters of
+# discussion-point JSON per LLM call; larger agendas are split chronologically.
 INPUT_CHAR_BUDGET = 12000
 # Share of a task's content words that must appear in the discussion points it cites.
 MIN_SOURCE_OVERLAP = 0.25
@@ -77,6 +91,12 @@ _GENERIC_WORDS = {
     "issue", "issues", "point", "points", "item", "items", "discussion", "discussions", "topic", "topics",
     "needed", "required", "possible", "soon", "things", "thing", "stuff", "same", "above", "relevant",
 }
+# A task that opens with a past-tense outcome records something done in the meeting, not work to do.
+_COMPLETED_RE = re.compile(
+    r"^(?:approved|agreed|decided|presented|reviewed|discussed|noted|confirmed|adopted|voted|resolved|accepted|"
+    r"concluded|acknowledged|seconded|endorsed|ratified|briefed|explained|highlighted|reported|completed)\b",
+    re.IGNORECASE,
+)
 _ASAP_RE = re.compile(r"\b(?:asap|as soon as possible|immediately|urgent(?:ly)?|right away)\b", re.IGNORECASE)
 _TIME_UNITS = {
     "day", "days", "week", "weeks", "weekend", "month", "months", "quarter", "quarters", "year", "years",
@@ -209,18 +229,25 @@ def build_agenda_action_input(
 ) -> List[Dict[str, Any]]:
     """Every meeting discussion point of the agenda with its complete Stage 2 detail, in
     meeting order. A condensed (short/medium version) point is replaced by the complete
-    Stage 2 point it was written from."""
-    entries = []
-    seen = set()
+    Stage 2 points it was written from."""
+    resolved = []
     for point in agenda.get("discussion_points") or []:
         if not isinstance(point, dict) or point.get("is_doc_point"):
             continue  # document extracts are not things the meeting agreed on
         pid = str(point.get("id") or "").strip()
         if not pid:
             continue
-        original = point.get("original_point_id")
-        if pid not in polished_by_id and original in polished_by_id:
-            pid, point = original, polished_by_id[original]
+        if pid not in polished_by_id:
+            originals = [o for o in dict.fromkeys([point.get("original_point_id"), *(point.get("original_point_ids") or [])])
+                         if o in polished_by_id]
+            if originals:
+                resolved.extend((o, polished_by_id[o]) for o in originals)
+                continue
+        resolved.append((pid, point))
+
+    entries = []
+    seen = set()
+    for pid, point in resolved:
         if pid in seen:
             continue
         seen.add(pid)
@@ -236,8 +263,16 @@ def build_agenda_action_input(
         owner = _clean_owner(pick("action_owner"))
         speakers = _clean_list(pick("speakers")) or _clean_list(point.get("speaker"))
         entry: Dict[str, Any] = {"id": pid, "text": text}
-        if pick("point_type"):
+        # Stage 2 holds the latest (possibly user-corrected) classification.
+        if source.get("type") or point.get("type"):
+            entry["type"] = source.get("type") or point.get("type")
+        elif pick("point_type"):
             entry["point_type"] = pick("point_type")
+        for holder in (source, point):
+            flag = normalize_action_flag(holder.get("include_action_point"))
+            if flag is not None:
+                entry["include_action_point"] = flag
+                break
         if speakers:
             entry["speakers"] = speakers
         if owner:
@@ -264,9 +299,28 @@ def build_agenda_action_input(
     return entries
 
 
+_HIDDEN_FROM_LLM = {"transcript_excerpt", "include_action_point"}
+# A context point is only there to explain its neighbours; its own action hints would invite tasks.
+_HIDDEN_FROM_CONTEXT = {"candidate_actions", "owner_candidates", "action_owner"}
+
+
 def _llm_view(entry: Dict[str, Any]) -> Dict[str, Any]:
     # The transcript excerpt is only used to verify owners; it would crowd out the points.
-    return {k: v for k, v in entry.items() if k != "transcript_excerpt"}
+    # The action flag is sent as the point's role (see _group_view).
+    return {k: v for k, v in entry.items() if k not in _HIDDEN_FROM_LLM}
+
+
+def _group_view(entry: Dict[str, Any], is_target: bool) -> Dict[str, Any]:
+    view = {"id": entry["id"], "role": "target" if is_target else "context"}
+    for key, value in _llm_view(entry).items():
+        if key != "id" and (is_target or key not in _HIDDEN_FROM_CONTEXT):
+            view[key] = value
+    return view
+
+
+def _is_flagged(entry: Dict[str, Any]) -> bool:
+    # A point without a flag among flagged ones (e.g. added by hand) may still hold an action.
+    return bool(entry.get("include_action_point", True))
 
 
 def _agenda_header(agenda: Dict[str, Any]) -> Dict[str, Any]:
@@ -303,39 +357,98 @@ def split_for_budget(entries: List[Dict[str, Any]], budget: Optional[int] = None
     return chunks
 
 
-def request_agenda_action_points(
+def build_action_groups(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Chronological groups of ACTION_GROUP_SIZE points that contain a flagged point.
+
+    Each group is {"entries": [...], "target_ids": [...]}: the flagged points of the group are
+    the targets; the group's other points and GROUP_CONTEXT_NEIGHBOURS point(s) on each side
+    are context. Groups without a flagged point are left out (no LLM call).
+    """
+    groups = []
+    for start in range(0, len(entries), ACTION_GROUP_SIZE):
+        core = entries[start:start + ACTION_GROUP_SIZE]
+        target_ids = [e["id"] for e in core if _is_flagged(e)]
+        if not target_ids:
+            continue
+        lo = max(0, start - GROUP_CONTEXT_NEIGHBOURS)
+        hi = min(len(entries), start + ACTION_GROUP_SIZE + GROUP_CONTEXT_NEIGHBOURS)
+        groups.append({"entries": entries[lo:hi], "target_ids": target_ids})
+    return groups
+
+
+def plan_action_requests(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """How an agenda's points are sent to the LLM.
+
+    "flagged_groups": Stage 2 flagged the points -> one request per group with a flagged point.
+    "all_points": no point carries a flag (Final ROMs built before flagging) -> every point may
+    hold an action; the points are chunked by size and validated against the whole agenda.
+    """
+    if not entries:
+        return {"mode": "none", "batches": [], "groups": 0, "flagged_points": 0}
+    if not any("include_action_point" in e for e in entries):
+        batches = [{"entries": chunk, "target_ids": None} for chunk in split_for_budget(entries)]
+        return {"mode": "all_points", "batches": batches, "groups": len(batches), "flagged_points": None}
+    return {
+        "mode": "flagged_groups",
+        "batches": build_action_groups(entries),
+        "groups": math.ceil(len(entries) / ACTION_GROUP_SIZE),
+        "flagged_points": sum(1 for e in entries if _is_flagged(e)),
+    }
+
+
+def request_action_batch(
     provider,
     agenda: Dict[str, Any],
-    entries: List[Dict[str, Any]],
+    batch: Dict[str, Any],
     reasoning_mode: Optional[bool] = None,
+    label: str = "",
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    """LLM proposals for one agenda. Returns (items, succeeded)."""
+    """LLM proposals for one batch of an agenda's points. Returns (items, succeeded)."""
     header_json = json.dumps(_agenda_header(agenda), ensure_ascii=False, indent=2)
-    items: List[Dict[str, Any]] = []
-    succeeded = False
-    chunks = split_for_budget(entries)
-    for idx, chunk in enumerate(chunks, 1):
-        points_json = json.dumps([_llm_view(e) for e in chunk], ensure_ascii=False, indent=2)
-        try:
-            result = provider.generate_agenda_action_points(header_json, points_json, reasoning_mode=reasoning_mode)
-        except Exception as exc:
-            logger.warning(f"[AgendaActions] {agenda.get('agenda_id')}: chunk {idx}/{len(chunks)} failed: {exc}")
-            continue
-        if not isinstance(result, dict):
-            logger.warning(f"[AgendaActions] {agenda.get('agenda_id')}: chunk {idx}/{len(chunks)} returned no parsable JSON")
-            continue
-        succeeded = True
-        proposed = result.get("action_points")
-        if isinstance(proposed, list):
-            items.extend(item for item in proposed if isinstance(item, dict))
-    return items, succeeded
+    targets = batch.get("target_ids")
+    views = [_llm_view(e) if targets is None else _group_view(e, e["id"] in targets) for e in batch["entries"]]
+    points_json = json.dumps(views, ensure_ascii=False, indent=2)
+    try:
+        result = provider.generate_agenda_action_points(header_json, points_json, reasoning_mode=reasoning_mode)
+    except Exception as exc:
+        logger.warning(f"[AgendaActions] {agenda.get('agenda_id')}: batch {label} failed: {exc}")
+        return [], False
+    if not isinstance(result, dict):
+        logger.warning(f"[AgendaActions] {agenda.get('agenda_id')}: batch {label} returned no parsable JSON")
+        return [], False
+    proposed = result.get("action_points")
+    return ([item for item in proposed if isinstance(item, dict)] if isinstance(proposed, list) else []), True
 
 
-def fallback_items_from_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Stage 1/2 action items of the agenda's points, used when the LLM call fails."""
+def _owner_action_sentences(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """(sentence, owner) for sentences of a point's text that name one of its validated owners and
+    state an action ("will send", "was asked to", ...). Used when a point has an owner but no
+    structured action items (embedded Stage 1 mode)."""
+    owners = entry.get("owner_candidates") or split_owner_names(entry.get("action_owner"))
+    found = []
+    for sentence in split_sentences(entry.get("text", "")):
+        if not ACTION_RE.search(sentence):
+            continue
+        owner = next((o for o in owners if re.search(r"(?<!\w)" + re.escape(o) + r"(?!\w)", sentence, re.IGNORECASE)), None)
+        if owner:
+            found.append((sentence.strip(), owner))
+    return found
+
+
+def fallback_items_from_entries(
+    entries: List[Dict[str, Any]],
+    target_ids: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Stage 1/2 action items of the points (only the targets, when given), used when the LLM call
+    fails. A point with a validated owner but no action items gives the sentences in which that
+    owner takes on a task. Every item is still checked by validate_action_points."""
+    targets = None if target_ids is None else set(target_ids)
     items = []
     for entry in entries:
-        for cand in entry.get("candidate_actions") or []:
+        if targets is not None and entry["id"] not in targets:
+            continue
+        candidates = entry.get("candidate_actions") or []
+        for cand in candidates:
             items.append({
                 "task": cand.get("task"),
                 "owner": cand.get("owner"),
@@ -344,6 +457,16 @@ def fallback_items_from_entries(entries: List[Dict[str, Any]]) -> List[Dict[str,
                 "priority": "medium",
                 "basis": "commitment",
             })
+        if not candidates:
+            for sentence, owner in _owner_action_sentences(entry):
+                items.append({
+                    "task": sentence,
+                    "owner": owner,
+                    "deadline": None,
+                    "source_point_ids": [entry["id"]],
+                    "priority": "medium",
+                    "basis": "commitment",
+                })
     return items
 
 
@@ -400,6 +523,11 @@ def _evidence_quote(raw_evidence: Any, task: str, cited: List[Dict[str, Any]], s
     return best[:EVIDENCE_MAX_CHARS]
 
 
+def _clean_task(raw: Dict[str, Any]) -> str:
+    task = str(raw.get("task") or raw.get("action_point") or raw.get("description") or "").strip()
+    return re.sub(r"\s+", " ", task).strip(" -•*")
+
+
 def _ids_from(raw: Dict[str, Any]) -> List[str]:
     ids = raw.get("source_point_ids") or raw.get("source_point_id") or raw.get("point_ids") or raw.get("id") or []
     if isinstance(ids, (str, int)):
@@ -414,20 +542,25 @@ def validate_action_points(
     entries: List[Dict[str, Any]],
     roster: Optional[List[Dict[str, Any]]] = None,
     embedder=None,
+    target_ids: Optional[Iterable[str]] = None,
+    dedupe: bool = True,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Deterministic checks on proposed action points.
 
+    ``target_ids``: the points that may produce an action (Stage 2 flagged them); every kept
+    task cites at least one of them, the other ``entries`` only support details. None: any point.
     Returns {"kept": [...], "rejected": [{task, reason}], "adjusted": [{task, field, value, reason}]}.
     Kept items use None for an unstated owner/deadline (see ``finalize_action_point``).
     """
     by_id = {e["id"]: e for e in entries}
+    target_set = None if target_ids is None else {str(t) for t in target_ids}
+    targets = entries if target_set is None else [e for e in entries if e["id"] in target_set]
     kept: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
     adjusted: List[Dict[str, Any]] = []
 
     for raw in items:
-        task = str(raw.get("task") or raw.get("action_point") or raw.get("description") or "").strip()
-        task = re.sub(r"\s+", " ", task).strip(" -•*")
+        task = _clean_task(raw)
         if not task:
             continue
 
@@ -437,13 +570,19 @@ def validate_action_points(
         if is_vague_task(task):
             reject("vague: no specific deliverable")
             continue
+        if _COMPLETED_RE.match(task):
+            reject("describes work completed in the meeting, not a task")
+            continue
 
         ids = [i for i in dict.fromkeys(_ids_from(raw)) if i in by_id]
-        if not ids or token_overlap(task, "\n".join(_entry_source_text(by_id[i]) for i in ids)) < MIN_SOURCE_OVERLAP:
-            # Missing or mis-cited sources: link the task to the point that supports it best.
-            best = max(entries, key=lambda e: token_overlap(task, _entry_source_text(e)), default=None)
+        cites_target = target_set is None or any(i in target_set for i in ids)
+        if not ids or not cites_target or \
+                token_overlap(task, "\n".join(_entry_source_text(by_id[i]) for i in ids)) < MIN_SOURCE_OVERLAP:
+            # Missing or mis-cited sources: link the task to the (flagged) point that supports it best.
+            best = max(targets, key=lambda e: token_overlap(task, _entry_source_text(e)), default=None)
             if best is None or token_overlap(task, _entry_source_text(best)) < RELINK_MIN_OVERLAP:
-                reject("not supported by this agenda's discussion points")
+                reject("not supported by this agenda's discussion points" if target_set is None
+                       else "not supported by a point flagged as containing an action")
                 continue
             ids = list(dict.fromkeys(ids + [best["id"]]))
         cited = [by_id[i] for i in ids]
@@ -500,6 +639,7 @@ def validate_action_points(
             continue
 
         basis = str(raw.get("basis") or "").strip().lower()
+        quote_from = [e for e in cited if target_set is None or e["id"] in target_set] or cited
         kept.append({
             "task": task,
             "assignee": owner,
@@ -507,13 +647,63 @@ def validate_action_points(
             "source_point_ids": ids,
             "priority": priority,
             "basis": basis if basis in _BASES else None,
-            "evidence_quote": _evidence_quote(raw.get("evidence"), task, cited, source_text),
+            "evidence_quote": _evidence_quote(raw.get("evidence"), task, quote_from, source_text),
             "owner_confidence": owner_confidence,
         })
 
-    kept, duplicates = dedupe_action_points(kept, embedder)
-    rejected.extend(duplicates)
+    if dedupe:
+        kept, duplicates = dedupe_action_points(kept, embedder)
+        rejected.extend(duplicates)
     return {"kept": kept, "rejected": rejected, "adjusted": adjusted}
+
+
+def validate_group_proposals(
+    points: List[Dict[str, Any]],
+    groups: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]],
+    roster: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Main-MoM action items proposed per flagged group (QwenProvider.extract_actions_from_enhanced_points).
+
+    ``points``: the Stage 2 points; ``groups``: [(group from build_action_groups, proposals)].
+    Each group's proposals are checked against that group's points exactly like the Final ROM
+    action points (validate_action_points), then duplicates across groups are merged.
+    Returns (items, rejected); items keep the MoM keys: task, owner, deadline (None when the
+    meeting stated none), source_point_id(s), expected_outcome, owner_confidence, evidence_quote.
+    """
+    polished_by_id = {p.get("id"): p for p in points if p.get("id")}
+    entries = {e["id"]: e for e in build_agenda_action_input({"discussion_points": points}, polished_by_id, {})}
+    kept: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    targets: set = set()
+    for group, proposals in groups:
+        targets.update(group["target_ids"])
+        group_entries = [entries[e["id"]] for e in group["entries"] if e["id"] in entries]
+        result = validate_action_points(proposals, group_entries, roster, target_ids=group["target_ids"], dedupe=False)
+        by_task = {_clean_task(p): p for p in proposals}
+        for item in result["kept"]:
+            proposal = by_task.get(item["task"], {})
+            item["expected_outcome"] = proposal.get("expected_outcome")
+            if item["assignee"] and proposal.get("owner_confidence"):
+                item["owner_confidence"] = proposal["owner_confidence"]  # already capped by the point's confidence
+        kept.extend(result["kept"])
+        rejected.extend(result["rejected"])
+    kept, duplicates = dedupe_action_points(kept)
+    rejected.extend(duplicates)
+
+    items = []
+    for item in kept:
+        ids = item["source_point_ids"]
+        items.append({
+            "task": item["task"],
+            "owner": item["assignee"],
+            "deadline": item["deadline"],
+            "source_point_id": next((i for i in ids if i in targets), ids[0] if ids else None),
+            "source_point_ids": ids,
+            "expected_outcome": item.get("expected_outcome"),
+            "owner_confidence": item.get("owner_confidence"),
+            "evidence_quote": item.get("evidence_quote"),
+        })
+    return items, rejected
 
 
 def _same_named_owner(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
@@ -585,10 +775,22 @@ def finalize_action_point(item: Dict[str, Any]) -> Dict[str, Any]:
         "source_point_id": (item.get("source_point_ids") or [None])[0],
         "priority": item.get("priority") or "medium",
     }
-    for key in ("basis", "evidence_quote", "owner_confidence"):
+    for key in ("basis", "evidence_quote", "owner_confidence",
+                "importance", "importance_source", "importance_reason", "importance_adjusted"):
         if item.get(key):
             entry[key] = item[key]
     return entry
+
+
+def _importance_context(item: Dict[str, Any], agenda: Dict[str, Any], entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the importance scorer needs about an action point: its agenda and the points it cites."""
+    by_id = {e["id"]: e for e in entries}
+    cited = [by_id[i] for i in item.get("source_point_ids") or [] if i in by_id]
+    return {
+        "agenda": agenda.get("title") or "",
+        "source_discussion": "\n".join(e.get("text", "") for e in cited),
+        "point_type": next((e.get("type") or e.get("point_type") for e in cited if e.get("type") or e.get("point_type")), None),
+    }
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
@@ -606,6 +808,17 @@ def _build_roster(agendas: List[Dict[str, Any]]):
         return build_roster([{"speaker_label": name} for name in names])
     except Exception:
         return None
+
+
+def _audit_source(entries: List[Dict[str, Any]], plan: Dict[str, Any], results: List[Tuple]) -> str:
+    if not entries:
+        return "no_discussion_points"
+    if not plan["batches"]:
+        return "no_flagged_points"
+    succeeded = [ok for _, _, ok in results]
+    if all(succeeded):
+        return "llm"
+    return "fallback_stage_items" if not any(succeeded) else "llm_with_fallback"
 
 
 def populate_agenda_action_points(
@@ -645,31 +858,35 @@ def populate_agenda_action_points(
         for a in targets
     }
 
-    proposals: Dict[int, Tuple[List[Dict[str, Any]], str]] = {}
-    if any(inputs.values()):
+    plans = {id(a): plan_action_requests(inputs[id(a)]) for a in targets}
+
+    # Per agenda: [(batch, proposed items, LLM succeeded)].
+    proposals: Dict[int, List[Tuple[Dict[str, Any], List[Dict[str, Any]], bool]]] = {}
+    caller_provider = provider
+    if any(plan["batches"] for plan in plans.values()):
         owns_provider = provider is None
         if owns_provider:
             from services.ai_provider import get_provider
             provider = get_provider()
         try:
             for agenda in targets:
-                entries = inputs[id(agenda)]
-                if not entries:
-                    continue
-                items, ok = request_agenda_action_points(provider, agenda, entries, reasoning_mode)
-                if ok:
-                    proposals[id(agenda)] = (items, "llm")
-                else:
-                    logger.warning(f"[{recording_id}] [AgendaActions] {agenda.get('agenda_id')}: LLM failed, "
-                                   f"using the points' extracted action items")
-                    proposals[id(agenda)] = (fallback_items_from_entries(entries), "fallback_stage_items")
+                batches = plans[id(agenda)]["batches"]
+                results = []
+                for idx, batch in enumerate(batches, 1):
+                    items, ok = request_action_batch(provider, agenda, batch, reasoning_mode, label=f"{idx}/{len(batches)}")
+                    if not ok:
+                        logger.warning(f"[{recording_id}] [AgendaActions] {agenda.get('agenda_id')}: LLM failed for batch "
+                                       f"{idx}/{len(batches)}, using the points' extracted action items")
+                        items = fallback_items_from_entries(batch["entries"], batch["target_ids"])
+                    results.append((batch, items, ok))
+                proposals[id(agenda)] = results
         finally:
             unload = getattr(provider, "unload_model", None)
             if owns_provider and callable(unload):
                 unload()
 
     embedder, owns_embedder = None, False
-    if EMBEDDING_DEDUPE and any(len(items) > 1 for items, _ in proposals.values()):
+    if EMBEDDING_DEDUPE and any(sum(len(items) for _, items, _ in res) > 1 for res in proposals.values()):
         try:
             from services.text_embedding_service import get_text_embedder
             embedder, owns_embedder = get_text_embedder(), True
@@ -678,19 +895,34 @@ def populate_agenda_action_points(
 
     roster = _build_roster(agendas)
     audits: Dict[str, Dict[str, Any]] = {}
+    scored: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []  # (final action point, scoring context)
     try:
         # Tasks already listed under another included agenda are not repeated.
-        target_ids = {id(a) for a in targets}
+        target_keys = {id(a) for a in targets}
         claimed: List[Dict[str, Any]] = [
             ap for a in agendas
-            if id(a) not in target_ids and has_agenda_action_points(a) and agenda_includes_action_points(a)
+            if id(a) not in target_keys and has_agenda_action_points(a) and agenda_includes_action_points(a)
             for ap in a["action_points"]
         ]
         for agenda in targets:
             entries = inputs[id(agenda)]
-            items, source = proposals.get(id(agenda), ([], "llm"))
-            result = validate_action_points(items, entries, roster, embedder) if items else {
-                "kept": [], "rejected": [], "adjusted": []}
+            plan = plans[id(agenda)]
+            results = proposals.get(id(agenda), [])
+            result: Dict[str, List[Dict[str, Any]]] = {"kept": [], "rejected": [], "adjusted": []}
+            for batch, items, _ in results:
+                if not items:
+                    continue
+                # Flagged groups are checked against the points the LLM saw; unflagged
+                # (older) agendas against all of their points.
+                checked = validate_action_points(
+                    items, entries if batch["target_ids"] is None else batch["entries"], roster,
+                    target_ids=batch["target_ids"], dedupe=False,
+                )
+                for key in result:
+                    result[key].extend(checked[key])
+            result["kept"], duplicates = dedupe_action_points(result["kept"], embedder)
+            result["rejected"].extend(duplicates)
+            generated = sum(len(items) for _, items, _ in results)
             kept = []
             for item in result["kept"]:
                 prior = next((c for c in claimed if not _owners_conflict(c, item) and
@@ -701,6 +933,7 @@ def populate_agenda_action_points(
                 kept.append(item)
             final = [finalize_action_point(item) for item in kept]
             claimed.extend(final)
+            scored.extend((ap, _importance_context(ap, agenda, entries)) for ap in final)
 
             agenda["action_points"] = final
             agenda["action_points_mode"] = ACTION_POINTS_MODE
@@ -709,8 +942,12 @@ def populate_agenda_action_points(
                 if isinstance(point, dict):
                     point.pop("action_points", None)
             audit = {
-                "source": source if entries else "no_discussion_points",
-                "generated": len(items),
+                "source": _audit_source(entries, plan, results),
+                "mode": plan["mode"],
+                "groups": plan["groups"],
+                "groups_called": len(plan["batches"]),
+                "flagged_points": plan["flagged_points"],
+                "generated": generated,
                 "kept": len(final),
                 "rejected": result["rejected"],
                 "adjusted": result["adjusted"],
@@ -719,11 +956,25 @@ def populate_agenda_action_points(
             agenda["action_point_audit"] = audit
             audits[str(agenda.get("agenda_id"))] = audit
             logger.info(
-                f"[{recording_id}] [AgendaActions] {agenda.get('agenda_id')}: {len(items)} proposed, "
+                f"[{recording_id}] [AgendaActions] {agenda.get('agenda_id')}: {plan['mode']}, "
+                f"{len(plan['batches'])}/{plan['groups']} group(s) sent, {generated} proposed, "
                 f"{len(final)} kept, {len(result['rejected'])} rejected ({audit['source']})"
             )
     finally:
         if owns_embedder:
             from services.text_embedding_service import unload_text_embedder
             unload_text_embedder()
+
+    # Importance of every kept action point, in one pass over all agendas, once the embedder is
+    # unloaded (one heavy model at a time).
+    if scored:
+        from services.action_importance import importance_summary, score_action_points
+
+        score_action_points(
+            [ap for ap, _ in scored], [ctx for _, ctx in scored],
+            provider=caller_provider, label=f"{recording_id} Final ROM action points",
+        )
+        for agenda in targets:
+            if isinstance(agenda.get("action_point_audit"), dict) and agenda.get("action_points"):
+                agenda["action_point_audit"]["importance"] = importance_summary(agenda["action_points"])
     return audits

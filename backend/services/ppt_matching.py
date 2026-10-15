@@ -225,8 +225,10 @@ def parse_verified(raw: str, allowed_refs: Dict[str, int]) -> List[Tuple[int, st
         if not isinstance(m, dict):
             continue
         ref = str(m.get("id", "")).strip().upper()
-        if re.fullmatch(r"\d+", ref):
-            ref = f"P{ref}"
+        # Accept "3", "P3" and ids the model decorated, e.g. "P3 [Slide 5 · Project Atlas]".
+        lead = re.match(r"P?(\d+)\b", ref)
+        if lead:
+            ref = f"P{lead.group(1)}"
         if ref not in allowed_refs:
             continue
         conf = str(m.get("confidence", "medium")).lower()
@@ -235,13 +237,51 @@ def parse_verified(raw: str, allowed_refs: Dict[str, int]) -> List[Tuple[int, st
     return out
 
 
+# Synthesis detail levels: "standard" (PPT Testing: a meeting-prep point, slides first) and "long"
+# (long-version ROM in Stage 3: the discussion point stays the base and keeps all of its content;
+# the slides add their terminology, status, dates and figures — slightly more detail per point).
+DETAIL_SUMMARY = {"standard": ("2-3 sentences", 700),
+                  "long": ("as long as the discussion point or slightly longer, never shorter", 1200)}
+
+
+def _summary_budget(long_text: str, detail: str) -> Tuple[int, int]:
+    """(max summary chars, max tokens). The long ROM keeps the whole discussion point, so its
+    budget grows with the point instead of compressing it."""
+    chars = DETAIL_SUMMARY.get(detail, DETAIL_SUMMARY["standard"])[1]
+    if detail != "long":
+        return chars, 600
+    chars = max(chars, int(len(long_text) * 1.6))
+    return chars, max(800, chars // 3 + 150)
+
+
 def build_synthesis_prompt(long_text: str, matched: List[Dict[str, Any]], meeting: Optional[date],
-                           avoid_dates: Optional[List[str]] = None) -> str:
+                           avoid_dates: Optional[List[str]] = None, detail: str = "standard") -> str:
+    sentences = DETAIL_SUMMARY.get(detail, DETAIL_SUMMARY["standard"])[0]
     extra = ""
     if avoid_dates:
-        extra = f"\n- Do NOT mention {', '.join(avoid_dates)}: that date does not appear in the sources."
+        extra += f"\n- Do NOT mention {', '.join(avoid_dates)}: that date does not appear in the sources."
     lines = [f"- {insight_point_text(i)}" + (f" [dates: {', '.join(i['dates'])}]" if i.get("dates") else "") for i in matched]
     when = f" (meeting date {meeting.strftime('%d %b %Y')})" if meeting else ""
+    if detail == "long":
+        return f"""Refine one discussion point of the minutes of a meeting{when} with the presentation reviewed in that meeting.
+
+MEETING DISCUSSION POINT (the base — keep all of its content):
+"{long_text}"
+
+MATCHING PRESENTATION FINDINGS:
+{chr(10).join(lines)}
+
+Rules:
+- Keep every fact, decision, vote, name, owner and next step of the discussion point. Do not drop any of them and do not change its subject.
+- Where the discussion refers to the same thing as the presentation, use the presentation's names and terms (the transcript may misspell them).
+- Add the status, dates and figures from the findings that concern this same subject; ignore findings about other subjects.
+- If the discussion contradicts the slides, say so in one short clause.
+- Keep every date of the discussion point exactly as it is. Attach each slide date only to the item it belongs to.
+- Write it as meeting minutes: do not mention slides, the presentation or the deck. No filler, no invented facts.{extra}
+
+Return JSON only:
+{{"headline": "<at most 12 words>", "status": "completed|ongoing|delayed|at_risk|planned|unknown",
+ "summary": "<{sentences}: the refined discussion point>", "attention": "<what needs attention next, or empty>"}}"""
     return f"""Write one meeting-prep point that combines what the presentation reported with what was said in the meeting{when}.
 
 PRESENTATION FINDINGS (authoritative for status, dates and figures):
@@ -258,7 +298,7 @@ Rules:
 
 Return JSON only:
 {{"headline": "<at most 12 words>", "status": "completed|ongoing|delayed|at_risk|planned|unknown",
- "summary": "<2-3 sentences>", "attention": "<what needs attention next, or empty>"}}"""
+ "summary": "<{sentences}>", "attention": "<what needs attention next, or empty>"}}"""
 
 
 def compose_point_text(headline: str, summary: str, attention: str) -> str:
@@ -268,13 +308,15 @@ def compose_point_text(headline: str, summary: str, attention: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def synthesize_group(long_text: str, matched: List[Dict[str, Any]], infer: InferFn, meeting: Optional[date]) -> Dict[str, str]:
+def synthesize_group(long_text: str, matched: List[Dict[str, Any]], infer: InferFn, meeting: Optional[date],
+                     detail: str = "standard") -> Dict[str, str]:
     sources = [long_text] + [f"{m.get('summary', '')} {m.get('headline', '')} {' '.join(m.get('dates', []))}" for m in matched]
     parsed: Dict[str, Any] = {}
     avoid: List[str] = []
     for attempt in range(2):  # one retry if the model introduces a date that is not in the sources
         try:
-            parsed = parse_json_object(infer(build_synthesis_prompt(long_text, matched, meeting, avoid), 600))
+            parsed = parse_json_object(infer(build_synthesis_prompt(long_text, matched, meeting, avoid, detail),
+                                             _summary_budget(long_text, detail)[1]))
         except Exception as exc:
             logger.warning(f"[PPTMatching] Synthesis failed: {exc}")
             parsed = {}
@@ -287,7 +329,7 @@ def synthesize_group(long_text: str, matched: List[Dict[str, Any]], infer: Infer
         if attempt == 1:
             parsed = {}  # still ungrounded → fall back to the slide findings
     headline = _clean_str(parsed.get("headline"), 140)
-    summary = _clean_str(parsed.get("summary"), 700)
+    summary = _clean_str(parsed.get("summary"), _summary_budget(long_text, detail)[0])
     attention = _clean_str(parsed.get("attention"), 300)
     status = _norm_choice(parsed.get("status"), STATUSES, matched[0].get("status", "unknown"))
     if len(summary) < 20:  # fall back to the slide findings themselves
@@ -309,6 +351,7 @@ def match_points(
     embed: Optional[EmbedFn] = None,
     meeting: Optional[date] = None,
     progress: Optional[Callable[[str, int, int, str], None]] = None,
+    detail: str = "standard",
 ) -> Dict[str, Any]:
     report = progress or (lambda *_: None)
     for n, ins in enumerate(insights, 1):
@@ -365,7 +408,7 @@ def match_points(
     for step, (li, group_pairs) in enumerate(ranked, 1):
         report("synthesis", step, len(ranked), f"Writing final point {step} of {len(ranked)}")
         matched = [insights[p["insight_index"]] for p in group_pairs]
-        synth = synthesize_group(long_points[li]["text"], matched, infer, meeting)
+        synth = synthesize_group(long_points[li]["text"], matched, infer, meeting, detail)
         slides = sorted({s for m in matched for s in m.get("slides", [])})
         projects = list(dict.fromkeys(m.get("project") for m in matched if m.get("project")))
         best = max(group_pairs, key=lambda p: p["score"])

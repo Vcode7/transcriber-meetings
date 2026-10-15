@@ -110,7 +110,7 @@ class AnalysisProvider:
             topics.append(topic)
         return {"topics": topics}
 
-    def generate_rom_agendas(self, agenda_text, context=""):
+    def generate_rom_agendas(self, agenda_text, context="", **kwargs):
         return {"agendas": [{"title": "Database migration", "description": "Database cluster migration to the Mumbai region",
                              "keywords": ["database", "cluster", "migration"]}]}
 
@@ -195,6 +195,27 @@ def test_classification_uses_llm_and_falls_back_per_point():
     assert result["p2"]["evidence"] == ""  # evidence not found in the text is dropped
     assert result["p4"]["source"] == "heuristic" and result["p4"]["primary_type"] == "action_item"
     assert result["p5"]["primary_type"] == "risk"
+
+
+def test_classification_reuses_model_set_stage2_types():
+    class CountingProvider:
+        payloads = []
+
+        def classify_discussion_points(self, points_json):
+            self.payloads.append([p["id"] for p in json.loads(points_json)])
+            return {"classifications": [{"point_id": "p1", "primary_type": "risk"}]}  # p1 is not asked
+
+    points = copy.deepcopy(POINTS)
+    points[0].update(type="question_answer", type_source="llm", include_action_point=False)
+    points[1].update(type="update", type_source="user", include_action_point=True)
+    points[2].update(type="decision", type_source="heuristic")  # text cues only: still classified by the LLM
+    provider = CountingProvider()
+    result = aa.classify_points(provider, points)
+
+    assert provider.payloads == [["p3", "p4", "p5", "p6"]]
+    assert result["p1"] == {"primary_type": "question", "types": ["question"], "evidence": "", "source": "stage2"}
+    assert result["p2"]["primary_type"] == "action_item" and result["p2"]["source"] == "stage2"
+    assert result["p3"]["source"] == "heuristic"
 
 
 # ── Topics and validation ────────────────────────────────────────────────────

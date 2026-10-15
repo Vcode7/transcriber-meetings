@@ -184,27 +184,10 @@ class TestMetadataSearch:
 
 
 # ══════════════════════════════════════════════════════════════════
-# RRF merge tests (inline implementation matching rom_service logic)
+# RRF merge tests (the production fusion in services/rom_retrieval.py)
 # ══════════════════════════════════════════════════════════════════
 
-def _rrf_merge(result_lists, k=60):
-    """Extracted RRF logic for standalone testing."""
-    rrf_scores = {}
-    best_entry = {}
-    for ranked in result_lists:
-        for rank, entry in enumerate(ranked, start=1):
-            key = (entry.get("_text") or entry.get("text") or "").strip()
-            if not key:
-                continue
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (k + rank)
-            if key not in best_entry or entry.get("score", 0) > best_entry[key].get("score", 0):
-                best_entry[key] = entry
-    merged = sorted(
-        best_entry.values(),
-        key=lambda e: rrf_scores.get((e.get("_text") or e.get("text") or "").strip(), 0.0),
-        reverse=True,
-    )
-    return merged
+from services.rom_retrieval import rrf_fuse as _rrf_merge  # noqa: E402
 
 
 class TestRRFMerge:
